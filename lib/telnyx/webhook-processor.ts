@@ -1,0 +1,615 @@
+import type { CallStatus, JsonObject, TranscriptStatus } from "@/lib/db-types";
+
+
+import { logError, logInfo } from "@/lib/logger";
+import { prisma } from "@/lib/workstation-db";
+import {
+  bridgeAgentLeg,
+  computeAttemptSummary,
+  decodeClientState,
+  hangupCallControlIds,
+  initiateLeadLeg,
+  isCallTerminalStatus,
+  startAttemptRecording,
+} from "@/lib/telnyx/call-flow";
+import { getPayloadValue, type TelnyxWebhookPayload } from "@/lib/telnyx/events";
+
+type ExistingCallAttempt = NonNullable<Awaited<ReturnType<typeof prisma.callAttempt.findUnique>>>;
+
+const statusProgression: Record<CallStatus, number> = {
+  dialing: 0,
+  connected: 1,
+  completed: 2,
+  failed: 2,
+  canceled: 2,
+  voicemail_detected: 3,
+};
+
+async function updateWebhookProcessing(
+  webhookRowId: string,
+  payload: JsonObject,
+  data: {
+    processedAt?: Date;
+    processingError?: string | null;
+  },
+) {
+  await prisma.telnyxWebhookEvent.update({
+    where: { id: webhookRowId },
+    data: {
+      payloadJson: payload,
+      processedAt: data.processedAt,
+      processingError: data.processingError,
+    },
+  });
+}
+
+function getPayloadNumber(payload: Record<string, unknown>, key: string) {
+  const value = payload[key];
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function getEventTimestamp(event: TelnyxWebhookPayload) {
+  return event.data.occurred_at ? new Date(event.data.occurred_at) : new Date();
+}
+
+function getCallRole(
+  attempt: ExistingCallAttempt,
+  callControlId?: string,
+  clientStateRole?: "agent" | "lead" | null,
+) {
+  if (clientStateRole) {
+    return clientStateRole;
+  }
+
+  if (callControlId && attempt.telnyxCallControlId === callControlId) {
+    return "lead";
+  }
+
+  if (callControlId && attempt.telnyxAgentCallControlId === callControlId) {
+    return "agent";
+  }
+
+  return null;
+}
+
+function shouldPromoteStatus(currentStatus: CallStatus, nextStatus: CallStatus) {
+  return statusProgression[nextStatus] >= statusProgression[currentStatus];
+}
+
+function isHumanDetectionResult(result?: string | null) {
+  return result === "human" || result === "human_business" || result === "human_residence";
+}
+
+function isMachineDetectionResult(result?: string | null) {
+  return result === "machine" || result === "beep_detected";
+}
+
+async function findAttemptFromEvent(event: TelnyxWebhookPayload) {
+  const payload = (event.data.payload ?? {}) as Record<string, unknown>;
+  const callControlId = getPayloadValue(payload, "call_control_id");
+  const callLegId = getPayloadValue(payload, "call_leg_id");
+  const callSessionId = getPayloadValue(payload, "call_session_id");
+  const clientState = decodeClientState(getPayloadValue(payload, "client_state"));
+
+  if (clientState?.attemptId) {
+    const direct = await prisma.callAttempt.findUnique({ where: { id: clientState.attemptId } });
+
+    if (direct) {
+      return direct;
+    }
+  }
+
+  const lookupConditions: Record<string, string>[] = [];
+
+  if (callControlId) {
+    lookupConditions.push({ telnyxCallControlId: callControlId }, { telnyxAgentCallControlId: callControlId });
+  }
+
+  if (callLegId) {
+    lookupConditions.push({ telnyxCallLegId: callLegId }, { telnyxAgentCallLegId: callLegId });
+  }
+
+  if (callSessionId) {
+    lookupConditions.push({ telnyxCallSessionId: callSessionId });
+  }
+
+  if (lookupConditions.length === 0) {
+    return null;
+  }
+
+  return prisma.callAttempt.findFirst({
+    where: {
+      OR: lookupConditions,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+async function syncAttemptFromEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
+  const payload = (event.data.payload ?? {}) as Record<string, unknown>;
+  const callControlId = getPayloadValue(payload, "call_control_id");
+  const callLegId = getPayloadValue(payload, "call_leg_id");
+  const callSessionId = getPayloadValue(payload, "call_session_id");
+  const connectionId = getPayloadValue(payload, "connection_id");
+  const clientState = decodeClientState(getPayloadValue(payload, "client_state"));
+  const role = getCallRole(attempt, callControlId, clientState?.role ?? null);
+
+  const data: Record<string, unknown> = {};
+
+  if (connectionId && attempt.telnyxConnectionId !== connectionId) {
+    data.telnyxConnectionId = connectionId;
+  }
+
+  if (callSessionId && attempt.telnyxCallSessionId !== callSessionId) {
+    data.telnyxCallSessionId = callSessionId;
+  }
+
+  if (role === "lead") {
+    if (callControlId && attempt.telnyxCallControlId !== callControlId) {
+      data.telnyxCallControlId = callControlId;
+    }
+
+    if (callLegId && attempt.telnyxCallLegId !== callLegId) {
+      data.telnyxCallLegId = callLegId;
+    }
+  }
+
+  if (role === "agent") {
+    if (callControlId && attempt.telnyxAgentCallControlId !== callControlId) {
+      data.telnyxAgentCallControlId = callControlId;
+    }
+
+    if (callLegId && attempt.telnyxAgentCallLegId !== callLegId) {
+      data.telnyxAgentCallLegId = callLegId;
+    }
+  }
+
+  if (Object.keys(data).length === 0) {
+    return attempt;
+  }
+
+  return prisma.callAttempt.update({
+    where: { id: attempt.id },
+    data,
+  });
+}
+
+async function updateAttemptStatus(attempt: ExistingCallAttempt, status: CallStatus, updates?: Record<string, unknown>) {
+  const nextStatus = shouldPromoteStatus(attempt.status, status) ? status : attempt.status;
+
+  return prisma.callAttempt.update({
+    where: { id: attempt.id },
+    data: {
+      status: nextStatus,
+      ...updates,
+    },
+  });
+}
+
+async function markVoicemailDetected(attempt: ExistingCallAttempt, amdResult: string | null, event: TelnyxWebhookPayload) {
+  const nextAttempt = await prisma.callAttempt.update({
+    where: { id: attempt.id },
+    data: {
+      status: "voicemail_detected",
+      outcome: "voicemail",
+      amdResult: amdResult ?? attempt.amdResult,
+      answeredAt: attempt.answeredAt ?? getEventTimestamp(event),
+    },
+  });
+
+  await hangupCallControlIds(nextAttempt.id, [
+    nextAttempt.telnyxCallControlId,
+    nextAttempt.telnyxAgentCallControlId,
+    getPayloadValue((event.data.payload ?? {}) as Record<string, unknown>, "call_control_id"),
+  ]);
+
+  return nextAttempt;
+}
+
+async function handleInitiatedEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
+  const syncedAttempt = await syncAttemptFromEvent(attempt, event);
+  const payload = (event.data.payload ?? {}) as Record<string, unknown>;
+  const clientState = decodeClientState(getPayloadValue(payload, "client_state"));
+  const role = getCallRole(syncedAttempt, getPayloadValue(payload, "call_control_id"), clientState?.role ?? null);
+
+  await updateAttemptStatus(syncedAttempt, "dialing");
+
+  if (role === "agent") {
+    const destinationNumber = getPayloadValue(payload, "to");
+
+    if (destinationNumber) {
+      const lead = await prisma.lead.findUnique({
+        where: { id: syncedAttempt.leadId },
+      });
+
+      if (lead?.phoneNumber === destinationNumber) {
+        logInfo("Skipping lead-leg dial for direct browser outbound call", {
+          callAttemptId: syncedAttempt.id,
+          destinationNumber,
+        });
+        return;
+      }
+    }
+
+    await initiateLeadLeg(syncedAttempt.id);
+  }
+}
+
+async function handleAnsweredEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
+  const syncedAttempt = await syncAttemptFromEvent(attempt, event);
+  const payload = (event.data.payload ?? {}) as Record<string, unknown>;
+  const clientState = decodeClientState(getPayloadValue(payload, "client_state"));
+  const role = getCallRole(syncedAttempt, getPayloadValue(payload, "call_control_id"), clientState?.role ?? null);
+
+  if (role === "lead") {
+    await updateAttemptStatus(syncedAttempt, "dialing");
+  }
+}
+
+async function handleMachineDetection(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
+  const syncedAttempt = await syncAttemptFromEvent(attempt, event);
+  const payload = (event.data.payload ?? {}) as Record<string, unknown>;
+  const amdResult = getPayloadValue(payload, "result") ?? getPayloadValue(payload, "machine_detection_result") ?? null;
+
+  const withAmdResult = amdResult
+    ? await prisma.callAttempt.update({
+        where: { id: syncedAttempt.id },
+        data: {
+          amdResult,
+        },
+      })
+    : syncedAttempt;
+
+  if (isMachineDetectionResult(amdResult)) {
+    await markVoicemailDetected(withAmdResult, amdResult, event);
+    return;
+  }
+
+  if (isHumanDetectionResult(amdResult)) {
+    await bridgeAgentLeg(withAmdResult.id);
+  }
+}
+
+async function handleGreetingEnded(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
+  const syncedAttempt = await syncAttemptFromEvent(attempt, event);
+  const payload = (event.data.payload ?? {}) as Record<string, unknown>;
+  const amdResult =
+    getPayloadValue(payload, "result") ??
+    getPayloadValue(payload, "machine_detection_result") ??
+    getPayloadValue(payload, "greeting_end_reason") ??
+    null;
+
+  if (!isMachineDetectionResult(amdResult)) {
+    return;
+  }
+
+  await markVoicemailDetected(syncedAttempt, amdResult, event);
+}
+
+async function handleBridgedEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
+  const syncedAttempt = await syncAttemptFromEvent(attempt, event);
+
+  await updateAttemptStatus(syncedAttempt, "connected", {
+    answeredAt: syncedAttempt.answeredAt ?? getEventTimestamp(event),
+  });
+
+  await startAttemptRecording(syncedAttempt.id);
+}
+
+function getRecordingUrl(payload: Record<string, unknown>) {
+  const recordingUrls = payload.recording_urls as Record<string, string | null> | undefined;
+  const publicUrls = payload.public_recording_urls as Record<string, string | null> | undefined;
+
+  return recordingUrls?.mp3 ?? recordingUrls?.wav ?? publicUrls?.mp3 ?? publicUrls?.wav ?? null;
+}
+
+async function handleRecordingSaved(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
+  const payload = (event.data.payload ?? {}) as Record<string, unknown>;
+  const telnyxRecordingId = getPayloadValue(payload, "recording_id") ?? event.data.id;
+
+  if (!telnyxRecordingId) {
+    return;
+  }
+
+  const recording = await prisma.callRecording.upsert({
+    where: {
+      callAttemptId: attempt.id,
+    },
+    create: {
+      callAttemptId: attempt.id,
+      telnyxRecordingId,
+      downloadUrl: getRecordingUrl(payload),
+      fileName: getPayloadValue(payload, "recording_custom_file_name"),
+      durationMillis: getPayloadNumber(payload, "duration_millis"),
+      channels: getPayloadValue(payload, "channels"),
+      rawPayloadJson: event,
+    },
+    update: {
+      telnyxRecordingId,
+      downloadUrl: getRecordingUrl(payload),
+      fileName: getPayloadValue(payload, "recording_custom_file_name"),
+      durationMillis: getPayloadNumber(payload, "duration_millis"),
+      channels: getPayloadValue(payload, "channels"),
+      rawPayloadJson: event,
+    },
+  });
+
+  await prisma.callAttempt.update({
+    where: { id: attempt.id },
+    data: {
+      recordingId: recording.id,
+    },
+  });
+}
+
+async function handleTranscriptEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload, forcedStatus?: TranscriptStatus) {
+  const payload = (event.data.payload ?? {}) as Record<string, unknown>;
+  const transcriptId = getPayloadValue(payload, "recording_transcription_id") ?? event.data.id;
+
+  if (!transcriptId) {
+    return;
+  }
+
+  const statusFromPayload = getPayloadValue(payload, "status");
+  const normalizedStatus: TranscriptStatus = forcedStatus
+    ? forcedStatus
+    : statusFromPayload === "completed"
+      ? "completed"
+      : statusFromPayload === "failed"
+        ? "failed"
+        : "pending";
+
+  const transcript = await prisma.callTranscript.upsert({
+    where: {
+      callAttemptId: attempt.id,
+    },
+    create: {
+      callAttemptId: attempt.id,
+      telnyxTranscriptId: transcriptId,
+      text: getPayloadValue(payload, "transcription_text") ?? null,
+      status: normalizedStatus,
+      rawPayloadJson: event,
+    },
+    update: {
+      telnyxTranscriptId: transcriptId,
+      text: getPayloadValue(payload, "transcription_text") ?? null,
+      status: normalizedStatus,
+      rawPayloadJson: event,
+    },
+  });
+
+  await prisma.callAttempt.update({
+    where: { id: attempt.id },
+    data: {
+      transcriptId: transcript.id,
+    },
+  });
+}
+
+function deriveDurationSeconds(payload: Record<string, unknown>) {
+  const direct = getPayloadNumber(payload, "call_duration");
+
+  if (direct !== null) {
+    return Math.max(0, Math.floor(direct));
+  }
+
+  const startTime = getPayloadValue(payload, "start_time");
+  const endTime = getPayloadValue(payload, "end_time");
+
+  if (!startTime || !endTime) {
+    return null;
+  }
+
+  const start = new Date(startTime);
+  const end = new Date(endTime);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return null;
+  }
+
+  return Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000));
+}
+
+function deriveHangupStatus(attempt: ExistingCallAttempt, role: "agent" | "lead" | null, payload: Record<string, unknown>): CallStatus {
+  if (attempt.status === "voicemail_detected") {
+    return "voicemail_detected";
+  }
+
+  if (attempt.status === "connected" || Boolean(attempt.answeredAt)) {
+    return "completed";
+  }
+
+  const hangupSource = getPayloadValue(payload, "hangup_source");
+
+  if (role === "agent" && !attempt.telnyxCallControlId && hangupSource === "caller") {
+    return "canceled";
+  }
+
+  return "failed";
+}
+
+function deriveOutcome(attempt: ExistingCallAttempt, payload: Record<string, unknown>) {
+  if (attempt.outcome) {
+    return attempt.outcome;
+  }
+
+  if (attempt.status === "voicemail_detected") {
+    return "voicemail";
+  }
+
+  const hangupCause = getPayloadValue(payload, "hangup_cause");
+
+  if (hangupCause === "timeout" || hangupCause === "no_answer") {
+    return "no_answer";
+  }
+
+  return undefined;
+}
+
+async function handleHangupEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
+  const syncedAttempt = await syncAttemptFromEvent(attempt, event);
+
+  if (syncedAttempt.endedAt && (isCallTerminalStatus(syncedAttempt.status) || syncedAttempt.status === "voicemail_detected")) {
+    return;
+  }
+
+  const payload = (event.data.payload ?? {}) as Record<string, unknown>;
+  const clientState = decodeClientState(getPayloadValue(payload, "client_state"));
+  const role = getCallRole(syncedAttempt, getPayloadValue(payload, "call_control_id"), clientState?.role ?? null);
+
+  await prisma.callAttempt.update({
+    where: { id: syncedAttempt.id },
+    data: {
+      status: deriveHangupStatus(syncedAttempt, role, payload),
+      endedAt: getPayloadValue(payload, "end_time") ? new Date(getPayloadValue(payload, "end_time")!) : getEventTimestamp(event),
+      durationSeconds: deriveDurationSeconds(payload),
+      outcome: deriveOutcome(syncedAttempt, payload),
+    },
+  });
+
+  await computeAttemptSummary(syncedAttempt.id);
+}
+
+export async function processVoiceWebhookEvent(webhookRowId: string, event: TelnyxWebhookPayload) {
+  const eventType = event.data.event_type;
+  const payloadObj = event as unknown as JsonObject;
+
+  try {
+    const attempt = await findAttemptFromEvent(event);
+
+    if (!attempt) {
+      await updateWebhookProcessing(webhookRowId, payloadObj, {
+        processedAt: new Date(),
+        processingError: null,
+      });
+      return;
+    }
+
+    switch (eventType) {
+      case "call.initiated": {
+        await handleInitiatedEvent(attempt, event);
+        break;
+      }
+      case "call.answered": {
+        await handleAnsweredEvent(attempt, event);
+        break;
+      }
+      case "call.machine.detection.ended":
+      case "call.machine.premium.detection.ended": {
+        await handleMachineDetection(attempt, event);
+        break;
+      }
+      case "call.machine.greeting.ended":
+      case "call.machine.premium.greeting.ended": {
+        await handleGreetingEnded(attempt, event);
+        break;
+      }
+      case "call.bridged": {
+        await handleBridgedEvent(attempt, event);
+        break;
+      }
+      case "call.recording.saved": {
+        await handleRecordingSaved(attempt, event);
+        break;
+      }
+      case "call.recording.transcription.saved": {
+        await handleTranscriptEvent(attempt, event, "completed");
+        break;
+      }
+      case "call.recording.transcription.failed": {
+        await handleTranscriptEvent(attempt, event, "failed");
+        break;
+      }
+      case "call.hangup": {
+        await handleHangupEvent(attempt, event);
+        break;
+      }
+      default: {
+        await syncAttemptFromEvent(attempt, event);
+
+        logInfo("Unhandled Telnyx voice webhook event", {
+          eventType,
+          webhookRowId,
+        });
+      }
+    }
+
+    await updateWebhookProcessing(webhookRowId, payloadObj, {
+      processedAt: new Date(),
+      processingError: null,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown processing error";
+
+    logError("Failed processing Telnyx voice webhook", {
+      webhookRowId,
+      eventType,
+      error: message,
+    });
+
+    await updateWebhookProcessing(webhookRowId, payloadObj, {
+      processedAt: new Date(),
+      processingError: message,
+    });
+  }
+}
+
+function mapMessagingStatus(eventType: string) {
+  if (eventType.includes("delivered")) {
+    return "delivered" as const;
+  }
+
+  if (eventType.includes("failed") || eventType.includes("undeliverable")) {
+    return "failed" as const;
+  }
+
+  if (eventType.includes("sent")) {
+    return "sent" as const;
+  }
+
+  return "queued" as const;
+}
+
+export async function processMessagingWebhookEvent(webhookRowId: string, event: TelnyxWebhookPayload) {
+  const payloadObj = event as unknown as JsonObject;
+  const payload = (event.data.payload ?? {}) as Record<string, unknown>;
+  const eventType = event.data.event_type;
+
+  try {
+    const telnyxMessageId = getPayloadValue(payload, "id") ?? getPayloadValue(payload, "message_id");
+
+    if (telnyxMessageId) {
+      await prisma.smsMessage.updateMany({
+        where: {
+          telnyxMessageId,
+        },
+        data: {
+          status: mapMessagingStatus(eventType),
+          rawPayloadJson: event,
+        },
+      });
+    }
+
+    await updateWebhookProcessing(webhookRowId, payloadObj, {
+      processedAt: new Date(),
+      processingError: null,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown processing error";
+
+    await updateWebhookProcessing(webhookRowId, payloadObj, {
+      processedAt: new Date(),
+      processingError: message,
+    });
+  }
+}
