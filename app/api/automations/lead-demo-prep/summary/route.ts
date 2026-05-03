@@ -5,7 +5,7 @@ import { getLeadDemoAutomationSummary } from "@/lib/demo-agent/automation";
 import { formatUnknownError, jsonError } from "@/lib/http";
 
 export const runtime = "nodejs";
-export const maxDuration = 900;
+export const maxDuration = 300;
 
 export async function GET(request: NextRequest) {
   const authError = await requireApiAuth(request);
