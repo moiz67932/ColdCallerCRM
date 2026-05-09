@@ -39,6 +39,52 @@ This matches the practical billing model of the Telnyx Web Dialer: one PSTN bill
 - Telnyx WebRTC JS SDK
 - Tailwind CSS + shadcn-style UI
 
+## CRM Functionality
+
+- Lead list import from CSV with column mapping, previews, and duplicate detection.
+- Calling workspace with browser WebRTC softphone, call controls, live status, and AMD voicemail handling.
+- After-call outcomes, callback scheduling, and follow-up tracking tied to call attempts.
+- Operator scripts with template variables and inline preview.
+- Operator notes with autosave and explicit save.
+- Call history filtering by search, outcome, date range, lead list, and niche.
+- Call detail view with recordings, transcripts, webhook timeline, notes, and SMS follow-up.
+- Automations to pre-prepare demo agent profiles from lead websites.
+- Settings for recordings, SMS templates, scripts, and integration health checks.
+
+## Workspace Workflow (Lead Queue + Calling)
+
+1. Import leads in the CSV importer to create a lead list.
+2. Open the Calling Workspace (Lead Queue) to see prioritized leads and select the next lead.
+3. The browser softphone registers with Telnyx WebRTC and prewarms microphone access.
+4. Click Call to create a `CallAttempt` and start a parked WebRTC call leg from the browser.
+5. The backend dials the lead PSTN leg, enables AMD, and bridges legs on human answer.
+6. On voicemail detection, the attempt is marked `voicemail_detected` and the call ends automatically.
+7. During or after the call, update outcomes, add notes, and schedule callbacks or follow-ups.
+8. Use the Script panel to customize talk tracks and preview template variable substitutions.
+9. Review recordings and transcripts after the call as Telnyx webhooks finalize them.
+
+## Automations Workflow (Demo Prep)
+
+The Automations page prepares website-derived demo profiles so the shared demo agent can activate instantly during calls.
+
+1. Open Automations and review the summary metrics (total website leads, prepared, ready, running, failed).
+2. Configure a batch:
+	- Number of leads to prepare (count).
+	- Max concurrency (1 to 5).
+	- Skip already prepared leads (default).
+	- Force re-scrape prepared leads or rescrape stale leads by age.
+3. Start the batch. The system:
+	- Selects eligible leads with a website and no active automation job.
+	- Creates a batch and per-lead jobs in Supabase.
+	- Runs jobs concurrently up to the max concurrency.
+	- Marks each job `completed`, `failed`, or `skipped_existing`.
+4. Monitor batches in real time; cancel a running batch if needed.
+5. Review Prepared Leads:
+	- Activate a ready demo profile for the shared demo agent.
+	- Re-scrape a lead when data is stale or incomplete.
+6. Review Failed Jobs and retry individual jobs.
+7. The backend automatically resumes any pending or running batches when the summary is requested.
+
 ## Required Environment Variables
 
 ```env
