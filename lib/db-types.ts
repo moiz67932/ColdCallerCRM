@@ -43,5 +43,15 @@ export const TranscriptStatus = {
 
 export type TranscriptStatus = (typeof TranscriptStatus)[keyof typeof TranscriptStatus];
 
+export const ElevenLabsDemoBindingStatus = {
+  active: "active",
+  inactive: "inactive",
+  expired: "expired",
+  replaced: "replaced",
+  failed: "failed",
+} as const;
+
+export type ElevenLabsDemoBindingStatus = (typeof ElevenLabsDemoBindingStatus)[keyof typeof ElevenLabsDemoBindingStatus];
+
 export type JsonObject = Record<string, unknown>;
 export type JsonValue = JsonObject | JsonValue[] | string | number | boolean | null;

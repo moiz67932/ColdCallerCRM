@@ -7,11 +7,20 @@ export function normalizePhoneNumber(rawValue: string, defaultCountry: "US" | "C
     return null;
   }
 
-  const parsed = trimmed.startsWith("+")
-    ? parsePhoneNumberFromString(trimmed)
-    : parsePhoneNumberFromString(trimmed, defaultCountry);
+  const parsed = (() => {
+    try {
+      return trimmed.startsWith("+")
+        ? parsePhoneNumberFromString(trimmed)
+        : parsePhoneNumberFromString(trimmed, defaultCountry);
+    } catch {
+      return null;
+    }
+  })();
 
   if (!parsed || !parsed.isValid()) {
+    const digits = trimmed.replace(/\D/g, "");
+    if (defaultCountry === "US" && digits.length === 10) return `+1${digits}`;
+    if ((defaultCountry === "US" || defaultCountry === "CA") && digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
     return null;
   }
 

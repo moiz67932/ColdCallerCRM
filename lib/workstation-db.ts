@@ -36,6 +36,7 @@ const tableNames = {
   leadWebsiteScrapeJob: "lead_website_scrape_jobs",
   leadWebsitePage: "lead_website_pages",
   leadDemoActivation: "lead_demo_activations",
+  elevenlabsDemoBinding: "elevenlabs_demo_bindings",
 } as const;
 
 const columnMaps: Record<keyof typeof tableNames, Record<string, string>> = {
@@ -167,6 +168,19 @@ const columnMaps: Record<keyof typeof tableNames, Record<string, string>> = {
     activatedBy: "activated_by",
     previousClinicId: "previous_clinic_id",
     createdAt: "created_at",
+  },
+  elevenlabsDemoBinding: {
+    organizationId: "organization_id",
+    leadId: "lead_id",
+    leadDemoProfileId: "lead_demo_profile_id",
+    elevenlabsAgentId: "elevenlabs_agent_id",
+    phoneE164: "phone_e164",
+    callerE164: "caller_e164",
+    activatedAt: "activated_at",
+    expiresAt: "expires_at",
+    createdAt: "created_at",
+    updatedAt: "updated_at",
+    metadataJson: "metadata_json",
   },
 };
 
@@ -459,6 +473,19 @@ export const leadDemoActivation = {
   create: ({ data }: { data: Record<string, unknown> }) => insertOne("leadDemoActivation", data),
 };
 
+export const elevenlabsDemoBinding = {
+  create: ({ data }: { data: Record<string, unknown> }) => insertOne("elevenlabsDemoBinding", data),
+  findUnique: ({ where }: { where: Record<string, unknown> }) => selectOne("elevenlabsDemoBinding", where),
+  async findFirst({ where, orderBy }: { where?: Record<string, unknown>; orderBy?: Record<string, SortDirection> } = {}) {
+    const rows = await this.findMany({ where, orderBy, take: 1 });
+    return rows[0] ?? null;
+  },
+  findMany: ({ where, orderBy, take }: { where?: Record<string, unknown>; orderBy?: Record<string, SortDirection>; take?: number } = {}) =>
+    selectMany("elevenlabsDemoBinding", where, { order: orderArgs(orderBy), limit: take }),
+  update: ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => updateOne("elevenlabsDemoBinding", where, data),
+  updateMany: ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => updateManyRows("elevenlabsDemoBinding", where, data),
+};
+
 const workstationDb = {
   leadList,
   lead,
@@ -474,6 +501,7 @@ const workstationDb = {
   leadWebsiteScrapeJob,
   leadWebsitePage,
   leadDemoActivation,
+  elevenlabsDemoBinding,
   $queryRaw: async () => {
     const { error } = await getSupabaseAdmin().from("lead_lists").select("id").limit(1);
     if (error) throw new Error(error.message);
