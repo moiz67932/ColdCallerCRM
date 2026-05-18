@@ -7,6 +7,18 @@ import { resolveElevenLabsDemoContext } from "@/lib/elevenlabs/resolve-demo-cont
 export const runtime = "nodejs";
 
 type JsonRecord = Record<string, unknown>;
+type NormalizedResolveInput = {
+  conversation_id: string;
+  agent_id: string;
+  caller_number: string | null;
+  called_number: string | null;
+};
+type ResolverInput = {
+  conversation_id: string;
+  agent_id: string;
+  caller_number: string;
+  called_number: string;
+};
 
 // ElevenLabs tool calls are configured with Bearer auth using ELEVENLABS_TOOL_SECRET.
 // Post-call webhooks use ElevenLabs-Signature HMAC verification instead.
@@ -61,7 +73,7 @@ function toolFailureResponse(reason: string, conversationId: string | null, agen
   });
 }
 
-function normalizeResolveInput(body: JsonRecord) {
+function normalizeResolveInput(body: JsonRecord): NormalizedResolveInput {
   const callerNumber = firstString(
     body.caller_number,
     body.caller_id,
@@ -140,12 +152,19 @@ export async function POST(request: NextRequest) {
     return missingCallContextResponse(input.conversation_id, input.agent_id);
   }
 
+  const resolverInput: ResolverInput = {
+    conversation_id: input.conversation_id,
+    agent_id: input.agent_id,
+    caller_number: input.caller_number,
+    called_number: input.called_number,
+  };
+
   try {
-    const result = await resolveElevenLabsDemoContext(input);
+    const result = await resolveElevenLabsDemoContext(resolverInput);
 
     return NextResponse.json(result);
   } catch (error) {
     console.error("Unexpected ElevenLabs resolve-demo-context tool error.", error);
-    return toolFailureResponse("Unexpected resolve-demo-context tool error.", input.conversation_id, input.agent_id);
+    return toolFailureResponse("Unexpected resolve-demo-context tool error.", resolverInput.conversation_id, resolverInput.agent_id);
   }
 }
