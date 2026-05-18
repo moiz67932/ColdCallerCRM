@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 
 import {
   extractElevenLabsConversationFields,
@@ -148,11 +149,26 @@ test("handleElevenLabsPostCallWebhook updates an existing conversation_id instea
   assert.equal(state.conversations[0].transcript, "Updated transcript.");
 });
 
-test("verifyElevenLabsWebhookRequest rejects wrong shared secret when configured", () => {
+function signedRequest(rawBody: string, secret: string, timestamp = 1_779_000_000) {
+  const digest = createHmac("sha256", secret).update(`${timestamp}.${rawBody}`, "utf8").digest("hex");
+  return new Request("http://localhost/api/webhooks/elevenlabs/post-call", {
+    method: "POST",
+    headers: { "elevenlabs-signature": `t=${timestamp},v0=${digest}` },
+  });
+}
+
+test("verifyElevenLabsWebhookRequest accepts a valid ElevenLabs HMAC signature", () => {
+  const rawBody = JSON.stringify({ conversation_id: "conv-signed" });
+  const request = signedRequest(rawBody, "expected");
+
+  assert.equal(verifyElevenLabsWebhookRequest(request, rawBody, { secret: "expected", now: new Date("2026-05-18T00:00:00Z") }), true);
+});
+
+test("verifyElevenLabsWebhookRequest rejects wrong HMAC signatures when configured", () => {
   const request = new Request("http://localhost/api/webhooks/elevenlabs/post-call", {
     method: "POST",
-    headers: { "x-elevenlabs-webhook-secret": "wrong" },
+    headers: { "elevenlabs-signature": "t=1779000000,v0=wrong" },
   });
 
-  assert.equal(verifyElevenLabsWebhookRequest(request, "{}", { secret: "expected" }), false);
+  assert.equal(verifyElevenLabsWebhookRequest(request, "{}", { secret: "expected", now: new Date("2026-05-18T00:00:00Z") }), false);
 });

@@ -84,9 +84,12 @@ test("resolveElevenLabsDemoContext returns clinic services hours and FAQs for ac
 
   assert.equal(result.ok, true);
   assert.equal(result.status, "resolved");
+  assert.equal(result.resolved, true);
   assert.equal(result.caller_e164, "+17145550101");
   assert.equal(result.phone_e164, "+13105550123");
   assert.equal(result.lead_id, "lead-1");
+  assert.match(result.context_text, /Bright Smile Dental/);
+  assert.match(result.context_text, /Teeth Whitening/);
   assert.equal(result.context.clinic.name, "Bright Smile Dental");
   assert.equal(result.context.services[0].name, "Teeth Whitening");
   assert.equal(result.context.hours.monday.open, true);

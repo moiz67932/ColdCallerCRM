@@ -1,3 +1,5 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
+
 import { env } from "@/lib/env";
 import { normalizePhoneNumber } from "@/lib/phone";
 import { prisma } from "@/lib/workstation-db";
@@ -12,6 +14,8 @@ type HandleOptions = {
 
 type VerifyOptions = {
   secret?: string;
+  now?: Date;
+  toleranceSeconds?: number;
 };
 
 export type ExtractedElevenLabsConversationFields = {
@@ -267,7 +271,30 @@ export async function handleElevenLabsPostCallWebhook(payload: unknown, options:
   };
 }
 
-export function verifyElevenLabsWebhookRequest(request: Request, _rawBody?: string, options: VerifyOptions = {}) {
+function parseElevenLabsSignature(signature: string | null) {
+  if (!signature) return null;
+
+  const parts = Object.fromEntries(
+    signature.split(",").map((part) => {
+      const [key, ...valueParts] = part.split("=");
+      return [key.trim(), valueParts.join("=").trim()];
+    }),
+  );
+
+  return {
+    timestamp: parts.t,
+    signature: parts.v0,
+  };
+}
+
+function secureCompare(expected: string, actual: string) {
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  const actualBuffer = Buffer.from(actual, "utf8");
+
+  return expectedBuffer.length === actualBuffer.length && timingSafeEqual(expectedBuffer, actualBuffer);
+}
+
+export function verifyElevenLabsWebhookRequest(request: Request, rawBody = "", options: VerifyOptions = {}) {
   const secret = options.secret ?? env.ELEVENLABS_WEBHOOK_SECRET;
 
   if (!secret) {
@@ -275,7 +302,17 @@ export function verifyElevenLabsWebhookRequest(request: Request, _rawBody?: stri
     return true;
   }
 
-  // TODO: Replace this development fallback with official ElevenLabs signature verification
-  // once the exact post-call webhook signature header format is confirmed.
-  return request.headers.get("x-elevenlabs-webhook-secret") === secret;
+  const parsed = parseElevenLabsSignature(request.headers.get("elevenlabs-signature"));
+  if (!parsed?.timestamp || !parsed.signature) return false;
+
+  const timestamp = Number(parsed.timestamp);
+  if (!Number.isFinite(timestamp)) return false;
+
+  const toleranceSeconds = options.toleranceSeconds ?? 30 * 60;
+  const nowSeconds = Math.floor((options.now ?? new Date()).getTime() / 1000);
+  if (timestamp < nowSeconds - toleranceSeconds || timestamp > nowSeconds + toleranceSeconds) return false;
+
+  const expectedSignature = `v0=${createHmac("sha256", secret).update(`${parsed.timestamp}.${rawBody}`, "utf8").digest("hex")}`;
+
+  return secureCompare(expectedSignature, `v0=${parsed.signature}`);
 }

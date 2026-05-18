@@ -19,6 +19,21 @@ type ResolveDemoContextDeps = {
   db?: ResolveDb;
 };
 
+function buildContextText(context: {
+  clinic: unknown;
+  services: unknown;
+  hours: unknown;
+  faqs: unknown;
+}) {
+  return [
+    "Clinic context for this active phone demo:",
+    `Clinic: ${JSON.stringify(context.clinic)}`,
+    `Services: ${JSON.stringify(context.services)}`,
+    `Hours: ${JSON.stringify(context.hours)}`,
+    `FAQs: ${JSON.stringify(context.faqs)}`,
+  ].join("\n");
+}
+
 export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequest, deps: ResolveDemoContextDeps = {}) {
   const db = deps.db ?? prisma;
   const callerE164 = normalizePhoneNumber(input.caller_number);
@@ -62,10 +77,17 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
   }
 
   const extractedProfile = extractedProfileSchema.parse(profile.extractedProfileJson);
+  const context = {
+    clinic: extractedProfile.clinic,
+    services: extractedProfile.services,
+    hours: extractedProfile.hours,
+    faqs: extractedProfile.faqs,
+  };
 
   return {
     ok: true,
     status: "resolved" as const,
+    resolved: true,
     conversation_id: input.conversation_id,
     agent_id: input.agent_id,
     caller_e164: callerE164,
@@ -73,11 +95,7 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
     lead_id: binding.leadId,
     lead_demo_profile_id: profile.id,
     binding_id: binding.id,
-    context: {
-      clinic: extractedProfile.clinic,
-      services: extractedProfile.services,
-      hours: extractedProfile.hours,
-      faqs: extractedProfile.faqs,
-    },
+    context_text: buildContextText(context),
+    context,
   };
 }

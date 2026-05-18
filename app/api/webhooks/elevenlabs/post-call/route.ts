@@ -15,6 +15,8 @@ export async function POST(request: NextRequest) {
     return jsonError("Invalid JSON payload.", 400);
   }
 
+  // ElevenLabs tools use ELEVENLABS_TOOL_SECRET Bearer auth. Post-call webhooks
+  // are authenticated separately with ElevenLabs-Signature HMAC over the raw body.
   if (!verifyElevenLabsWebhookRequest(request, rawBody)) {
     return jsonError("Unauthorized", 401);
   }
