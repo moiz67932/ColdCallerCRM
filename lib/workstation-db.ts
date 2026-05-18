@@ -37,6 +37,10 @@ const tableNames = {
   leadWebsitePage: "lead_website_pages",
   leadDemoActivation: "lead_demo_activations",
   elevenlabsDemoBinding: "elevenlabs_demo_bindings",
+  elevenlabsConversation: "elevenlabs_conversations",
+  appointment: "appointments",
+  appointmentType: "appointment_types",
+  appointmentTypeProvider: "appointment_type_providers",
 } as const;
 
 const columnMaps: Record<keyof typeof tableNames, Record<string, string>> = {
@@ -181,6 +185,62 @@ const columnMaps: Record<keyof typeof tableNames, Record<string, string>> = {
     createdAt: "created_at",
     updatedAt: "updated_at",
     metadataJson: "metadata_json",
+  },
+  elevenlabsConversation: {
+    conversationId: "conversation_id",
+    organizationId: "organization_id",
+    leadId: "lead_id",
+    leadDemoProfileId: "lead_demo_profile_id",
+    elevenlabsAgentId: "elevenlabs_agent_id",
+    callerE164: "caller_e164",
+    calledE164: "called_e164",
+    summaryText: "summary_text",
+    summaryJson: "summary_json",
+    analysisJson: "analysis_json",
+    metadataJson: "metadata_json",
+    rawPayloadJson: "raw_payload_json",
+    startedAt: "started_at",
+    endedAt: "ended_at",
+    receivedAt: "received_at",
+    createdAt: "created_at",
+    updatedAt: "updated_at",
+  },
+  appointment: {
+    organizationId: "organization_id",
+    clinicId: "clinic_id",
+    providerId: "provider_id",
+    appointmentTypeId: "appointment_type_id",
+    callSessionId: "call_session_id",
+    patientName: "patient_name",
+    patientPhoneMasked: "patient_phone_masked",
+    patientEmail: "patient_email",
+    startTime: "start_time",
+    endTime: "end_time",
+    insuranceInfo: "insurance_info",
+    createdAt: "created_at",
+    updatedAt: "updated_at",
+    calendarProvider: "calendar_provider",
+    calendarId: "calendar_id",
+    calendarEventId: "calendar_event_id",
+    agentId: "agent_id",
+    callLogId: "call_log_id",
+    callerName: "caller_name",
+    callerPhone: "caller_phone",
+  },
+  appointmentType: {
+    organizationId: "organization_id",
+    clinicId: "clinic_id",
+    durationMinutes: "duration_minutes",
+    createdAt: "created_at",
+    updatedAt: "updated_at",
+  },
+  appointmentTypeProvider: {
+    organizationId: "organization_id",
+    clinicId: "clinic_id",
+    appointmentTypeId: "appointment_type_id",
+    providerId: "provider_id",
+    createdAt: "created_at",
+    updatedAt: "updated_at",
   },
 };
 
@@ -486,6 +546,36 @@ export const elevenlabsDemoBinding = {
   updateMany: ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => updateManyRows("elevenlabsDemoBinding", where, data),
 };
 
+export const elevenlabsConversation = {
+  create: ({ data }: { data: Record<string, unknown> }) => insertOne("elevenlabsConversation", data),
+  findUnique: ({ where }: { where: Record<string, unknown> }) => selectOne("elevenlabsConversation", where),
+  async findFirst({ where, orderBy }: { where?: Record<string, unknown>; orderBy?: Record<string, SortDirection> } = {}) {
+    const rows = await this.findMany({ where, orderBy, take: 1 });
+    return rows[0] ?? null;
+  },
+  findMany: ({ where, orderBy, take }: { where?: Record<string, unknown>; orderBy?: Record<string, SortDirection>; take?: number } = {}) =>
+    selectMany("elevenlabsConversation", where, { order: orderArgs(orderBy), limit: take }),
+  update: ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => updateOne("elevenlabsConversation", where, data),
+  upsert: ({ where, create, update }: { where: Record<string, unknown>; create: Record<string, unknown>; update: Record<string, unknown> }) =>
+    upsertOne("elevenlabsConversation", where, create, update),
+};
+
+export const appointment = {
+  create: ({ data }: { data: Record<string, unknown> }) => insertOne("appointment", data),
+};
+
+export const appointmentType = {
+  findMany: ({ where, orderBy, take }: { where?: Record<string, unknown>; orderBy?: Record<string, SortDirection>; take?: number } = {}) =>
+    selectMany("appointmentType", where, { order: orderArgs(orderBy), limit: take }),
+};
+
+export const appointmentTypeProvider = {
+  async findFirst({ where, orderBy }: { where?: Record<string, unknown>; orderBy?: Record<string, SortDirection> } = {}) {
+    const rows = await selectMany("appointmentTypeProvider", where, { order: orderArgs(orderBy), limit: 1 });
+    return rows[0] ?? null;
+  },
+};
+
 const workstationDb = {
   leadList,
   lead,
@@ -502,6 +592,10 @@ const workstationDb = {
   leadWebsitePage,
   leadDemoActivation,
   elevenlabsDemoBinding,
+  elevenlabsConversation,
+  appointment,
+  appointmentType,
+  appointmentTypeProvider,
   $queryRaw: async () => {
     const { error } = await getSupabaseAdmin().from("lead_lists").select("id").limit(1);
     if (error) throw new Error(error.message);
