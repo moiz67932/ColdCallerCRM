@@ -10,6 +10,24 @@ function matchesWhere(row: Row, where: Row) {
   return Object.entries(where).every(([key, value]) => row[key] === value);
 }
 
+function sortRows(rows: Row[], orderBy?: Row) {
+  if (!orderBy) return rows;
+  const [[key, direction]] = Object.entries(orderBy);
+  return [...rows].sort((left, right) => {
+    const leftValue = left[key];
+    const rightValue = right[key];
+
+    if (leftValue instanceof Date && rightValue instanceof Date) {
+      const leftTime = leftValue.getTime();
+      const rightTime = rightValue.getTime();
+      return direction === "desc" ? rightTime - leftTime : leftTime - rightTime;
+    }
+
+    const comparison = String(leftValue ?? "").localeCompare(String(rightValue ?? ""));
+    return direction === "desc" ? -comparison : comparison;
+  });
+}
+
 function makeDb() {
   const profile = createEmptyExtractedProfile("https://clinic.example");
   profile.clinic.name = "Bright Smile Dental";
@@ -43,8 +61,8 @@ function makeDb() {
         id: "binding-1",
         leadId: "lead-1",
         leadDemoProfileId: "profile-1",
-        callerE164: "+17145550101",
-        phoneE164: "+13105550123",
+        callerE164: "+923351897839",
+        phoneE164: "+13103318914",
         status: "active",
         createdAt: new Date("2026-05-10T00:00:00Z"),
       },
@@ -59,7 +77,11 @@ function makeDb() {
 
   const db = {
     elevenlabsDemoBinding: {
-      findFirst: async ({ where }: { where: Row }) => state.bindings.find((row) => matchesWhere(row, where)) ?? null,
+      findFirst: async ({ where, orderBy }: { where: Row; orderBy?: Row }) => sortRows(state.bindings.filter((row) => matchesWhere(row, where)), orderBy)[0] ?? null,
+      findMany: async ({ where, orderBy }: { where?: Row; orderBy?: Row } = {}) => {
+        const rows = where ? state.bindings.filter((row) => matchesWhere(row, where)) : state.bindings;
+        return sortRows(rows, orderBy);
+      },
     },
     leadDemoProfile: {
       findUnique: async ({ where }: { where: Row }) => state.profiles.find((row) => matchesWhere(row, where)) ?? null,
@@ -75,8 +97,8 @@ test("resolveElevenLabsDemoContext returns clinic services hours and FAQs for ac
   const result = await resolveElevenLabsDemoContext(
     {
       conversation_id: "conversation-1",
-      caller_number: "(714) 555-0101",
-      called_number: "+1 (310) 555-0123",
+      caller_number: "+923351897839",
+      called_number: "+13103318914",
       agent_id: "elevenlabs-agent-1",
     },
     { db: db as never },
@@ -85,8 +107,8 @@ test("resolveElevenLabsDemoContext returns clinic services hours and FAQs for ac
   assert.equal(result.ok, true);
   assert.equal(result.status, "resolved");
   assert.equal(result.resolved, true);
-  assert.equal(result.caller_e164, "+17145550101");
-  assert.equal(result.phone_e164, "+13105550123");
+  assert.equal(result.caller_e164, "+923351897839");
+  assert.equal(result.phone_e164, "+13103318914");
   assert.equal(result.lead_id, "lead-1");
   assert.match(result.context_text, /Bright Smile Dental/);
   assert.match(result.context_text, /Teeth Whitening/);
@@ -96,14 +118,61 @@ test("resolveElevenLabsDemoContext returns clinic services hours and FAQs for ac
   assert.equal(result.context.faqs[0].question, "Do you accept insurance?");
 });
 
-test("resolveElevenLabsDemoContext returns not_found when no active exact caller/called binding matches", async () => {
+test("resolveElevenLabsDemoContext resolves the same binding with plus and digit-only phone inputs", async () => {
+  const { db } = makeDb();
+  const cases = [
+    { caller_number: "+923351897839", called_number: "+13103318914" },
+    { caller_number: "+923351897839", called_number: "13103318914" },
+    { caller_number: "923351897839", called_number: "13103318914" },
+  ];
+
+  for (const phoneInput of cases) {
+    const result = await resolveElevenLabsDemoContext(
+      {
+        conversation_id: "conversation-1",
+        agent_id: "elevenlabs-agent-1",
+        ...phoneInput,
+      },
+      { db: db as never },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.status, "resolved");
+    assert.equal(result.resolved, true);
+    assert.equal(result.binding_id, "binding-1");
+    assert.equal(result.lead_id, "lead-1");
+    assert.equal(result.lead_demo_profile_id, "profile-1");
+  }
+});
+
+test("resolveElevenLabsDemoContext falls back to active called-number binding when caller does not match", async () => {
   const { db } = makeDb();
 
   const result = await resolveElevenLabsDemoContext(
     {
       conversation_id: "conversation-1",
       caller_number: "(949) 555-0101",
-      called_number: "+1 (310) 555-0123",
+      called_number: "+1 (310) 331-8914",
+      agent_id: "elevenlabs-agent-1",
+    },
+    { db: db as never },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "resolved");
+  assert.equal(result.binding_id, "binding-1");
+  assert.equal(result.match_type, "called_number_fallback");
+  assert.equal(result.caller_matched, false);
+});
+
+test("resolveElevenLabsDemoContext returns not_found when no active called binding matches", async () => {
+  const { db } = makeDb();
+
+  const result = await resolveElevenLabsDemoContext(
+    {
+      conversation_id: "conversation-1",
+      caller_number: "923351897839",
+      called_number: "15555550123",
       agent_id: "elevenlabs-agent-1",
     },
     { db: db as never },
@@ -111,6 +180,12 @@ test("resolveElevenLabsDemoContext returns not_found when no active exact caller
 
   assert.equal(result.ok, false);
   assert.equal(result.status, "not_found");
+  assert.equal(result.resolved, false);
+  assert.equal(result.reason, "no_active_demo_binding_found");
+  assert.equal(result.normalized_caller_digits, "923351897839");
+  assert.equal(result.normalized_called_digits, "15555550123");
+  assert.equal(result.caller_matched, false);
+  assert.equal(result.called_number_matched, false);
 });
 
 test("resolveElevenLabsDemoContext rejects invalid phone input", async () => {
@@ -121,7 +196,7 @@ test("resolveElevenLabsDemoContext rejects invalid phone input", async () => {
       {
         conversation_id: "conversation-1",
         caller_number: "not-a-phone",
-        called_number: "+1 (310) 555-0123",
+        called_number: "+1 (310) 331-8914",
         agent_id: "elevenlabs-agent-1",
       },
       { db: db as never },

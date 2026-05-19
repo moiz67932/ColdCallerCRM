@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireEnv } from "@/lib/env";
 import { jsonError } from "@/lib/http";
 import { resolveElevenLabsDemoContext } from "@/lib/elevenlabs/resolve-demo-context";
+import { normalizePhoneDigits } from "@/lib/phone";
 
 export const runtime = "nodejs";
 
@@ -116,9 +117,10 @@ function logResolveDemoContextRequest(request: NextRequest, body: unknown) {
     body_keys: Object.keys(record),
     caller_number: normalized.caller_number,
     called_number: normalized.called_number,
+    normalized_caller_digits: normalizePhoneDigits(normalized.caller_number),
+    normalized_called_digits: normalizePhoneDigits(normalized.called_number),
     agent_id: normalized.agent_id,
     conversation_id: normalized.conversation_id,
-    has_authorization_header: Boolean(request.headers.get("authorization")),
   });
 }
 
@@ -134,9 +136,7 @@ export async function POST(request: NextRequest) {
   try {
     body = await request.json();
   } catch {
-    console.warn("ElevenLabs resolve-demo-context received invalid JSON.", {
-      has_authorization_header: Boolean(request.headers.get("authorization")),
-    });
+    console.warn("ElevenLabs resolve-demo-context received invalid JSON.");
     return toolFailureResponse("Invalid JSON payload.", null, null);
   }
 

@@ -1,5 +1,10 @@
 import { parsePhoneNumberFromString } from "libphonenumber-js";
 
+export function normalizePhoneDigits(value: unknown) {
+  if (value === null || value === undefined) return "";
+  return String(value).replace(/\D/g, "");
+}
+
 export function normalizePhoneNumber(rawValue: string, defaultCountry: "US" | "CA" = "US") {
   const trimmed = rawValue.trim();
 
