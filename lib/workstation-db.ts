@@ -38,6 +38,7 @@ const tableNames = {
   leadDemoActivation: "lead_demo_activations",
   elevenlabsDemoBinding: "elevenlabs_demo_bindings",
   elevenlabsConversation: "elevenlabs_conversations",
+  appointmentRequest: "appointment_requests",
   appointment: "appointments",
   appointmentType: "appointment_types",
   appointmentTypeProvider: "appointment_type_providers",
@@ -203,6 +204,27 @@ const columnMaps: Record<keyof typeof tableNames, Record<string, string>> = {
     startedAt: "started_at",
     endedAt: "ended_at",
     receivedAt: "received_at",
+    createdAt: "created_at",
+    updatedAt: "updated_at",
+  },
+  appointmentRequest: {
+    organizationId: "organization_id",
+    leadId: "lead_id",
+    leadDemoProfileId: "lead_demo_profile_id",
+    bindingId: "binding_id",
+    conversationId: "conversation_id",
+    agentId: "agent_id",
+    callerE164: "caller_e164",
+    calledE164: "called_e164",
+    clientName: "client_name",
+    phoneE164: "phone_e164",
+    serviceRequested: "service_requested",
+    preferredDateTimeText: "preferred_date_time_text",
+    preferredDateTimeStart: "preferred_date_time_start",
+    newOrExisting: "new_or_existing",
+    specialRequests: "special_requests",
+    providerBookingId: "provider_booking_id",
+    rawPayload: "raw_payload",
     createdAt: "created_at",
     updatedAt: "updated_at",
   },
@@ -565,6 +587,13 @@ export const appointment = {
   create: ({ data }: { data: Record<string, unknown> }) => insertOne("appointment", data),
 };
 
+export const appointmentRequest = {
+  create: ({ data }: { data: Record<string, unknown> }) => insertOne("appointmentRequest", data),
+  findFirst({ where, orderBy }: { where?: Record<string, unknown>; orderBy?: Record<string, SortDirection> } = {}) {
+    return selectOne("appointmentRequest", where ?? {}, { order: orderArgs(orderBy) });
+  },
+};
+
 export const appointmentType = {
   findMany: ({ where, orderBy, take }: { where?: Record<string, unknown>; orderBy?: Record<string, SortDirection>; take?: number } = {}) =>
     selectMany("appointmentType", where, { order: orderArgs(orderBy), limit: take }),
@@ -594,6 +623,7 @@ const workstationDb = {
   leadDemoActivation,
   elevenlabsDemoBinding,
   elevenlabsConversation,
+  appointmentRequest,
   appointment,
   appointmentType,
   appointmentTypeProvider,

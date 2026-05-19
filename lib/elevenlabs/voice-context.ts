@@ -11,6 +11,7 @@ export type VoiceContextCompact = {
   clinic_phone: string;
   location_short: string;
   hours_short: string;
+  timezone?: string;
 };
 
 const MAX_SERVICES = 12;
@@ -79,6 +80,7 @@ export function buildVoiceContextCompact(input: {
     clinic_phone: cleanText(profile.clinic.phone),
     location_short: summarizeLocation(profile),
     hours_short: summarizeHours(profile),
+    timezone: cleanText(profile.clinic.timezone) || undefined,
   };
 }
 
@@ -111,5 +113,6 @@ export function parseVoiceContextCompact(value: unknown): VoiceContextCompact | 
     clinic_phone: cleanText(record.clinic_phone),
     location_short: cleanText(record.location_short),
     hours_short: cleanText(record.hours_short),
+    timezone: cleanText(record.timezone) || undefined,
   };
 }
