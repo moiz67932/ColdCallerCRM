@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { createEmptyExtractedProfile } from "@/lib/demo-agent/contracts";
 import { activateElevenLabsLeadDemoAgent } from "@/lib/elevenlabs/runtime";
 
 type Row = Record<string, unknown>;
@@ -10,6 +11,33 @@ function matchesWhere(row: Row, where: Row) {
 }
 
 function makeDb(input: { phoneNumber?: string | null; clinicId?: string | null; agentId?: string | null }) {
+  const extractedProfileJson = createEmptyExtractedProfile("https://clinic.example");
+  extractedProfileJson.clinic.name = "SG Essentials Med Spa";
+  extractedProfileJson.services = [
+    {
+      name: "Botox/dysport",
+      aliases: [],
+      description: "Can reduce wrinkles and last 3 to 4 months.",
+      duration_minutes: 30,
+      price_text: null,
+      price_min_cents: null,
+      bookable: true,
+      source_url: "https://clinic.example/services",
+      confidence: 0.9,
+    },
+    {
+      name: "Basic Lip Fillers",
+      aliases: [],
+      description: "Can enhance shape.",
+      duration_minutes: 45,
+      price_text: null,
+      price_min_cents: null,
+      bookable: true,
+      source_url: "https://clinic.example/services",
+      confidence: 0.9,
+    },
+  ];
+
   const state = {
     leads: [
       {
@@ -27,6 +55,7 @@ function makeDb(input: { phoneNumber?: string | null; clinicId?: string | null; 
         clinicId: Object.hasOwn(input, "clinicId") ? input.clinicId : "22222222-2222-4222-8222-222222222222",
         agentId: Object.hasOwn(input, "agentId") ? input.agentId : "33333333-3333-4333-8333-333333333333",
         lastActivatedAt: null,
+        extractedProfileJson,
       },
     ] as Row[],
     bindings: [] as Row[],
@@ -60,6 +89,12 @@ function makeDb(input: { phoneNumber?: string | null; clinicId?: string | null; 
         state.bindings.push(row);
         return row;
       },
+      update: async ({ where, data }: { where: Row; data: Row }) => {
+        const binding = state.bindings.find((row) => matchesWhere(row, where));
+        if (!binding) throw new Error("Record not found");
+        Object.assign(binding, data);
+        return binding;
+      },
     },
     leadDemoActivation: {
       create: async ({ data }: { data: Row }) => {
@@ -91,6 +126,8 @@ test("activateElevenLabsLeadDemoAgent creates an active binding and marks profil
   assert.equal(state.bindings.length, 1);
   assert.equal(state.bindings[0].status, "active");
   assert.equal(state.bindings[0].leadDemoProfileId, "11111111-1111-4111-8111-111111111111");
+  assert.equal(typeof state.bindings[0].voiceContextCompactJson, "object");
+  assert.deepEqual((state.bindings[0].voiceContextCompactJson as Row).safe_service_names, ["Botox and Dysport", "lip filler services"]);
   assert.equal(state.bindings[0].metadataJson && typeof state.bindings[0].metadataJson === "object", true);
   assert.equal(state.profiles[0].status, "active");
   assert.ok(state.profiles[0].lastActivatedAt);

@@ -184,6 +184,7 @@ const columnMaps: Record<keyof typeof tableNames, Record<string, string>> = {
     expiresAt: "expires_at",
     createdAt: "created_at",
     updatedAt: "updated_at",
+    voiceContextCompactJson: "voice_context_compact_json",
     metadataJson: "metadata_json",
   },
   elevenlabsConversation: {

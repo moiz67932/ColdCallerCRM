@@ -1,5 +1,6 @@
 import { requireEnv } from "@/lib/env";
 import { logInfo, logWarn } from "@/lib/logger";
+import { buildVoiceContextCompact } from "@/lib/elevenlabs/voice-context";
 import { normalizePhoneNumber } from "@/lib/phone";
 import { prisma } from "@/lib/workstation-db";
 
@@ -103,12 +104,24 @@ export async function activateElevenLabsLeadDemoAgent(leadId: string, deps: Acti
       phoneE164: config.phoneE164,
       callerE164,
       status: "active",
+      voiceContextCompactJson: {},
       metadataJson: {
         source: "crm_activate_agent",
         previous_runtime: "hetzner_livekit",
         activated_from: "lead_demo_profile",
       },
     },
+  });
+  const voiceContextCompactJson = buildVoiceContextCompact({
+    extractedProfileJson: profile.extractedProfileJson,
+    leadId,
+    bindingId: binding.id,
+    phoneE164: config.phoneE164,
+  });
+
+  await db.elevenlabsDemoBinding.update({
+    where: { id: binding.id },
+    data: { voiceContextCompactJson },
   });
 
   await db.leadDemoProfile.update({

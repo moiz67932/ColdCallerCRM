@@ -1,8 +1,8 @@
 import { z } from "zod";
 
-import { extractedProfileSchema } from "@/lib/demo-agent/contracts";
 import { normalizePhoneDigits } from "@/lib/phone";
 import { prisma } from "@/lib/workstation-db";
+import { parseVoiceContextCompact, voiceContextText } from "@/lib/elevenlabs/voice-context";
 
 type ResolveDb = typeof prisma;
 
@@ -21,19 +21,8 @@ type ResolveDemoContextDeps = {
 
 type DemoBinding = Awaited<ReturnType<ResolveDb["elevenlabsDemoBinding"]["findMany"]>>[number];
 
-function buildContextText(context: {
-  clinic: unknown;
-  services: unknown;
-  hours: unknown;
-  faqs: unknown;
-}) {
-  return [
-    "Clinic context for this active phone demo:",
-    `Clinic: ${JSON.stringify(context.clinic)}`,
-    `Services: ${JSON.stringify(context.services)}`,
-    `Hours: ${JSON.stringify(context.hours)}`,
-    `FAQs: ${JSON.stringify(context.faqs)}`,
-  ].join("\n");
+function phoneLookupCandidates(digits: string) {
+  return [...new Set([`+${digits}`, digits])];
 }
 
 export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequest, deps: ResolveDemoContextDeps = {}) {
@@ -50,7 +39,10 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
   }
 
   const activeBindings = await db.elevenlabsDemoBinding.findMany({
-    where: { status: "active" },
+    where: {
+      status: "active",
+      phoneE164: { in: phoneLookupCandidates(calledDigits) },
+    },
     orderBy: { createdAt: "desc" },
   });
   const calledNumberMatches = activeBindings.filter((row: DemoBinding) => normalizePhoneDigits(row.phoneE164) === calledDigits);
@@ -87,20 +79,17 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
     };
   }
 
-  const profile = await db.leadDemoProfile.findUnique({
-    where: { id: binding.leadDemoProfileId },
-  });
+  const cachedContext = parseVoiceContextCompact(binding.voiceContextCompactJson);
 
-  if (!profile) {
-    throw new Error("Active demo binding points to a missing lead demo profile.");
+  if (!cachedContext) {
+    throw new Error("Active demo binding is missing voice_context_compact_json. Reactivate this demo profile.");
   }
 
-  const extractedProfile = extractedProfileSchema.parse(profile.extractedProfileJson);
   const context = {
-    clinic: extractedProfile.clinic,
-    services: extractedProfile.services,
-    hours: extractedProfile.hours,
-    faqs: extractedProfile.faqs,
+    ...cachedContext,
+    lead_id: binding.leadId,
+    binding_id: binding.id,
+    phone_e164: binding.phoneE164,
   };
 
   return {
@@ -112,7 +101,7 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
     caller_e164: binding.callerE164,
     phone_e164: binding.phoneE164,
     lead_id: binding.leadId,
-    lead_demo_profile_id: profile.id,
+    lead_demo_profile_id: binding.leadDemoProfileId,
     binding_id: binding.id,
     ...(fallbackMatch
       ? {
@@ -120,7 +109,7 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
           caller_matched: false,
         }
       : {}),
-    context_text: buildContextText(context),
+    context_text: voiceContextText(context),
     context,
   };
 }
