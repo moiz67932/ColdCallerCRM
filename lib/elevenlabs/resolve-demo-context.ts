@@ -3,6 +3,7 @@ import { z } from "zod";
 import { normalizePhoneDigits } from "@/lib/phone";
 import { prisma } from "@/lib/workstation-db";
 import { parseVoiceContextCompact, voiceContextText } from "@/lib/elevenlabs/voice-context";
+import { resolveActiveDemoBindingForCall } from "@/lib/elevenlabs/demo-binding-resolver";
 
 type ResolveDb = typeof prisma;
 
@@ -19,12 +20,6 @@ type ResolveDemoContextDeps = {
   db?: ResolveDb;
 };
 
-type DemoBinding = Awaited<ReturnType<ResolveDb["elevenlabsDemoBinding"]["findMany"]>>[number];
-
-function phoneLookupCandidates(digits: string) {
-  return [...new Set([`+${digits}`, digits])];
-}
-
 export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequest, deps: ResolveDemoContextDeps = {}) {
   const db = deps.db ?? prisma;
   const callerDigits = normalizePhoneDigits(input.caller_number);
@@ -38,19 +33,17 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
     throw new Error("Invalid called_number. Expected a valid phone number.");
   }
 
-  const activeBindings = await db.elevenlabsDemoBinding.findMany({
-    where: {
-      status: "active",
-      phoneE164: { in: phoneLookupCandidates(calledDigits) },
+  const lookup = await resolveActiveDemoBindingForCall(
+    {
+      callerNumber: input.caller_number,
+      calledNumber: input.called_number,
+      agentId: input.agent_id,
     },
-    orderBy: { createdAt: "desc" },
-  });
-  const calledNumberMatches = activeBindings.filter((row: DemoBinding) => normalizePhoneDigits(row.phoneE164) === calledDigits);
-  const exactCallerMatch = calledNumberMatches.find((row: DemoBinding) => normalizePhoneDigits(row.callerE164) === callerDigits) ?? null;
-  const fallbackMatch = exactCallerMatch ? null : calledNumberMatches[0] ?? null;
-  const binding = exactCallerMatch ?? fallbackMatch;
-  const callerMatched = Boolean(exactCallerMatch);
-  const calledNumberMatched = calledNumberMatches.length > 0;
+    {
+      db,
+    },
+  );
+  const binding = lookup.binding;
 
   console.info("ElevenLabs resolve-demo-context lookup.", {
     conversation_id: input.conversation_id,
@@ -59,8 +52,8 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
     called_number: input.called_number,
     normalized_caller_digits: callerDigits,
     normalized_called_digits: calledDigits,
-    called_number_matched: calledNumberMatched,
-    caller_matched: callerMatched,
+    called_number_matched: lookup.calledNumberMatched,
+    caller_matched: lookup.callerMatched,
     binding_id: binding?.id ?? null,
   });
 
@@ -103,7 +96,7 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
     lead_id: binding.leadId,
     lead_demo_profile_id: binding.leadDemoProfileId,
     binding_id: binding.id,
-    ...(fallbackMatch
+    ...(lookup.matchType === "called_number_fallback"
       ? {
           match_type: "called_number_fallback" as const,
           caller_matched: false,
