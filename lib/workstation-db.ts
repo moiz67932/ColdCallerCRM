@@ -2,9 +2,11 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 type SortDirection = "asc" | "desc";
+type SelectFields = Record<string, boolean>;
 type QueryOptions = {
   limit?: number;
   order?: { column: string; ascending?: boolean };
+  select?: SelectFields;
 };
 type SupabaseQuery = any;
 /*
@@ -292,6 +294,16 @@ function fromDb(model: keyof typeof tableNames, row: Record<string, unknown> | n
   return value;
 }
 
+function selectedColumns(model: keyof typeof tableNames, select?: SelectFields) {
+  if (!select) return "*";
+
+  const columns = Object.entries(select)
+    .filter(([, enabled]) => enabled)
+    .map(([key]) => toColumn(model, key));
+
+  return columns.length ? columns.join(",") : "*";
+}
+
 function applyWhere(query: SupabaseQuery, model: keyof typeof tableNames, where?: Record<string, unknown>) {
   if (!where) return query;
 
@@ -330,7 +342,7 @@ function applyWhere(query: SupabaseQuery, model: keyof typeof tableNames, where?
 
 async function selectMany(model: keyof typeof tableNames, where?: Record<string, unknown>, options: QueryOptions = {}) {
   const supabase = getSupabaseAdmin();
-  let query = supabase.from(tableNames[model]).select("*") as unknown as SupabaseQuery;
+  let query = supabase.from(tableNames[model]).select(selectedColumns(model, options.select)) as unknown as SupabaseQuery;
   query = applyWhere(query, model, where);
   if (options.order) query = query.order(toColumn(model, options.order.column), { ascending: options.order.ascending ?? true });
   if (options.limit) query = query.limit(options.limit);
@@ -559,12 +571,12 @@ export const leadDemoActivation = {
 export const elevenlabsDemoBinding = {
   create: ({ data }: { data: Record<string, unknown> }) => insertOne("elevenlabsDemoBinding", data),
   findUnique: ({ where }: { where: Record<string, unknown> }) => selectOne("elevenlabsDemoBinding", where),
-  async findFirst({ where, orderBy }: { where?: Record<string, unknown>; orderBy?: Record<string, SortDirection> } = {}) {
-    const rows = await this.findMany({ where, orderBy, take: 1 });
+  async findFirst({ where, orderBy, select }: { where?: Record<string, unknown>; orderBy?: Record<string, SortDirection>; select?: SelectFields } = {}) {
+    const rows = await this.findMany({ where, orderBy, select, take: 1 });
     return rows[0] ?? null;
   },
-  findMany: ({ where, orderBy, take }: { where?: Record<string, unknown>; orderBy?: Record<string, SortDirection>; take?: number } = {}) =>
-    selectMany("elevenlabsDemoBinding", where, { order: orderArgs(orderBy), limit: take }),
+  findMany: ({ where, orderBy, select, take }: { where?: Record<string, unknown>; orderBy?: Record<string, SortDirection>; select?: SelectFields; take?: number } = {}) =>
+    selectMany("elevenlabsDemoBinding", where, { order: orderArgs(orderBy), select, limit: take }),
   update: ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => updateOne("elevenlabsDemoBinding", where, data),
   updateMany: ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => updateManyRows("elevenlabsDemoBinding", where, data),
 };

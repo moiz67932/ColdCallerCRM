@@ -107,11 +107,19 @@ function compactContextDynamicVariables(input: {
   };
 }
 
-async function buildMinimalContextFromProfile(binding: JsonRecord, db: ResolveDb) {
+async function buildMinimalContextFromProfile(binding: JsonRecord, db: ResolveDb, nowMs: () => number) {
   const leadDemoProfileId = typeof binding.leadDemoProfileId === "string" ? binding.leadDemoProfileId : null;
   if (!leadDemoProfileId) return null;
 
+  const profileQueryStartedAt = nowMs();
   const profile = await db.leadDemoProfile.findUnique({ where: { id: leadDemoProfileId } });
+  console.info("ElevenLabs conversation-initiation query.", {
+    route: "/api/elevenlabs/hooks/conversation-initiation",
+    stage: "minimal_profile_context_fallback",
+    lead_demo_profile_id: leadDemoProfileId,
+    found: Boolean(profile),
+    duration_ms: Math.round(nowMs() - profileQueryStartedAt),
+  });
   const clinicName = cleanText(profile?.businessName);
   if (!clinicName) return null;
 
@@ -177,7 +185,7 @@ export async function buildElevenLabsConversationInitiationClientData(
         calledNumber: input.called_number,
         agentId: input.agent_id,
       },
-      { db },
+      { db, nowMs },
     );
     const durationMs = Math.round(nowMs() - startedAt);
 
@@ -199,7 +207,7 @@ export async function buildElevenLabsConversationInitiationClientData(
 
     const binding = lookup.binding as JsonRecord;
     const cachedContext = parseVoiceContextCompact(binding.voiceContextCompactJson);
-    const context = cachedContext ?? (await buildMinimalContextFromProfile(binding, db));
+    const context = cachedContext ?? (await buildMinimalContextFromProfile(binding, db, nowMs));
 
     if (!context) {
       console.info("ElevenLabs conversation-initiation lookup.", {

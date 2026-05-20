@@ -23,6 +23,7 @@ type ResolveActiveDemoBindingForCallInput = {
 
 type ResolveActiveDemoBindingForCallDeps = {
   db?: ResolveDb;
+  nowMs?: () => number;
 };
 
 export function phoneLookupCandidates(digits: string) {
@@ -44,6 +45,7 @@ export async function resolveActiveDemoBindingForCall(
   deps: ResolveActiveDemoBindingForCallDeps = {},
 ): Promise<ActiveDemoBindingLookup> {
   const db = deps.db ?? prisma;
+  const nowMs = deps.nowMs ?? Date.now;
   const callerDigits = normalizePhoneDigits(input.callerNumber);
   const calledDigits = normalizePhoneDigits(input.calledNumber);
   const agentId = cleanAgentId(input.agentId);
@@ -59,12 +61,31 @@ export async function resolveActiveDemoBindingForCall(
     };
   }
 
+  const bindingQueryStartedAt = nowMs();
   const activeBindings = await db.elevenlabsDemoBinding.findMany({
     where: {
       status: "active",
       phoneE164: { in: phoneLookupCandidates(calledDigits) },
     },
     orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      leadId: true,
+      leadDemoProfileId: true,
+      elevenlabsAgentId: true,
+      phoneE164: true,
+      callerE164: true,
+      status: true,
+      voiceContextCompactJson: true,
+    },
+  });
+  console.info("ElevenLabs demo-binding resolver query.", {
+    stage: "active_binding_lookup",
+    normalized_caller_digits: callerDigits,
+    normalized_called_digits: calledDigits,
+    agent_id_present: Boolean(agentId),
+    rows: activeBindings.length,
+    duration_ms: Math.round(nowMs() - bindingQueryStartedAt),
   });
 
   const calledNumberMatches = activeBindings
