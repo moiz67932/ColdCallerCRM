@@ -1,10 +1,34 @@
 import { normalizeWebsiteUrl, classifyPage, normalizeText } from "@/lib/demo-agent/extraction";
-import type { ScrapedPage } from "@/lib/demo-agent/contracts";
+import type { ScrapedLink, ScrapedPage, ScrapedStructuredBlock } from "@/lib/demo-agent/contracts";
 import { logInfo, logWarn } from "@/lib/logger";
 
 const blockedResourceTypes = new Set(["image", "media", "font"]);
 const blockedHosts = ["google-analytics.com", "googletagmanager.com", "doubleclick.net", "facebook.net"];
-const preferredSegments = ["services", "pricing", "faq", "about", "contact", "insurance", "patient", "appointment", "new-patient", "forms"];
+const preferredSegments = [
+  "services",
+  "treatments",
+  "facial",
+  "facials",
+  "injectables",
+  "botox",
+  "filler",
+  "laser",
+  "skin",
+  "pricing",
+  "membership",
+  "specials",
+  "contact",
+  "hours",
+  "faq",
+  "about",
+  "insurance",
+  "patient",
+  "appointment",
+  "new-patient",
+  "forms",
+];
+
+const highValueSitemapPattern = /service|treatment|facial|injectable|botox|filler|laser|skin|pricing|membership|special|contact|hours|faq|about/i;
 
 type CrawlOptions = {
   maxPages: number;
@@ -44,36 +68,142 @@ function getCrawlOptions(): CrawlOptions {
   };
 }
 
-function rankUrl(url: string) {
-  const lower = url.toLowerCase();
+function rankUrl(url: string, hint = "") {
+  const lower = `${url} ${hint}`.toLowerCase();
   const matchedIndex = preferredSegments.findIndex((segment) => lower.includes(segment));
   return matchedIndex === -1 ? preferredSegments.length : matchedIndex;
 }
 
-function shouldAllowByRobots(_url: URL) {
-  if ((process.env.SCRAPER_RESPECT_ROBOTS_TXT ?? "true") !== "true") {
-    return true;
+type RobotsRules = {
+  disallow: string[];
+  allow: string[];
+};
+
+function parseRobotsTxt(text: string, userAgent: string): RobotsRules {
+  const targetAgents = [userAgent.toLowerCase().split(/[\/\s]/)[0], "*"].filter(Boolean);
+  const groups: Array<{ agents: string[]; allow: string[]; disallow: string[] }> = [];
+  let current: { agents: string[]; allow: string[]; disallow: string[] } | null = null;
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.replace(/#.*/, "").trim();
+    if (!line) continue;
+    const [rawKey, ...rest] = line.split(":");
+    const key = rawKey.trim().toLowerCase();
+    const value = rest.join(":").trim();
+    if (key === "user-agent") {
+      if (!current || current.allow.length || current.disallow.length) {
+        current = { agents: [], allow: [], disallow: [] };
+        groups.push(current);
+      }
+      current.agents.push(value.toLowerCase());
+    } else if (current && key === "allow") {
+      current.allow.push(value);
+    } else if (current && key === "disallow" && value) {
+      current.disallow.push(value);
+    }
   }
 
-  return true;
+  const matching = groups.filter((group) => group.agents.some((agent) => targetAgents.some((target) => agent === target || agent === "*")));
+  return {
+    allow: matching.flatMap((group) => group.allow),
+    disallow: matching.flatMap((group) => group.disallow),
+  };
 }
 
-function sameDomainLinks(sourceUrl: URL, links: string[]) {
+async function loadRobotsRules(rootUrl: string, userAgent: string): Promise<RobotsRules | null> {
+  if ((process.env.SCRAPER_RESPECT_ROBOTS_TXT ?? "true") !== "true") return null;
+  try {
+    const root = new URL(rootUrl);
+    const response = await fetch(`${root.origin}/robots.txt`, { headers: { "user-agent": userAgent } });
+    if (!response.ok) return { allow: [], disallow: [] };
+    return parseRobotsTxt(await response.text(), userAgent);
+  } catch (error) {
+    logWarn("lead_scraper.robots_failed", { rootUrl, error: error instanceof Error ? error.message : String(error) });
+    return { allow: [], disallow: [] };
+  }
+}
+
+function robotsPathMatches(rule: string, path: string) {
+  if (!rule) return false;
+  const pattern = rule.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${pattern}`).test(path);
+}
+
+function isAllowedByRobots(url: URL, rules: RobotsRules | null) {
+  if (!rules) return true;
+  const path = `${url.pathname}${url.search}`;
+  const matchingAllow = rules.allow.filter((rule) => robotsPathMatches(rule, path)).sort((a, b) => b.length - a.length)[0];
+  const matchingDisallow = rules.disallow.filter((rule) => robotsPathMatches(rule, path)).sort((a, b) => b.length - a.length)[0];
+  if (!matchingDisallow) return true;
+  return Boolean(matchingAllow && matchingAllow.length >= matchingDisallow.length);
+}
+
+function sameDomainLinks(sourceUrl: URL, links: ScrapedLink[]) {
   return links
-    .map((href) => {
+    .map((link) => {
       try {
-        return new URL(href, sourceUrl).toString();
+        return {
+          ...link,
+          href: new URL(link.href, sourceUrl).toString().replace(/#.*$/, "").replace(/\/$/, ""),
+        };
       } catch {
         return null;
       }
     })
-    .filter((href): href is string => Boolean(href))
-    .filter((href) => {
-      const nextUrl = new URL(href);
+    .filter((link): link is ScrapedLink => Boolean(link?.href))
+    .filter((link) => {
+      const nextUrl = new URL(link.href);
       return nextUrl.hostname === sourceUrl.hostname && ["http:", "https:"].includes(nextUrl.protocol);
     })
-    .map((href) => href.replace(/#.*$/, "").replace(/\/$/, ""))
-    .filter(Boolean);
+    .filter((link, index, all) => all.findIndex((entry) => entry.href === link.href) === index);
+}
+
+async function discoverSitemapUrls(rootUrl: string, options: CrawlOptions) {
+  const root = new URL(rootUrl);
+  const sitemapUrl = `${root.origin}/sitemap.xml`;
+  try {
+    const response = await fetch(sitemapUrl, { headers: { "user-agent": options.userAgent } });
+    if (!response.ok) return [];
+    const xml = await response.text();
+    const urls = [...xml.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/gi)]
+      .map((match) => match[1].trim())
+      .filter((value) => {
+        try {
+          const url = new URL(value);
+          return url.hostname === root.hostname && highValueSitemapPattern.test(url.toString());
+        } catch {
+          return false;
+        }
+      })
+      .map((url) => url.replace(/#.*$/, "").replace(/\/$/, ""));
+    return [...new Set(urls)].sort((left, right) => rankUrl(left) - rankUrl(right)).slice(0, Math.max(0, options.maxPages - 1));
+  } catch (error) {
+    logWarn("lead_scraper.sitemap_failed", { rootUrl, error: error instanceof Error ? error.message : String(error) });
+    return [];
+  }
+}
+
+function summarizeJsonLd(jsonLd: unknown[]) {
+  const nodes: Record<string, unknown>[] = [];
+  const visit = (value: unknown) => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const record = value as Record<string, unknown>;
+    nodes.push(record);
+    if (Array.isArray(record["@graph"])) record["@graph"].forEach(visit);
+    if (record.offers) visit(record.offers);
+    if (record.itemListElement) visit(record.itemListElement);
+  };
+  jsonLd.forEach(visit);
+  const types = [...new Set(nodes.flatMap((node) => {
+    const type = node["@type"];
+    return Array.isArray(type) ? type.map(String) : type ? [String(type)] : [];
+  }))];
+  const names = [...new Set(nodes.map((node) => (typeof node.name === "string" ? node.name.trim() : "")).filter(Boolean))].slice(0, 20);
+  return { types, names, node_count: nodes.length };
 }
 
 function mapPlaywrightLaunchError(error: unknown) {
@@ -107,6 +237,8 @@ export async function crawlLeadWebsite(rootInput: string): Promise<CrawlResult> 
   const rootUrl = normalizeWebsiteUrl(rootInput);
   const options = getCrawlOptions();
   const { chromium } = await import("playwright");
+  const robotsRules = await loadRobotsRules(rootUrl, options.userAgent);
+  const sitemapUrls = await discoverSitemapUrls(rootUrl, options);
 
   logInfo("lead_scraper.crawl_start", {
     rootUrl,
@@ -135,7 +267,10 @@ export async function crawlLeadWebsite(rootInput: string): Promise<CrawlResult> 
     return route.continue();
   });
 
-  const queue: Array<{ url: string; depth: number }> = [{ url: rootUrl, depth: 0 }];
+  const queue: Array<{ url: string; depth: number; hint?: string }> = [
+    { url: rootUrl, depth: 0 },
+    ...sitemapUrls.map((url) => ({ url, depth: 1, hint: "sitemap" })),
+  ];
   const visited = new Set<string>();
   const pages: ScrapedPage[] = [];
   let pagesFailed = 0;
@@ -146,7 +281,7 @@ export async function crawlLeadWebsite(rootInput: string): Promise<CrawlResult> 
     await Promise.all(
       Array.from({ length: workerCount }, async () => {
         while (queue.length > 0 && pages.length < options.maxPages) {
-          queue.sort((left, right) => rankUrl(left.url) - rankUrl(right.url));
+          queue.sort((left, right) => rankUrl(left.url, left.hint) - rankUrl(right.url, right.hint));
           const next = queue.shift();
 
           if (!next || visited.has(next.url)) {
@@ -160,7 +295,8 @@ export async function crawlLeadWebsite(rootInput: string): Promise<CrawlResult> 
           try {
             const parsedUrl = new URL(next.url);
 
-            if (!shouldAllowByRobots(parsedUrl)) {
+            if (!isAllowedByRobots(parsedUrl, robotsRules)) {
+              logWarn("lead_scraper.page_skipped", { url: next.url, reason: "robots_disallow" });
               continue;
             }
 
@@ -180,7 +316,63 @@ export async function crawlLeadWebsite(rootInput: string): Promise<CrawlResult> 
                   return null;
                 }
               });
-              const links = [...document.querySelectorAll("a[href]")].map((anchor) => anchor.getAttribute("href") ?? "");
+              const clean = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
+              const compactText = (element: Element | null) => clean(element?.textContent).slice(0, 1200);
+              const headingText = (root: Element) => clean(root.querySelector("h1,h2,h3,h4,[role='heading']")?.textContent);
+              const links = [...document.querySelectorAll("a[href]")].map((anchor) => ({
+                href: anchor.getAttribute("href") ?? "",
+                text: clean(anchor.textContent).slice(0, 140),
+                ariaLabel: clean(anchor.getAttribute("aria-label")) || null,
+                title: clean(anchor.getAttribute("title")) || null,
+              }));
+              const structuredBlocks = new Map<string, { type: string; heading: string | null; text: string; items?: Array<Record<string, unknown>>; source?: string | null }>();
+              const addBlock = (type: string, heading: string | null, textValue: string, items?: Array<Record<string, unknown>>, source?: string | null) => {
+                const text = clean(textValue).slice(0, 1800);
+                const key = `${type}:${heading ?? ""}:${text.slice(0, 180)}`;
+                if (text.length >= 8 && !structuredBlocks.has(key)) structuredBlocks.set(key, { type, heading: heading ? clean(heading) : null, text, items, source: source ?? null });
+              };
+
+              for (const heading of document.querySelectorAll("h1,h2,h3,h4")) {
+                const section = heading.closest("section,article,main,div") ?? heading.parentElement;
+                const headingValue = clean(heading.textContent);
+                const textValue = compactText(section);
+                if (headingValue && textValue) addBlock("section", headingValue, textValue, undefined, heading.tagName.toLowerCase());
+              }
+
+              for (const element of document.querySelectorAll("[class*='service' i], [class*='treatment' i], [class*='card' i], article, li")) {
+                const heading = headingText(element);
+                const textValue = compactText(element);
+                if (heading && /service|treatment|facial|inject|botox|filler|laser|skin|price|\$/i.test(`${heading} ${textValue}`)) {
+                  addBlock("service_card", heading, textValue, undefined, "dom_card");
+                }
+              }
+
+              for (const row of document.querySelectorAll("table tr")) {
+                const cells = [...row.querySelectorAll("th,td")].map((cell) => clean(cell.textContent)).filter(Boolean);
+                if (cells.length >= 2 && /\$|price|cost|unit|series|package/i.test(cells.join(" "))) {
+                  addBlock("pricing_row", cells[0] ?? null, cells.join(" | "), cells.map((cell, index) => ({ index, text: cell })), "table");
+                }
+              }
+
+              for (const element of document.querySelectorAll("details, [class*='accordion' i], [class*='faq' i]")) {
+                const heading = clean(element.querySelector("summary,h1,h2,h3,h4,button")?.textContent) || headingText(element);
+                const textValue = compactText(element);
+                if (textValue.includes("?")) addBlock("faq", heading || null, textValue, undefined, "faq_dom");
+                else addBlock("accordion", heading || null, textValue, undefined, "accordion_dom");
+              }
+
+              for (const element of document.querySelectorAll("[role='tab'], [role='tabpanel'], [class*='tab' i]")) {
+                const heading = headingText(element) || clean(element.getAttribute("aria-label"));
+                const textValue = compactText(element);
+                if (textValue) addBlock("tab", heading || null, textValue, undefined, "tab_dom");
+              }
+
+              for (const element of document.querySelectorAll("address, [class*='contact' i], [class*='location' i], [class*='hours' i]")) {
+                const textValue = compactText(element);
+                if (/@|\(?\d{3}\)?|hours|monday|tuesday|wednesday|thursday|friday/i.test(textValue)) {
+                  addBlock(/hours|monday|tuesday|wednesday/i.test(textValue) ? "hours" : "contact", headingText(element) || null, textValue, undefined, "contact_dom");
+                }
+              }
 
               return {
                 title: document.title || null,
@@ -190,6 +382,7 @@ export async function crawlLeadWebsite(rootInput: string): Promise<CrawlResult> 
                 metaDescription,
                 jsonLd,
                 links,
+                structuredBlocks: [...structuredBlocks.values()],
               };
             });
 
@@ -202,6 +395,7 @@ export async function crawlLeadWebsite(rootInput: string): Promise<CrawlResult> 
 
             const canonicalUrl = extracted.canonical ? new URL(extracted.canonical, next.url).toString().replace(/\/$/, "") : null;
 
+            const linkHints = sameDomainLinks(new URL(next.url), extracted.links);
             const pageRecord: ScrapedPage = {
               url: next.url,
               canonicalUrl,
@@ -210,7 +404,10 @@ export async function crawlLeadWebsite(rootInput: string): Promise<CrawlResult> 
               cleanedText,
               html: extracted.html.slice(0, options.maxHtmlChars),
               jsonLd: extracted.jsonLd.filter(Boolean),
-              links: sameDomainLinks(new URL(next.url), extracted.links),
+              links: linkHints.map((link) => link.href),
+              linkHints,
+              structuredBlocks: (extracted.structuredBlocks as ScrapedStructuredBlock[]).slice(0, 80),
+              jsonLdSummary: summarizeJsonLd(extracted.jsonLd.filter(Boolean)),
               httpStatus: response?.status() ?? null,
               pageType: classifyPage(next.url, extracted.title),
             };
@@ -239,7 +436,8 @@ export async function crawlLeadWebsite(rootInput: string): Promise<CrawlResult> 
             if (next.depth < options.maxDepth) {
               for (const link of pageRecord.links) {
                 if (!visited.has(link) && queue.length + pages.length < options.maxPages * 3) {
-                  queue.push({ url: link, depth: next.depth + 1 });
+                  const hint = pageRecord.linkHints?.find((entry) => entry.href === link);
+                  queue.push({ url: link, depth: next.depth + 1, hint: [hint?.text, hint?.ariaLabel, hint?.title].filter(Boolean).join(" ") });
                 }
               }
             }

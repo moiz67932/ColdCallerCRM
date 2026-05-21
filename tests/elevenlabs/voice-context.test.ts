@@ -4,16 +4,24 @@ import assert from "node:assert/strict";
 import { createEmptyExtractedProfile } from "@/lib/demo-agent/contracts";
 import { buildVoiceContextCompact, voiceContextText } from "@/lib/elevenlabs/voice-context";
 
-function service(name: string, description: string) {
+function service(name: string, description: string, category?: string, price?: string | null) {
   return {
     name,
     aliases: [],
+    category: category ?? null,
+    subcategory: null,
+    voice_label: name,
+    voice_category: category ?? null,
     description,
     duration_minutes: 30,
-    price_text: null,
+    price_text: price ?? null,
     price_min_cents: null,
+    price_summary: price ?? null,
+    price_available: Boolean(price),
     bookable: true,
     source_url: "https://clinic.example/services",
+    source_quote: name,
+    extraction_method: "test",
     confidence: 0.9,
   };
 }
@@ -58,4 +66,33 @@ test("buildVoiceContextCompact deduplicates service names and excludes medical c
   assert.deepEqual(compact.safe_service_names, ["Botox and Dysport", "lip filler services", "fillers", "Kybella"]);
   assert.ok(serialized.length < 1500);
   assert.doesNotMatch(serialized, /reduce fat|lasts? 3 to 4 months|enhance shape|improve body contour|treatment outcome|restore volume/i);
+});
+
+test("buildVoiceContextCompact groups services by category and keeps full safe names", () => {
+  const profile = createEmptyExtractedProfile("https://clinic.example");
+  profile.clinic.name = "Clinic Med Spa";
+  profile.services = [
+    service("Procell Microchanneling", "", "Skin resurfacing"),
+    service("Age Defying Facial", "", "Facials"),
+    service("New Client Facial", "", "Facials"),
+    service("Customized Existing Client Facial", "", "Facials"),
+    service("Clarifying Acne Facial", "", "Facials", "Pricing starts at $120."),
+    service("Hydradermabrasion", "", "Facials"),
+    service("Radiofrequency Facial", "", "Facials"),
+    service("Swich Facial", "", "Facials"),
+    service("Teen Facial", "", "Facials"),
+  ];
+
+  const compact = buildVoiceContextCompact({
+    extractedProfileJson: profile,
+    leadId: "lead-1",
+    bindingId: "binding-1",
+    phoneE164: "+13103318914",
+  });
+
+  assert.match(compact.service_categories_short, /facials/);
+  assert.ok(compact.service_menu_short.length <= 220);
+  assert.equal(compact.safe_service_names.length, 9);
+  assert.match(compact.facials_list_text, /Age Defying Facial/);
+  assert.match(compact.pricing_lookup_text, /Clarifying Acne Facial/);
 });

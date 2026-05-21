@@ -92,6 +92,73 @@ test("parseStructuredPrices supports starting, series, split fixed/series, and r
   assert.equal(range[0].price_type, "range");
   assert.equal(range[0].amount_min_cents, 20000);
   assert.equal(range[0].amount_max_cents, 30000);
+
+  assert.equal(parseStructuredPrices("starting at $120")[0].price_type, "starting_at");
+  assert.equal(parseStructuredPrices("from $120")[0].amount_min_cents, 12000);
+  assert.equal(parseStructuredPrices("$12 per unit")[0].price_type, "per_unit");
+  assert.equal(parseStructuredPrices("package of 3 $600")[0].price_type, "package");
+  assert.equal(parseStructuredPrices("consultation $50")[0].price_type, "consultation");
+  assert.equal(parseStructuredPrices("add-on $30")[0].price_type, "add_on");
+});
+
+test("JSON-LD LocalBusiness, Service, and Offer data feed deterministic extraction", () => {
+  const result = extractNormalizedClinicProfile([
+    page({
+      id: "66666666-6666-4666-8666-666666666666",
+      url: "https://clinic.example",
+      title: "Clinic",
+      cleanedText: "Services",
+      jsonLd: [{
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "HealthAndBeautyBusiness",
+            name: "Glow Clinic",
+            telephone: "(949) 555-0101",
+            email: "hello@glow.example",
+            address: {
+              "@type": "PostalAddress",
+              streetAddress: "10 Glow Way",
+              addressLocality: "Irvine",
+              addressRegion: "CA",
+              postalCode: "92618",
+            },
+            openingHoursSpecification: [{ "@type": "OpeningHoursSpecification", dayOfWeek: "Monday", opens: "09:00", closes: "17:00" }],
+          },
+          { "@type": "Service", name: "Clarifying Acne Facial", category: "Facials", offers: { "@type": "Offer", price: "120", priceCurrency: "USD" } },
+        ],
+      }],
+    }),
+  ], { websiteUrl: "https://clinic.example" });
+
+  assert.equal(result.snapshot.clinic.name, "Glow Clinic");
+  assert.equal(result.locations[0].address_line1, "10 Glow Way");
+  assert.equal(result.services.some((service) => service.display_name === "Clarifying Acne Facial" && service.price_available), true);
+});
+
+test("DOM service cards and pricing rows produce grouped medspa services", () => {
+  const result = extractNormalizedClinicProfile([
+    page({
+      id: "77777777-7777-4777-8777-777777777777",
+      url: "https://clinic.example/services",
+      title: "Services",
+      cleanedText: "Glow Clinic\nCall (949) 555-0101\n10 Glow Way, Irvine, CA 92618\nFacials\nInjectables",
+      structuredBlocks: [
+        { type: "service_card", heading: "Age Defying Facial", text: "Age Defying Facial restorative facial service" },
+        { type: "service_card", heading: "New Client Facial", text: "New Client Facial first visit service" },
+        { type: "pricing_row", heading: "Clarifying Acne Facial", text: "Clarifying Acne Facial | 60 minutes | starting at $120" },
+        { type: "service_card", heading: "Botox", text: "Botox injectable service $12 per unit" },
+        { type: "section", heading: "Facials", text: "Facials" },
+      ],
+    }),
+  ], { websiteUrl: "https://clinic.example" });
+
+  const names = result.services.map((service) => service.display_name);
+  assert.equal(names.includes("Age Defying Facial"), true);
+  assert.equal(names.includes("Clarifying Acne Facial"), true);
+  assert.equal(names.includes("Facials"), false);
+  assert.equal(result.services.find((service) => service.display_name === "Clarifying Acne Facial")?.category, "Facials");
+  assert.equal(result.services.find((service) => service.display_name === "Botox")?.category, "Injectables");
 });
 
 test("raw med spa pages extract structured services, prices, aliases, hours, and contact facts", () => {
@@ -191,6 +258,7 @@ test("quality gate fails rich clinic pages with too few services or no facts", (
         source_url: "https://clinic.example/services",
         source_page_id: null,
         source_quote: "Botox",
+        extraction_method: "deterministic",
         confidence: 0.8,
         sort_order: 0,
         synthetic_key: null,
@@ -219,6 +287,7 @@ test("quality gate fails rich clinic pages with too few services or no facts", (
         source_url: "https://clinic.example/services",
         source_page_id: null,
         source_quote: "Fillers",
+        extraction_method: "deterministic",
         confidence: 0.8,
         sort_order: 1,
         synthetic_key: null,

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { createEmptyExtractedProfile, type ExtractedProfile, type ScrapedPage, weekdayOrder } from "@/lib/demo-agent/contracts";
+import { createEmptyExtractedProfile, type ExtractedProfile, type ScrapedPage, type ScrapedStructuredBlock, weekdayOrder } from "@/lib/demo-agent/contracts";
 import { contentHash, normalizeServiceName, normalizeText, parseHours } from "@/lib/demo-agent/extraction";
 import { env } from "@/lib/env";
 import { logInfo, logWarn } from "@/lib/logger";
@@ -21,7 +21,16 @@ type PageType =
   | "booking"
   | "unknown";
 
-type ExtractionMethod = "deterministic" | "json_ld" | "llm";
+type ExtractionMethod =
+  | "deterministic"
+  | "json_ld"
+  | "jsonld_service"
+  | "dom_service_card"
+  | "pricing_table_row"
+  | "heading_with_following_text"
+  | "llm"
+  | "llm_service"
+  | "legacy_line_signal";
 
 export type PipelinePage = Omit<ScrapedPage, "pageType"> & {
   id?: string | null;
@@ -29,6 +38,8 @@ export type PipelinePage = Omit<ScrapedPage, "pageType"> & {
   organizationId?: string;
   pageType?: string | null;
   normalizedText?: string | null;
+  structuredBlocks?: ScrapedStructuredBlock[];
+  extractedJson?: Record<string, unknown> | null;
 };
 
 export type StructuredPrice = {
@@ -112,6 +123,7 @@ export type NormalizedService = {
   source_url: string | null;
   source_page_id: string | null;
   source_quote: string | null;
+  extraction_method: ExtractionMethod;
   confidence: number;
   sort_order: number | null;
   synthetic_key: string | null;
@@ -247,10 +259,19 @@ type LlmService = {
   name?: string;
   description?: string;
   category?: string;
+  subcategory?: string;
   price_text?: string;
   duration_text?: string;
   aliases?: string[];
   source_url?: string;
+  evidence_quote?: string;
+};
+
+type LlmPrice = {
+  service_name?: string;
+  price_text?: string;
+  source_url?: string;
+  evidence_quote?: string;
 };
 
 type LlmFaq = {
@@ -278,6 +299,7 @@ type LlmOffer = {
 type LlmExtraction = {
   business_name?: string;
   services?: LlmService[];
+  prices?: LlmPrice[];
   faqs?: LlmFaq[];
   staff?: LlmStaff[];
   offers?: LlmOffer[];
@@ -682,34 +704,38 @@ export function parseStructuredPrices(input: string): StructuredPrice[] {
     });
   }
 
-  for (const match of text.matchAll(/(?:series\s+of\s+(\d+)|series)\s*\$([0-9][0-9,]*(?:\.\d{2})?)/gi)) {
+  for (const match of text.matchAll(/(?:(series|package)\s+of\s+(\d+)|(series|package))\s*\$([0-9][0-9,]*(?:\.\d{2})?)/gi)) {
+    const packageType = (match[1] ?? match[3] ?? "series").toLowerCase();
+    const quantity = match[2] ? Number(match[2]) : null;
     addRow({
-      price_label: match[1] ? `Series of ${match[1]}` : "Series",
-      price_type: "series",
+      price_label: quantity ? `${titleCase(packageType)} of ${quantity}` : titleCase(packageType),
+      price_type: packageType === "package" ? "package" : "series",
       amount_min_cents: null,
       amount_max_cents: null,
-      amount_cents: centsFromAmount(match[2]),
-      unit: "series",
-      package_quantity: match[1] ? Number(match[1]) : null,
+      amount_cents: centsFromAmount(match[4]),
+      unit: packageType,
+      package_quantity: quantity,
       raw_price_text: match[0],
     });
   }
 
-  for (const match of text.matchAll(/\$([0-9][0-9,]*(?:\.\d{2})?)(\+)?(?:\s*\/\s*(unit|area|session|treatment|package|series))?/gi)) {
+  for (const match of text.matchAll(/\$([0-9][0-9,]*(?:\.\d{2})?)(\+)?(?:\s*(?:\/|per)\s*(unit|area|session|treatment|package|series))?/gi)) {
     const before = text.slice(Math.max(0, match.index - 24), match.index).toLowerCase();
+    const after = text.slice(match.index + match[0].length, match.index + match[0].length + 24).toLowerCase();
     const raw = match[0];
     if (rows.some((row) => row.raw_price_text.includes(raw) && row.price_type !== "fixed")) continue;
     const cents = centsFromAmount(match[1]);
-    const isAddOn = /\badd\s*-?\s*on\b/.test(before);
-    const isConsult = /\bconsult/.test(before);
-    const unit = match[3]?.toLowerCase() ?? (/\bper\s+unit\b|\bunit\b/.test(before) ? "unit" : null);
+    const isAddOn = /\badd\s*-?\s*on\b/.test(`${before} ${after}`);
+    const isConsult = /\bconsult/.test(`${before} ${after}`);
+    const isStarting = Boolean(match[2]) || /\b(starting at|starts at|from)\s*$/i.test(before);
+    const unit = match[3]?.toLowerCase() ?? (/\bper\s+unit\b|\bunit\b/.test(`${before} ${after}`) ? "unit" : null);
 
     addRow({
-      price_label: isAddOn ? "Add on" : isConsult ? "Consultation" : match[2] ? "Starting at" : "Standard",
-      price_type: isAddOn ? "add_on" : isConsult ? "consultation" : unit === "unit" ? "per_unit" : match[2] ? "starting_at" : "fixed",
-      amount_min_cents: match[2] ? cents : null,
+      price_label: isAddOn ? "Add on" : isConsult ? "Consultation" : isStarting ? "Starting at" : "Standard",
+      price_type: isAddOn ? "add_on" : isConsult ? "consultation" : unit === "unit" ? "per_unit" : isStarting ? "starting_at" : "fixed",
+      amount_min_cents: isStarting ? cents : null,
       amount_max_cents: null,
-      amount_cents: match[2] ? null : cents,
+      amount_cents: isStarting ? null : cents,
       unit,
       package_quantity: null,
       raw_price_text: raw,
@@ -762,6 +788,14 @@ function makeAliases(name: string, websiteAliases: string[] = []) {
     add("HydraFacial MD", "brand", 0.82);
     add("hydro facial", "stt_phonetic", 0.68);
   }
+  if (/acne facial|clarifying/i.test(name)) {
+    add("Clarifying Facial", "common", 0.86);
+    add("Clarifying Acne Facial", "common", 0.9);
+  }
+  if (/microchannel|procell/i.test(name)) {
+    add("Procell", "brand", 0.9);
+    add("Micro Needling", "stt_phonetic", 0.62);
+  }
   if (/dysport/i.test(name)) {
     add("Disport", "stt_phonetic", 0.72);
     add("Dysport injection", "common", 0.84);
@@ -771,6 +805,10 @@ function makeAliases(name: string, websiteAliases: string[] = []) {
     add("thread lift", "common", 0.86);
   }
   if (/botox/i.test(name)) add("Botox injection", "common", 0.86);
+  if (/\bfiller|fillers\b/i.test(name)) {
+    add("Dermal Filler", "common", 0.86);
+    add("Lip Filler", "common", 0.78);
+  }
   if (/prp|prf/i.test(name)) add("PRP", "abbreviation", 0.8);
 
   return [...aliases.values()];
@@ -829,6 +867,235 @@ function summarizePrices(prices: StructuredPrice[]) {
   return cleanSentence(`Pricing ${asSentenceList(parts)}`, 260);
 }
 
+function extractedBlocks(page: PipelinePage): ScrapedStructuredBlock[] {
+  if (Array.isArray(page.structuredBlocks)) return page.structuredBlocks;
+  const raw = page.extractedJson?.structuredBlocks;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((entry): entry is ScrapedStructuredBlock => Boolean(entry && typeof entry === "object" && typeof (entry as Record<string, unknown>).text === "string"))
+    .slice(0, 120);
+}
+
+function flattenJsonLd(jsonLd: unknown[]) {
+  const nodes: Record<string, unknown>[] = [];
+  const visit = (value: unknown) => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const record = value as Record<string, unknown>;
+    nodes.push(record);
+    if (Array.isArray(record["@graph"])) record["@graph"].forEach(visit);
+    if (record.itemListElement) visit(record.itemListElement);
+    if (record.offers) visit(record.offers);
+    if (record.address) visit(record.address);
+    if (record.openingHoursSpecification) visit(record.openingHoursSpecification);
+  };
+  jsonLd.forEach(visit);
+  return nodes;
+}
+
+function jsonLdTypes(node: Record<string, unknown>) {
+  const type = node["@type"];
+  return Array.isArray(type) ? type.map(String) : type ? [String(type)] : [];
+}
+
+function firstStringValue(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "string" && normalizeText(value)) return normalizeText(value);
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return null;
+}
+
+function jsonLdPriceEvidence(value: unknown): string {
+  if (!value) return "";
+  const nodes = Array.isArray(value) ? value : [value];
+  return nodes
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return "";
+      const record = entry as Record<string, unknown>;
+      const price = firstStringValue(record.price, record.lowPrice, record.highPrice, record.priceRange);
+      if (!price) return "";
+      const amount = price.startsWith("$") ? price : `$${price}`;
+      const label = firstStringValue(record.name, record.description);
+      return [label, amount].filter(Boolean).join(" ");
+    })
+    .filter(Boolean)
+    .join(" ");
+}
+
+function serviceFromCandidate(input: {
+  rawName: string;
+  page: PipelinePage;
+  evidence: string;
+  confidence: number;
+  method: ExtractionMethod;
+  category?: string | null;
+  subcategory?: string | null;
+  aliases?: string[];
+}): NormalizedService | null {
+  const rawName = normalizeText(input.rawName);
+  if (!looksLikeServiceHeading(rawName, "service_detail")) return null;
+  const displayName = titleCase(rawName.replace(/[:|]+$/, ""));
+  const canonicalName = normalizeServiceName(displayName);
+  const slug = serviceSlug(canonicalName);
+  if (!slug || neverServiceLabels.has(displayName.toLowerCase()) || isJunkText(displayName)) return null;
+  const duration = parseDuration(input.evidence);
+  const prices = parseStructuredPrices(input.evidence);
+  return {
+    id: randomUUID(),
+    canonical_name: canonicalName,
+    display_name: displayName,
+    service_slug: slug,
+    category: input.category ? titleCase(input.category) : inferServiceCategory(canonicalName),
+    subcategory: input.subcategory ?? null,
+    description_short: input.evidence.length > displayName.length ? shortQuote(input.evidence, 180) : null,
+    description_long: input.evidence.length > displayName.length ? input.evidence : null,
+    is_bookable: true,
+    is_product: false,
+    is_membership: /\bmembership\b/i.test(canonicalName),
+    is_consultation: /\bconsult/i.test(canonicalName),
+    duration_min_minutes: duration.min,
+    duration_max_minutes: duration.max,
+    starting_price_cents: lowestPrice(prices),
+    price_summary: summarizePrices(prices),
+    price_available: prices.length > 0,
+    currency: "USD",
+    source_url: input.page.url,
+    source_page_id: input.page.id ?? null,
+    source_quote: shortQuote(input.evidence),
+    extraction_method: input.method,
+    confidence: input.confidence,
+    sort_order: null,
+    synthetic_key: null,
+    aliases: makeAliases(displayName, input.aliases ?? []),
+    prices,
+  };
+}
+
+function servicesFromStructuredBlocks(page: PipelinePage) {
+  const services: NormalizedService[] = [];
+  const offers: NormalizedOffer[] = [];
+  const faqs: NormalizedFaq[] = [];
+
+  for (const block of extractedBlocks(page)) {
+    const text = normalizeText(block.text);
+    const heading = normalizeText(block.heading ?? "");
+    const evidence = [heading, text].filter(Boolean).join(" ");
+    if (!evidence) continue;
+
+    if (block.type === "faq" && heading.endsWith("?")) {
+      faqs.push({
+        id: randomUUID(),
+        service_id: null,
+        question: heading,
+        answer: text.replace(heading, "").trim() || text,
+        category: /insurance/i.test(evidence) ? "Insurance" : "FAQ",
+        source_url: page.url,
+        source_page_id: page.id ?? null,
+        confidence: 0.86,
+        is_medical_disclaimer_needed: /side effects|risks|medical|treatment/i.test(evidence),
+      });
+      continue;
+    }
+
+    if (block.type === "pricing_row" || /\$[0-9]/.test(evidence)) {
+      const service = serviceFromCandidate({
+        rawName: heading || text.split(/\||-|–/)[0],
+        page,
+        evidence,
+        confidence: block.type === "pricing_row" ? 0.9 : 0.78,
+        method: block.type === "pricing_row" ? "pricing_table_row" : "dom_service_card",
+      });
+      if (service) {
+        services.push(service);
+        continue;
+      }
+      const prices = parseStructuredPrices(evidence);
+      if (prices.length) {
+        offers.push({
+          id: randomUUID(),
+          title: heading || shortQuote(text.replace(/\$.*/, ""), 120),
+          description: text,
+          offer_type: "pricing_candidate",
+          related_service_id: null,
+          price_cents: prices[0].amount_cents ?? prices[0].amount_min_cents,
+          discount_text: null,
+          valid_from: null,
+          valid_until: null,
+          raw_text: evidence,
+          metadata: { unmapped_pricing_candidate: true },
+          source_url: page.url,
+          source_page_id: page.id ?? null,
+          confidence: 0.62,
+        });
+      }
+      continue;
+    }
+
+    if (["service_card", "accordion", "tab", "section"].includes(block.type)) {
+      const service = serviceFromCandidate({
+        rawName: heading || text.split(/[.\n]/)[0],
+        page,
+        evidence,
+        confidence: block.type === "service_card" ? 0.86 : 0.72,
+        method: block.type === "service_card" ? "dom_service_card" : "heading_with_following_text",
+      });
+      if (service) services.push(service);
+    }
+  }
+
+  return { services, offers, faqs };
+}
+
+function servicesFromJsonLd(page: PipelinePage) {
+  const services: NormalizedService[] = [];
+  const offers: NormalizedOffer[] = [];
+  for (const node of flattenJsonLd(page.jsonLd ?? [])) {
+    const types = jsonLdTypes(node).join(" ");
+    const item = node.item && typeof node.item === "object" ? node.item as Record<string, unknown> : null;
+    const serviceName = firstStringValue(node.name, item?.name);
+    const description = firstStringValue(node.description, item?.description) ?? serviceName ?? "";
+    const offerText = jsonLdPriceEvidence(node.offers) || jsonLdPriceEvidence(node) || JSON.stringify(node.offers ?? node.price ?? node.priceRange ?? "");
+    if (/\b(Service|MedicalProcedure|Product)\b/i.test(types) || (serviceName && /\bservice|treatment|facial|inject|laser|botox|filler/i.test(`${types} ${serviceName}`))) {
+      const service = serviceFromCandidate({
+        rawName: serviceName ?? "",
+        page,
+        evidence: [serviceName, description, offerText].filter(Boolean).join(" "),
+        confidence: /Service|MedicalProcedure/i.test(types) ? 0.94 : 0.84,
+        method: "jsonld_service",
+        category: firstStringValue(node.category, node.serviceType),
+      });
+      if (service) services.push(service);
+    }
+    if (/\bOffer\b/i.test(types) || node.price || node.lowPrice || node.highPrice) {
+      const priceText = [node.price, node.lowPrice, node.highPrice, node.priceRange].map((value) => (value === undefined ? "" : `$${String(value).replace(/^\$/, "")}`)).filter(Boolean).join(" ");
+      const prices = parseStructuredPrices(priceText || JSON.stringify(node));
+      if (prices.length) {
+        offers.push({
+          id: randomUUID(),
+          title: serviceName ?? "Published offer",
+          description: description || null,
+          offer_type: "json_ld_offer",
+          related_service_id: null,
+          price_cents: prices[0].amount_cents ?? prices[0].amount_min_cents,
+          discount_text: null,
+          valid_from: firstStringValue(node.validFrom),
+          valid_until: firstStringValue(node.validThrough),
+          raw_text: shortQuote(JSON.stringify(node), 500),
+          metadata: { json_ld: true },
+          source_url: page.url,
+          source_page_id: page.id ?? null,
+          confidence: 0.88,
+        });
+      }
+    }
+  }
+  return { services, offers };
+}
+
 function extractServicesFromPage(page: PipelinePage, pageType: PageType): { services: NormalizedService[]; products: NormalizedProduct[]; offers: NormalizedOffer[] } {
   if (shouldIgnorePageForExtraction(page)) return { services: [], products: [], offers: [] };
   const text = page.normalizedText ?? normalizeExtractionPageText(page.cleanedText);
@@ -836,6 +1103,12 @@ function extractServicesFromPage(page: PipelinePage, pageType: PageType): { serv
   const services: NormalizedService[] = [];
   const products: NormalizedProduct[] = [];
   const offers: NormalizedOffer[] = [];
+  const structured = servicesFromStructuredBlocks(page);
+  services.push(...structured.services);
+  offers.push(...structured.offers);
+  const jsonLdExtracted = servicesFromJsonLd(page);
+  services.push(...jsonLdExtracted.services);
+  offers.push(...jsonLdExtracted.offers);
   let current: NormalizedService | null = null;
 
   const createService = (rawName: string, evidence: string, confidence: number) => {
@@ -867,6 +1140,7 @@ function extractServicesFromPage(page: PipelinePage, pageType: PageType): { serv
       source_url: page.url,
       source_page_id: page.id ?? null,
       source_quote: shortQuote(evidence),
+      extraction_method: "legacy_line_signal",
       confidence,
       sort_order: null,
       synthetic_key: null,
@@ -954,9 +1228,15 @@ function extractServicesFromPage(page: PipelinePage, pageType: PageType): { serv
 function inferServiceCategory(name: string) {
   const lower = name.toLowerCase();
   if (/botox|dysport|filler|kybella|sculptra|pdo|thread/.test(lower)) return "Injectables";
-  if (/hydra|facial|peel|dermaplan|microneedl|plasma|laser/.test(lower)) return "Skin treatments";
-  if (/prp|prf|hair/.test(lower)) return "Regenerative";
-  if (/cleaning|whitening|crown|implant|invisalign|root canal|veneer|denture|filling/.test(lower)) return "Dental";
+  if (/facial|hydra|dermaplan|acne/.test(lower)) return "Facials";
+  if (/microchannel|microneedl|chemical peel|peel|resurfac|plasma/.test(lower)) return "Skin resurfacing";
+  if (/laser|ipl|rf|radiofrequency|morpheus|energy/.test(lower)) return "Laser and energy";
+  if (/iv|weight|wellness|body|cellulite|qwo/.test(lower)) return "Body and wellness";
+  if (/prp|prf|hair/.test(lower)) return "Hair restoration";
+  if (/consult/.test(lower)) return "Consultations";
+  if (/cleaning|exam|x-ray|filling|root canal|emergency/.test(lower)) return "Dental general";
+  if (/whitening|veneer|invisalign|cosmetic/.test(lower)) return "Dental cosmetic";
+  if (/crown|implant|bridge|denture|surgical|extraction/.test(lower)) return "Dental surgical";
   return null;
 }
 
@@ -966,7 +1246,7 @@ function serviceFromLlm(entry: LlmService, sourceUrl: string | null): Normalized
   const description = cleanSentence(entry.description ?? name, 360);
   const priceText = normalizeText(entry.price_text ?? "");
   const durationText = normalizeText(entry.duration_text ?? "");
-  const evidence = [name, description, durationText, priceText].filter(Boolean).join(" ");
+  const evidence = [name, description, durationText, priceText, entry.evidence_quote].filter(Boolean).join(" ");
   const duration = parseDuration(evidence);
   const prices = parseStructuredPrices(evidence);
   const displayName = titleCase(name);
@@ -978,7 +1258,7 @@ function serviceFromLlm(entry: LlmService, sourceUrl: string | null): Normalized
     display_name: displayName,
     service_slug: serviceSlug(canonicalName),
     category: entry.category ? titleCase(entry.category) : inferServiceCategory(canonicalName),
-    subcategory: null,
+    subcategory: entry.subcategory ? titleCase(entry.subcategory) : null,
     description_short: description || null,
     description_long: description || null,
     is_bookable: true,
@@ -993,7 +1273,8 @@ function serviceFromLlm(entry: LlmService, sourceUrl: string | null): Normalized
     currency: "USD",
     source_url: entry.source_url ?? sourceUrl,
     source_page_id: null,
-    source_quote: shortQuote(evidence),
+    source_quote: shortQuote(entry.evidence_quote ?? evidence),
+    extraction_method: "llm_service",
     confidence: 0.9,
     sort_order: null,
     synthetic_key: null,
@@ -1009,8 +1290,22 @@ function applyLlmExtraction(result: NormalizedExtractionResult, llm: LlmExtracti
     ...result.services,
     ...(llm.services ?? []).map((entry) => serviceFromLlm(entry, sourceUrl)).filter((service): service is NormalizedService => Boolean(service)),
   ]);
-  const serviceBySlug = new Map(services.map((service) => [service.service_slug, service]));
-
+  for (const price of llm.prices ?? []) {
+    const serviceName = normalizeText(price.service_name ?? "");
+    const priceText = normalizeText(price.price_text ?? "");
+    if (!serviceName || !priceText) continue;
+    const parsed = parseStructuredPrices(`${serviceName} ${priceText} ${price.evidence_quote ?? ""}`);
+    if (!parsed.length) continue;
+    const slug = serviceSlug(normalizeServiceName(serviceName));
+    const service = services.find((entry) => entry.service_slug === slug || entry.aliases.some((alias) => serviceSlug(alias.alias) === slug));
+    if (!service) continue;
+    for (const row of parsed) service.prices.push(row);
+    service.price_available = true;
+    service.starting_price_cents = lowestPrice(service.prices);
+    service.price_summary = summarizePrices(service.prices);
+    service.source_url ||= price.source_url ?? sourceUrl;
+    service.source_quote ||= price.evidence_quote ?? priceText;
+  }
   const faqs = [
     ...result.faqs,
     ...(llm.faqs ?? [])
@@ -1121,6 +1416,8 @@ function extractFaqs(pages: PipelinePage[]) {
   const faqs: NormalizedFaq[] = [];
   for (const page of pages) {
     if (shouldIgnorePageForExtraction(page)) continue;
+    const structured = servicesFromStructuredBlocks(page);
+    faqs.push(...structured.faqs);
     const text = page.normalizedText ?? normalizeExtractionPageText(page.cleanedText);
     const lines = text.split(/\n+/).map(normalizeText).filter(Boolean);
     for (let index = 0; index < lines.length - 1; index += 1) {
@@ -1180,13 +1477,41 @@ function extractStaff(pages: PipelinePage[]) {
   });
 }
 
+function jsonLdBusinessData(pages: PipelinePage[]) {
+  const businessTypes = /LocalBusiness|Dentist|MedicalBusiness|HealthAndBeautyBusiness|Organization/i;
+  for (const page of pages) {
+    for (const node of flattenJsonLd(page.jsonLd ?? [])) {
+      const types = jsonLdTypes(node).join(" ");
+      if (!businessTypes.test(types)) continue;
+      const address = node.address && typeof node.address === "object" ? node.address as Record<string, unknown> : {};
+      return {
+        sourceUrl: page.url,
+        sourcePageId: page.id ?? null,
+        name: firstStringValue(node.name),
+        phone: firstStringValue(node.telephone, node.phone),
+        email: firstStringValue(node.email),
+        address: {
+          line1: firstStringValue(address.streetAddress),
+          city: firstStringValue(address.addressLocality),
+          region: firstStringValue(address.addressRegion),
+          postalCode: firstStringValue(address.postalCode),
+          country: firstStringValue(address.addressCountry) ?? "US",
+          raw: [address.streetAddress, address.addressLocality, address.addressRegion, address.postalCode].map((value) => String(value ?? "")).filter(Boolean).join(", "),
+        },
+      };
+    }
+  }
+  return null;
+}
+
 function makeFactsAndLocation(pages: PipelinePage[], context: ExtractionContext) {
   const combinedText = pages.map((page) => page.normalizedText ?? normalizeExtractionPageText(page.cleanedText)).join("\n");
   const firstPage = pages[0];
-  const businessName = context.businessNameHint || pages.map(businessNameFromPage).find(Boolean) || "Unknown Clinic";
-  const phoneDisplay = extractPhone(combinedText);
-  const email = extractEmail(combinedText);
-  const address = extractAddress(combinedText);
+  const jsonLdBusiness = jsonLdBusinessData(pages);
+  const businessName = context.businessNameHint || jsonLdBusiness?.name || pages.map(businessNameFromPage).find(Boolean) || "Unknown Clinic";
+  const phoneDisplay = jsonLdBusiness?.phone ?? extractPhone(combinedText);
+  const email = jsonLdBusiness?.email ?? extractEmail(combinedText);
+  const address = jsonLdBusiness?.address?.line1 ? jsonLdBusiness.address : extractAddress(combinedText);
   const facts: NormalizedFact[] = [];
   const addFact = (fact_type: string, fact_key: string, value: string | null, normalized: string | null, confidence: number, method: ExtractionMethod, sourceUrl?: string | null, quote?: string | null) => {
     if (!value) return;
@@ -1204,16 +1529,18 @@ function makeFactsAndLocation(pages: PipelinePage[], context: ExtractionContext)
     });
   };
 
-  addFact("business_name", "name", businessName, businessName.toLowerCase(), businessName === "Unknown Clinic" ? 0.3 : 0.82, "deterministic", firstPage?.url, businessName);
+  addFact("business_name", "name", businessName, businessName.toLowerCase(), businessName === "Unknown Clinic" ? 0.3 : jsonLdBusiness?.name ? 0.94 : 0.82, jsonLdBusiness?.name ? "json_ld" : "deterministic", jsonLdBusiness?.sourceUrl ?? firstPage?.url, businessName);
   addFact("website", "primary", context.websiteUrl, context.websiteUrl, 0.95, "deterministic", context.websiteUrl, context.websiteUrl);
   addFact("phone", "primary", phoneDisplay, phoneDisplay ? normalizedPhone(phoneDisplay) : null, 0.88, "deterministic", firstPage?.url, phoneDisplay);
   addFact("email", "primary", email, email, 0.88, "deterministic", firstPage?.url, email);
   if (address) {
-    addFact("address", "primary", address.raw, address.raw.toLowerCase(), 0.84, "deterministic", firstPage?.url, address.raw);
-    addFact("city", "primary", address.city, address.city.toLowerCase(), 0.84, "deterministic", firstPage?.url, address.raw);
-    addFact("state", "primary", address.region, address.region, 0.84, "deterministic", firstPage?.url, address.raw);
-    addFact("postal_code", "primary", address.postalCode, address.postalCode, 0.84, "deterministic", firstPage?.url, address.raw);
-    addFact("country", "primary", address.country, address.country, 0.8, "deterministic", firstPage?.url, address.raw);
+    const addressMethod = jsonLdBusiness?.address?.line1 ? "json_ld" : "deterministic";
+    const addressConfidence = addressMethod === "json_ld" ? 0.94 : 0.84;
+    addFact("address", "primary", address.raw, address.raw.toLowerCase(), addressConfidence, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, address.raw);
+    addFact("city", "primary", address.city, address.city.toLowerCase(), addressConfidence, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, address.raw);
+    addFact("state", "primary", address.region, address.region, addressConfidence, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, address.raw);
+    addFact("postal_code", "primary", address.postalCode, address.postalCode, addressConfidence, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, address.raw);
+    addFact("country", "primary", address.country, address.country, 0.8, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, address.raw);
   }
 
   const locations: NormalizedLocation[] = address || phoneDisplay || email ? [{
@@ -1237,6 +1564,54 @@ function makeFactsAndLocation(pages: PipelinePage[], context: ExtractionContext)
 }
 
 function extractHours(pages: PipelinePage[], context: ExtractionContext) {
+  const jsonLdHours: NormalizedHour[] = [];
+  for (const page of pages) {
+    for (const node of flattenJsonLd(page.jsonLd ?? [])) {
+      const specs = node.openingHoursSpecification;
+      const rows = Array.isArray(specs) ? specs : specs ? [specs] : [];
+      for (const spec of rows) {
+        if (!spec || typeof spec !== "object") continue;
+        const record = spec as Record<string, unknown>;
+        const days = Array.isArray(record.dayOfWeek) ? record.dayOfWeek : record.dayOfWeek ? [record.dayOfWeek] : [];
+        const opens = firstStringValue(record.opens);
+        const closes = firstStringValue(record.closes);
+        for (const dayValue of days) {
+          const label = String(dayValue).toLowerCase();
+          const dayIndex = weekdayOrder.findIndex((day) => label.includes(day));
+          if (dayIndex < 0) continue;
+          jsonLdHours.push({
+            id: randomUUID(),
+            day_of_week: dayIndex,
+            opens_at: opens,
+            closes_at: closes,
+            is_closed: !opens || !closes,
+            by_appointment_only: false,
+            raw_text: `${dayValue} ${opens ?? ""}-${closes ?? ""}`.trim(),
+            timezone: context.timezone ?? "America/New_York",
+            source_url: page.url,
+            confidence: 0.92,
+          });
+        }
+      }
+    }
+  }
+  if (jsonLdHours.length) {
+    const byDay = new Map<number, NormalizedHour>();
+    for (const row of jsonLdHours) byDay.set(row.day_of_week, row);
+    return weekdayOrder.map((_, index) => byDay.get(index) ?? {
+      id: randomUUID(),
+      day_of_week: index,
+      opens_at: null,
+      closes_at: null,
+      is_closed: true,
+      by_appointment_only: false,
+      raw_text: null,
+      timezone: context.timezone ?? "America/New_York",
+      source_url: pages[0]?.url ?? context.websiteUrl,
+      confidence: 0.7,
+    });
+  }
+
   const combinedText = pages.map((page) => page.normalizedText ?? normalizeExtractionPageText(page.cleanedText)).join("\n");
   const parsed = parseHours(combinedText);
   const hasOpen = weekdayOrder.some((day) => parsed[day].open);
@@ -1282,8 +1657,17 @@ function buildVoiceAnswers(input: {
   };
 
   if (input.services.length) {
-    const grouped = asSentenceList(input.services.slice(0, 14).map((service) => service.display_name));
-    add("services_list", `${input.businessName} offers ${grouped}.`, 0.9, null, sourceUrls(input.services.map((service) => service.source_url)));
+    const categories = [...new Set(input.services.map((service) => service.category).filter(Boolean))] as string[];
+    const grouped = categories.length >= 2
+      ? asSentenceList(categories.slice(0, 6))
+      : asSentenceList(input.services.slice(0, 8).map((service) => service.display_name));
+    add("services_list", `${input.businessName} offers ${grouped}. Which one would you like to ask about?`, 0.9, null, sourceUrls(input.services.map((service) => service.source_url)));
+    for (const category of categories) {
+      const categoryServices = input.services.filter((service) => service.category === category).slice(0, 8);
+      if (categoryServices.length >= 2) {
+        add("service_category_list", `The ${category.toLowerCase()} menu includes ${asSentenceList(categoryServices.map((service) => service.display_name))}.`, 0.88, null, sourceUrls(categoryServices.map((service) => service.source_url)));
+      }
+    }
   }
 
   const openHours = input.hours.filter((hour) => !hour.is_closed && hour.opens_at && hour.closes_at);
@@ -1460,6 +1844,10 @@ export function evaluateProfileQuality(input: {
   const priceTextExists = input.pages.some((page) => /\$[0-9]/.test(page.cleanedText));
   const genericOnly = input.services.length > 0 && input.services.every((service) => broadCategoryLabels.has(service.display_name.toLowerCase()));
   const hasServicePages = input.pages.some((page) => /service|treatment|pricing|hydra|botox|filler|dental/i.test(`${page.url} ${page.title ?? ""} ${page.cleanedText.slice(0, 1000)}`));
+  const nonGenericServices = input.services.filter((service) => !broadCategoryLabels.has(service.display_name.toLowerCase()));
+  const serviceCategories = [...new Set(input.services.map((service) => service.category).filter(Boolean))];
+  const serviceMenuPreview = asSentenceList(input.services.slice(0, 8).map((service) => service.display_name));
+  const categoryPreview = asSentenceList(serviceCategories.slice(0, 5) as string[]);
 
   if (!input.businessName || input.businessName === "Unknown Clinic") fail("business_name", "Business name is missing.");
   else pass("business_name", "Business name extracted.");
@@ -1471,7 +1859,11 @@ export function evaluateProfileQuality(input: {
   else pass("address", "Address extracted.");
 
   if (hasServicePages && input.services.length < 5) warn("services_count", 30, "Website appears service-rich but fewer than 5 real services were extracted.", { services: input.services.length });
+  else if (nonGenericServices.length < 3) warn("non_generic_services_count", 20, "Fewer than 3 non-generic services were extracted.", { services: nonGenericServices.length });
   else pass("services_count", "Service count is sufficient for the scraped pages.", { services: input.services.length });
+
+  if (input.services.length > 5 && serviceCategories.length < 2) warn("service_category_coverage", 10, "Service category coverage is thin for a larger menu.", { categories: serviceCategories });
+  else if (input.services.length > 5) pass("service_category_coverage", "Service categories extracted.", { categories: serviceCategories });
 
   if (!input.facts.length) fail("facts_count", "No clinic facts were extracted.");
   else pass("facts_count", "Clinic facts extracted.", { facts: input.facts.length });
@@ -1481,6 +1873,16 @@ export function evaluateProfileQuality(input: {
 
   if (genericOnly) fail("generic_services", "Service list is generic taxonomy only.");
   else pass("generic_services", "Service list is not generic-only.");
+
+  const genericWithChildren = input.services.filter((service) =>
+    broadCategoryLabels.has(service.display_name.toLowerCase()) && input.services.some((child) => child.id !== service.id && child.category === service.category),
+  );
+  if (genericWithChildren.length) fail("generic_category_services", "Broad category labels were promoted as services even though child services exist.", { services: genericWithChildren.map((service) => service.display_name) });
+  else pass("generic_category_services", "Broad categories are not promoted over child services.");
+
+  const navLikeServices = input.services.filter((service) => neverServiceLabels.has(service.display_name.toLowerCase()) || isJunkText(service.display_name));
+  if (navLikeServices.length) fail("navigation_services", "Navigation, review, product, or CTA text became service names.", { services: navLikeServices.map((service) => service.display_name) });
+  else pass("navigation_services", "Service names do not look like navigation or CTA text.");
 
   if (input.services.some((service) => !service.source_url)) warn("service_sources", 20, "Some services are missing source URLs.");
   else if (input.services.length) pass("service_sources", "Services have source URLs.");
@@ -1494,6 +1896,14 @@ export function evaluateProfileQuality(input: {
 
   if (!input.faqs.length) warn("faqs", 4, "No FAQs were extracted.");
   else pass("faqs", "FAQs extracted.");
+
+  if (serviceMenuPreview.length > 220) warn("voice_service_menu_short", 10, "Voice service menu preview is too long.", { length: serviceMenuPreview.length });
+  else pass("voice_service_menu_short", "Voice service menu preview is compact.", { length: serviceMenuPreview.length });
+
+  if (categoryPreview.length > 160) warn("voice_service_categories_short", 5, "Voice category preview is too long.", { length: categoryPreview.length });
+  else if (categoryPreview) pass("voice_service_categories_short", "Voice category preview is compact.", { length: categoryPreview.length });
+
+  if (input.services.length && nonGenericServices.length === input.services.length) pass("safe_service_names_full", "Safe service names can preserve the full service list.", { services: input.services.length });
 
   const requiredAnswers = new Set(["services_list", "hours", "address"]);
   const presentAnswers = new Set(input.voiceAnswers.map((answer) => answer.answer_type));
@@ -1556,12 +1966,20 @@ function buildSnapshot(input: {
   profile.services = input.services.map((service) => ({
     name: service.display_name,
     aliases: service.aliases.map((alias) => alias.alias),
+    category: service.category,
+    subcategory: service.subcategory,
+    voice_label: service.display_name,
+    voice_category: service.category,
     description: service.description_short ?? service.description_long ?? "",
     duration_minutes: service.duration_min_minutes,
     price_text: service.price_summary,
     price_min_cents: service.starting_price_cents,
+    price_summary: service.price_summary,
+    price_available: service.price_available,
     bookable: service.is_bookable,
     source_url: service.source_url ?? "",
+    source_quote: service.source_quote,
+    extraction_method: service.extraction_method,
     confidence: service.confidence,
   }));
   profile.faqs = input.faqs.map((faq) => ({
@@ -1659,20 +2077,32 @@ function normalizeLlmExtraction(value: Record<string, unknown> | null): LlmExtra
   };
 }
 
-function llmInputForPages(pages: PipelinePage[]) {
-  return pages
+function llmInputForPages(pages: PipelinePage[], candidates: NormalizedService[]) {
+  const pageInput = pages
     .filter((page) => !shouldIgnorePageForExtraction(page))
     .filter((page) => !["policies", "booking", "products"].includes(String(page.pageType ?? "")))
     .slice(0, 12)
-    .map((page, index) => `PAGE ${index + 1}\nURL: ${page.url}\nTYPE: ${page.pageType ?? "unknown"}\nTEXT:\n${(page.normalizedText ?? page.cleanedText).slice(0, 5000)}`)
+    .map((page, index) => {
+      const blocks = extractedBlocks(page).slice(0, 12).map((block) => `[${block.type}] ${block.heading ?? ""}: ${block.text.slice(0, 700)}`).join("\n");
+      const jsonLdSummary = page.extractedJson?.jsonLdSummary ?? page.jsonLdSummary ?? {};
+      return `PAGE ${index + 1}\nURL: ${page.url}\nTYPE: ${page.pageType ?? "unknown"}\nJSON_LD_SUMMARY: ${JSON.stringify(jsonLdSummary).slice(0, 1200)}\nSTRUCTURED_BLOCKS:\n${blocks}\nTEXT:\n${(page.normalizedText ?? page.cleanedText).slice(0, 3800)}`;
+    })
     .join("\n\n---\n\n")
     .slice(0, 45000);
+  const candidateInput = candidates.slice(0, 40).map((service) => ({
+    name: service.display_name,
+    category: service.category,
+    source_url: service.source_url,
+    source_quote: service.source_quote,
+    prices: service.prices.map((price) => price.raw_price_text),
+  }));
+  return `${pageInput}\n\nKNOWN_DETERMINISTIC_CANDIDATES:\n${JSON.stringify(candidateInput).slice(0, 8000)}`;
 }
 
-async function extractWithOpenAI(pages: PipelinePage[], context: ExtractionContext): Promise<LlmExtraction | null> {
+async function extractWithOpenAI(pages: PipelinePage[], context: ExtractionContext, candidates: NormalizedService[]): Promise<LlmExtraction | null> {
   const apiKey = env.OPENAI_API_KEY?.trim();
   if (!apiKey || env.EXTRACTION_MODE === "free") return null;
-  const input = llmInputForPages(pages);
+  const input = llmInputForPages(pages, candidates);
   if (!input) return null;
   const model = selectExtractionModel();
 
@@ -1689,11 +2119,11 @@ async function extractWithOpenAI(pages: PipelinePage[], context: ExtractionConte
           {
             role: "system",
             content:
-              "Extract only real clinic facts from scraped med spa or dental website text. Ignore navigation, footer, cart, privacy, policy, article index, reviews, and error-page text. Return compact JSON only.",
+              "Extract only real clinic facts from scraped med spa or dental website data. Ignore navigation, footer, cart, privacy, policy, article index, reviews, and error-page text. Do not invent categories, services, prices, benefits, or medical claims. Return compact JSON only.",
           },
           {
             role: "user",
-            content: `Website: ${context.websiteUrl}\nBusiness hint: ${context.businessNameHint ?? ""}\nReturn JSON with keys: business_name, services[{name,description,category,price_text,duration_text,aliases,source_url}], faqs[{question,answer,category,source_url}], staff[{full_name,role_title,bio,source_url}], offers[{title,description,discount_text,price_text,source_url}]. Pricing and answers must be complete spoken sentences. Do not include sources inside any spoken text.\n\n${input}`,
+            content: `Website: ${context.websiteUrl}\nBusiness hint: ${context.businessNameHint ?? ""}\nReturn JSON exactly shaped like: {"business_name":string|null,"services":[{"name":string,"category":string|null,"subcategory":string|null,"description":string|null,"price_text":string|null,"duration_text":string|null,"aliases":string[],"source_url":string|null,"evidence_quote":string|null}],"prices":[{"service_name":string|null,"price_text":string,"source_url":string|null,"evidence_quote":string|null}],"faqs":[{"question":string,"answer":string,"category":string|null,"source_url":string|null}],"staff":[{"full_name":string,"role_title":string|null,"bio":string|null,"source_url":string|null}],"offers":[{"title":string,"description":string|null,"discount_text":string|null,"price_text":string|null,"source_url":string|null}]}.\nRules: Extract only services actually published on the clinic site. Keep service names as menu labels. Use null when price is missing. Every service and price must have source_url or evidence_quote. Do not include treatment benefits or claims in spoken fields.\n\n${input}`,
           },
         ],
         text: { format: { type: "json_object" } },
@@ -1944,6 +2374,10 @@ export async function writeNormalizedExtraction(input: {
 }
 
 function dbPageToPipelinePage(row: Record<string, unknown>): PipelinePage {
+  const extractedJson = row.extracted_json && typeof row.extracted_json === "object" && !Array.isArray(row.extracted_json)
+    ? row.extracted_json as Record<string, unknown>
+    : {};
+  const blocks = Array.isArray(extractedJson.structuredBlocks) ? extractedJson.structuredBlocks as ScrapedStructuredBlock[] : [];
   return {
     id: String(row.id),
     url: String(row.url),
@@ -1955,6 +2389,8 @@ function dbPageToPipelinePage(row: Record<string, unknown>): PipelinePage {
     html: "",
     jsonLd: Array.isArray(row.json_ld) ? row.json_ld : [],
     links: [],
+    structuredBlocks: blocks,
+    extractedJson,
     httpStatus: typeof row.http_status === "number" ? row.http_status : null,
     pageType: typeof row.page_type === "string" ? row.page_type : "unknown",
   };
@@ -2048,6 +2484,7 @@ export async function executeLeadProfileExtraction(options: DbExtractionOptions)
       pageType: pageUpdate.page_type,
     })),
     extractionContext,
+    deterministicResult.services,
   );
   const result = applyLlmExtraction(deterministicResult, llmExtraction, extractionContext);
 

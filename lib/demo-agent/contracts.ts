@@ -49,12 +49,20 @@ export const extractedProfileSchema = z.object({
     z.object({
       name: z.string(),
       aliases: z.array(z.string()).default([]),
+      category: z.string().nullable().optional().default(null),
+      subcategory: z.string().nullable().optional().default(null),
+      voice_label: z.string().nullable().optional().default(null),
+      voice_category: z.string().nullable().optional().default(null),
       description: z.string().default(""),
       duration_minutes: z.number().int().nullable(),
       price_text: z.string().nullable(),
       price_min_cents: z.number().int().nullable(),
+      price_summary: z.string().nullable().optional().default(null),
+      price_available: z.boolean().optional().default(false),
       bookable: z.boolean().default(true),
       source_url: z.string().default(""),
+      source_quote: z.string().nullable().optional().default(null),
+      extraction_method: z.string().nullable().optional().default(null),
       confidence: z.number().min(0).max(1).default(0),
     }),
   ),
@@ -88,6 +96,29 @@ export const extractedProfileSchema = z.object({
 
 export type ExtractedProfile = z.infer<typeof extractedProfileSchema>;
 
+export type ScrapedLink = {
+  href: string;
+  text: string;
+  ariaLabel: string | null;
+  title: string | null;
+};
+
+export type ScrapedStructuredBlock = {
+  type:
+    | "section"
+    | "service_card"
+    | "pricing_row"
+    | "faq"
+    | "accordion"
+    | "tab"
+    | "contact"
+    | "hours";
+  heading: string | null;
+  text: string;
+  items?: Array<Record<string, unknown>>;
+  source?: string | null;
+};
+
 export type ScrapedPage = {
   url: string;
   canonicalUrl: string | null;
@@ -97,6 +128,9 @@ export type ScrapedPage = {
   html: string;
   jsonLd: unknown[];
   links: string[];
+  linkHints?: ScrapedLink[];
+  structuredBlocks?: ScrapedStructuredBlock[];
+  jsonLdSummary?: Record<string, unknown>;
   httpStatus: number | null;
   pageType: string;
 };

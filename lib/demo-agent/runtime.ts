@@ -144,8 +144,13 @@ export function buildAgentSettingsConfig(profile: ExtractedProfile) {
     ),
     services: profile.services.map((service) => ({
       name: service.name,
+      category: service.category ?? service.voice_category ?? null,
+      subcategory: service.subcategory ?? null,
+      voice_label: service.voice_label ?? service.name,
+      voice_category: service.voice_category ?? service.category ?? null,
       duration: service.duration_minutes,
-      price: service.price_text,
+      price: service.price_summary ?? service.price_text,
+      price_available: service.price_available ?? Boolean(service.price_text),
       enabled: service.confidence >= 0.55,
     })),
     faqs: profile.faqs.map((faq) => ({

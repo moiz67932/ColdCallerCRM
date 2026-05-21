@@ -349,6 +349,12 @@ function extractJsonLdFields(pages: ScrapedPage[]) {
   };
 }
 
+/**
+ * Legacy lightweight extractor kept for older tests and fallback utilities.
+ * The production medspa/dental demo pipeline is `extractNormalizedClinicProfile`
+ * in `profile-pipeline.ts`; do not use this function to drive ElevenLabs
+ * runtime or pre-call context.
+ */
 export function extractProfileFromPages(pages: ScrapedPage[], websiteUrl: string) {
   const profile = createEmptyExtractedProfile(websiteUrl);
   const combinedText = pages.map((page) => page.cleanedText).join("\n");

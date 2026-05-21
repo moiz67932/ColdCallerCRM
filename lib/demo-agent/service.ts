@@ -458,6 +458,9 @@ export async function runLeadDemoPreparationJob(jobId: string) {
             jsonLd: page.jsonLd,
             extractedJson: {
               pageType: page.pageType,
+              structuredBlocks: page.structuredBlocks ?? [],
+              linkHints: page.linkHints ?? [],
+              jsonLdSummary: page.jsonLdSummary ?? {},
             },
             contentHash: contentHash(`${page.url}\n${page.cleanedText}`),
           })),
