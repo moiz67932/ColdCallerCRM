@@ -4,6 +4,8 @@
   --background: #f8fafc;
   --foreground: #0f172a;
   --muted: #475569;
+  --font-space-grotesk: "Space Grotesk", "Trebuchet MS", Arial, sans-serif;
+  --font-ibm-plex-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
 @theme inline {

@@ -2628,12 +2628,20 @@ export async function loadRuntimeProfileFromNormalized(leadDemoProfileId: string
     return {
       name: String(service.display_name),
       aliases: aliasesByService.get(serviceId) ?? [],
+      category: typeof service.category === "string" ? service.category : null,
+      subcategory: typeof service.subcategory === "string" ? service.subcategory : null,
+      voice_label: typeof service.display_name === "string" ? service.display_name : null,
+      voice_category: typeof service.category === "string" ? service.category : null,
       description: String(service.description_short ?? service.description_long ?? ""),
       duration_minutes: typeof service.duration_min_minutes === "number" ? service.duration_min_minutes : null,
       price_text: priceText,
       price_min_cents: typeof service.starting_price_cents === "number" ? service.starting_price_cents : null,
+      price_summary: typeof service.price_summary === "string" ? service.price_summary : priceText,
+      price_available: Boolean(service.price_available),
       bookable: service.is_bookable !== false,
       source_url: String(service.source_url ?? ""),
+      source_quote: typeof service.source_quote === "string" ? service.source_quote : null,
+      extraction_method: typeof service.extraction_method === "string" ? service.extraction_method : null,
       confidence: typeof service.confidence === "number" ? service.confidence : 0.75,
     };
   });
