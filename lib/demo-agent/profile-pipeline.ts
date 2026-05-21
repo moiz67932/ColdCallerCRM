@@ -1978,7 +1978,7 @@ export function evaluateProfileQuality(input: {
 
   if (input.services.length && nonGenericServices.length === input.services.length) pass("safe_service_names_full", "Safe service names can preserve the full service list.", { services: input.services.length });
 
-  const requiredAnswers = new Set(["services_list", "hours", "address"]);
+  const requiredAnswers = new Set<VoiceAnswerType>(["services_list", "hours", "address"]);
   const presentAnswers = new Set(input.voiceAnswers.map((answer) => answer.answer_type));
   const missingAnswers = [...requiredAnswers].filter((answer) => !presentAnswers.has(answer));
   if (missingAnswers.length) warn("voice_answers", 20, "Voice-ready answers are missing required entries.", { missing: missingAnswers });
