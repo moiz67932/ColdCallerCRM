@@ -1536,11 +1536,17 @@ function makeFactsAndLocation(pages: PipelinePage[], context: ExtractionContext)
   if (address) {
     const addressMethod = jsonLdBusiness?.address?.line1 ? "json_ld" : "deterministic";
     const addressConfidence = addressMethod === "json_ld" ? 0.94 : 0.84;
-    addFact("address", "primary", address.raw, address.raw.toLowerCase(), addressConfidence, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, address.raw);
-    addFact("city", "primary", address.city, address.city.toLowerCase(), addressConfidence, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, address.raw);
-    addFact("state", "primary", address.region, address.region, addressConfidence, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, address.raw);
-    addFact("postal_code", "primary", address.postalCode, address.postalCode, addressConfidence, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, address.raw);
-    addFact("country", "primary", address.country, address.country, 0.8, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, address.raw);
+    const rawAddress = address.raw || null;
+    const city = address.city || null;
+    const region = address.region || null;
+    const postalCode = address.postalCode || null;
+    const country = address.country || null;
+
+    addFact("address", "primary", rawAddress, rawAddress ? rawAddress.toLowerCase() : null, addressConfidence, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, rawAddress);
+    addFact("city", "primary", city, city ? city.toLowerCase() : null, addressConfidence, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, rawAddress);
+    addFact("state", "primary", region, region, addressConfidence, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, rawAddress);
+    addFact("postal_code", "primary", postalCode, postalCode, addressConfidence, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, rawAddress);
+    addFact("country", "primary", country, country, 0.8, addressMethod, jsonLdBusiness?.sourceUrl ?? firstPage?.url, rawAddress);
   }
 
   const locations: NormalizedLocation[] = address || phoneDisplay || email ? [{
