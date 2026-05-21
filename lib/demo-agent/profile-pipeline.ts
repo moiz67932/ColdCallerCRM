@@ -207,9 +207,41 @@ type NormalizedProduct = {
   confidence: number;
 };
 
+export const ALLOWED_VOICE_ANSWER_TYPES = [
+  "services_list",
+  "hours",
+  "address",
+  "phone",
+  "booking",
+  "cancellation",
+  "pricing_summary",
+  "service_description",
+  "service_price",
+  "provider_summary",
+  "fallback",
+] as const;
+
+export type VoiceAnswerType = typeof ALLOWED_VOICE_ANSWER_TYPES[number];
+
+const allowedVoiceAnswerTypeSet = new Set<string>(ALLOWED_VOICE_ANSWER_TYPES);
+
+const VOICE_ANSWER_TYPE_MAPPINGS = {
+  location: "address",
+  pricing: "pricing_summary",
+  service_menu: "services_list",
+  service_categories: "services_list",
+  service_category_list: "services_list",
+  category_services: "services_list",
+  facials_list: "services_list",
+  injectables_list: "services_list",
+  booking_info: "booking",
+  provider: "provider_summary",
+  providers: "provider_summary",
+} satisfies Record<string, VoiceAnswerType>;
+
 type VoiceAnswer = {
   id: string;
-  answer_type: string;
+  answer_type: VoiceAnswerType;
   service_id: string | null;
   question_pattern: string | null;
   answer_text: string;
@@ -338,6 +370,19 @@ async function getAdminClient() {
   const { getSupabaseAdmin } = await import("@/lib/supabase-admin");
   return getSupabaseAdmin();
 }
+
+type DemoAgentDbResult = Promise<{ error: { message: string } | null }>;
+
+type DemoAgentDbTable = {
+  insert: (rows: Record<string, unknown>[]) => DemoAgentDbResult;
+  update: (values: Record<string, unknown>) => {
+    eq: (column: string, value: unknown) => DemoAgentDbResult;
+  };
+};
+
+type DemoAgentDbClient = {
+  from: (table: string) => DemoAgentDbTable;
+};
 
 const boilerplatePatterns = [
   /^skip to content$/i,
@@ -1669,7 +1714,7 @@ function buildVoiceAnswers(input: {
 }) {
   const answers: VoiceAnswer[] = [];
   const sourceUrls = (values: Array<string | null | undefined>) => [...new Set(values.filter((value): value is string => Boolean(value)))];
-  const add = (answer_type: string, answer_text: string, confidence: number, service_id: string | null = null, urls: string[] | null = null) => {
+  const add = (answer_type: VoiceAnswerType, answer_text: string, confidence: number, service_id: string | null = null, urls: string[] | null = null) => {
     const spoken = cleanSentence(answer_text, 450);
     if (!spoken || /Source:/i.test(spoken)) return;
     answers.push({
@@ -1693,7 +1738,7 @@ function buildVoiceAnswers(input: {
     for (const category of categories) {
       const categoryServices = input.services.filter((service) => service.category === category).slice(0, 8);
       if (categoryServices.length >= 2) {
-        add("service_category_list", `The ${category.toLowerCase()} menu includes ${asSentenceList(categoryServices.map((service) => service.display_name))}.`, 0.88, null, sourceUrls(categoryServices.map((service) => service.source_url)));
+        add("services_list", `The ${category.toLowerCase()} menu includes ${asSentenceList(categoryServices.map((service) => service.display_name))}.`, 0.88, null, sourceUrls(categoryServices.map((service) => service.source_url)));
       }
     }
   }
@@ -2262,12 +2307,95 @@ async function deactivatePreviousRows(leadDemoProfileId: string) {
   }
 }
 
-async function insertRows(table: string, rows: Record<string, unknown>[]) {
+async function insertRows(table: string, rows: Record<string, unknown>[], supabase?: DemoAgentDbClient) {
   if (!rows.length) return 0;
-  const supabase = await getAdminClient();
-  const { error } = await supabase.from(table).insert(rows);
-  if (error) throw new Error(`Failed writing ${table}: ${error.message}`);
+  const client = supabase ?? await getAdminClient();
+  const { error } = await client.from(table).insert(rows);
+  if (error) {
+    if (table === "lead_clinic_voice_answers") {
+      const allAnswerTypes = getDistinctVoiceAnswerTypes(rows);
+      const invalidAnswerTypes = allAnswerTypes.filter((answerType) => !allowedVoiceAnswerTypeSet.has(answerType));
+      const firstRow = rows[0] ?? {};
+      const metadata = {
+        table,
+        allAnswerTypes,
+        invalidAnswerTypes,
+        rowCount: rows.length,
+        lead_demo_profile_id: firstRow.lead_demo_profile_id,
+        extraction_run_id: firstRow.extraction_run_id,
+      };
+      console.error("demo_agent.voice_answer_insert_failed", metadata);
+      throw new Error(`Failed writing ${table}: ${error.message}; metadata=${JSON.stringify(metadata)}`);
+    }
+    throw new Error(`Failed writing ${table}: ${error.message}`);
+  }
   return rows.length;
+}
+
+function getDistinctVoiceAnswerTypes(rows: Array<Record<string, unknown>>) {
+  return [...new Set(rows.map((row) => String(row.answer_type ?? "")).filter(Boolean))].sort();
+}
+
+function normalizeVoiceAnswerType(answerType: unknown): VoiceAnswerType | null {
+  if (typeof answerType !== "string") return null;
+  if (allowedVoiceAnswerTypeSet.has(answerType)) return answerType as VoiceAnswerType;
+  return VOICE_ANSWER_TYPE_MAPPINGS[answerType as keyof typeof VOICE_ANSWER_TYPE_MAPPINGS] ?? null;
+}
+
+export function sanitizeVoiceAnswerRows(input: {
+  rows: Array<Record<string, unknown>>;
+  leadDemoProfileId: string;
+  extractionRunId: string;
+}) {
+  const allAnswerTypes = getDistinctVoiceAnswerTypes(input.rows);
+  const invalidAnswerTypes = allAnswerTypes.filter((answerType) => !allowedVoiceAnswerTypeSet.has(answerType));
+
+  if (invalidAnswerTypes.length) {
+    console.error("demo_agent.invalid_voice_answer_types", {
+      invalidAnswerTypes,
+      allAnswerTypes,
+      leadDemoProfileId: input.leadDemoProfileId,
+      extractionRunId: input.extractionRunId,
+      rowCount: input.rows.length,
+    });
+  }
+
+  const sanitizedRows: Array<Record<string, unknown>> = [];
+  const skippedAnswerTypes = new Set<string>();
+  const mappedAnswerTypes = new Set<string>();
+
+  for (const row of input.rows) {
+    const originalAnswerType = typeof row.answer_type === "string" ? row.answer_type : "";
+    const normalizedAnswerType = normalizeVoiceAnswerType(originalAnswerType);
+    if (!normalizedAnswerType) {
+      skippedAnswerTypes.add(originalAnswerType || "(missing)");
+      continue;
+    }
+    if (normalizedAnswerType !== originalAnswerType) mappedAnswerTypes.add(`${originalAnswerType}->${normalizedAnswerType}`);
+    sanitizedRows.push({ ...row, answer_type: normalizedAnswerType });
+  }
+
+  const dedupedRows = uniqueRows(sanitizedRows, (row) =>
+    [row.answer_type, row.service_id].map(nullableKey).join("|"),
+  );
+
+  if (skippedAnswerTypes.size || mappedAnswerTypes.size) {
+    logWarn("demo_agent.voice_answer_types_sanitized", {
+      lead_demo_profile_id: input.leadDemoProfileId,
+      extraction_run_id: input.extractionRunId,
+      mappedAnswerTypes: [...mappedAnswerTypes].sort(),
+      skippedAnswerTypes: [...skippedAnswerTypes].sort(),
+      rowCountBefore: input.rows.length,
+      rowCountAfter: dedupedRows.length,
+    });
+  }
+
+  return {
+    rows: dedupedRows,
+    invalidAnswerTypes,
+    skippedAnswerTypes: [...skippedAnswerTypes].sort(),
+    mappedAnswerTypes: [...mappedAnswerTypes].sort(),
+  };
 }
 
 function uniqueRows(rows: Record<string, unknown>[], getKey: (row: Record<string, unknown>) => string) {
@@ -2295,6 +2423,7 @@ export async function writeNormalizedExtraction(input: {
   leadDemoProfileId: string;
   clinicId?: string | null;
   force?: boolean;
+  supabaseClient?: DemoAgentDbClient;
 }) {
   const base = baseDbFields({
     organizationId: input.organizationId,
@@ -2303,7 +2432,7 @@ export async function writeNormalizedExtraction(input: {
     extractionRunId: input.result.extractionRunId,
     clinicId: input.clinicId,
   });
-  const supabase = await getAdminClient();
+  const supabase = input.supabaseClient ?? (await getAdminClient() as unknown as DemoAgentDbClient);
 
   if (input.force) await deactivatePreviousRows(input.leadDemoProfileId);
 
@@ -2371,9 +2500,15 @@ export async function writeNormalizedExtraction(input: {
   const productRows = uniqueRows(input.result.products.map((product) => ({ ...base, ...product })), (row) =>
     [row.product_name, row.brand, row.source_url].map(nullableKey).join("|"),
   );
-  const voiceAnswerRows = uniqueRows(input.result.voiceAnswers.map((answer) => ({ ...base, ...answer })), (row) =>
+  const rawVoiceAnswerRows = uniqueRows(input.result.voiceAnswers.map((answer) => ({ ...base, ...answer })), (row) =>
     [row.answer_type, row.service_id].map(nullableKey).join("|"),
   );
+  const voiceAnswerSanitization = sanitizeVoiceAnswerRows({
+    rows: rawVoiceAnswerRows,
+    leadDemoProfileId: input.leadDemoProfileId,
+    extractionRunId: input.result.extractionRunId,
+  });
+  const voiceAnswerRows = voiceAnswerSanitization.rows;
   const knowledgeChunkRows = uniqueRows(input.result.knowledgeChunks.map((chunk) => ({ ...base, ...chunk })), (row) => nullableKey(row.content_hash));
   const qualityCheckRows = uniqueRows(input.result.quality.checks.map((check) => ({
     id: randomUUID(),
@@ -2384,19 +2519,40 @@ export async function writeNormalizedExtraction(input: {
     ...check,
   })), (row) => nullableKey(row.check_name));
 
-  writeCounts.facts = await insertRows("lead_clinic_facts", factRows);
-  writeCounts.locations = await insertRows("lead_clinic_locations", locationRows);
-  writeCounts.hours = await insertRows("lead_clinic_hours", hourRows);
-  writeCounts.services = await insertRows("lead_clinic_services", serviceRows);
-  writeCounts.aliases = await insertRows("lead_clinic_service_aliases", aliasRows);
-  writeCounts.prices = await insertRows("lead_clinic_service_prices", priceRows);
-  writeCounts.offers = await insertRows("lead_clinic_offers", offerRows);
-  writeCounts.faqs = await insertRows("lead_clinic_faqs", faqRows);
-  writeCounts.staff = await insertRows("lead_clinic_staff", staffRows);
-  writeCounts.products = await insertRows("lead_clinic_products", productRows);
-  writeCounts.voiceAnswers = await insertRows("lead_clinic_voice_answers", voiceAnswerRows);
-  writeCounts.knowledgeChunks = await insertRows("lead_clinic_knowledge_chunks", knowledgeChunkRows);
-  writeCounts.qualityChecks = await insertRows("lead_profile_quality_checks", qualityCheckRows);
+  writeCounts.facts = await insertRows("lead_clinic_facts", factRows, supabase);
+  writeCounts.locations = await insertRows("lead_clinic_locations", locationRows, supabase);
+  writeCounts.hours = await insertRows("lead_clinic_hours", hourRows, supabase);
+  writeCounts.services = await insertRows("lead_clinic_services", serviceRows, supabase);
+  writeCounts.aliases = await insertRows("lead_clinic_service_aliases", aliasRows, supabase);
+  writeCounts.prices = await insertRows("lead_clinic_service_prices", priceRows, supabase);
+  writeCounts.offers = await insertRows("lead_clinic_offers", offerRows, supabase);
+  writeCounts.faqs = await insertRows("lead_clinic_faqs", faqRows, supabase);
+  writeCounts.staff = await insertRows("lead_clinic_staff", staffRows, supabase);
+  writeCounts.products = await insertRows("lead_clinic_products", productRows, supabase);
+  logInfo("demo_agent.voice_answer_types", {
+    allAnswerTypes: getDistinctVoiceAnswerTypes(voiceAnswerRows),
+    invalidAnswerTypes: voiceAnswerSanitization.invalidAnswerTypes,
+    lead_demo_profile_id: input.leadDemoProfileId,
+    extraction_run_id: input.result.extractionRunId,
+    rowCount: voiceAnswerRows.length,
+  });
+  try {
+    writeCounts.voiceAnswers = await insertRows("lead_clinic_voice_answers", voiceAnswerRows, supabase);
+  } catch (error) {
+    writeCounts.voiceAnswers = 0;
+    writeCounts.voiceAnswerWarnings = 1;
+    logWarn("demo_agent.optional_voice_answers_write_failed", {
+      table: "lead_clinic_voice_answers",
+      error: error instanceof Error ? error.message : String(error),
+      allAnswerTypes: getDistinctVoiceAnswerTypes(voiceAnswerRows),
+      invalidAnswerTypes: voiceAnswerSanitization.invalidAnswerTypes,
+      rowCount: voiceAnswerRows.length,
+      lead_demo_profile_id: input.leadDemoProfileId,
+      extraction_run_id: input.result.extractionRunId,
+    });
+  }
+  writeCounts.knowledgeChunks = await insertRows("lead_clinic_knowledge_chunks", knowledgeChunkRows, supabase);
+  writeCounts.qualityChecks = await insertRows("lead_profile_quality_checks", qualityCheckRows, supabase);
 
   return writeCounts;
 }

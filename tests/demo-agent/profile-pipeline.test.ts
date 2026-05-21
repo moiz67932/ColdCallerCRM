@@ -2,11 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  ALLOWED_VOICE_ANSWER_TYPES,
   evaluateProfileQuality,
   extractNormalizedClinicProfile,
   isUuid,
   parseStructuredPrices,
+  sanitizeVoiceAnswerRows,
   stableSyntheticKey,
+  writeNormalizedExtraction,
   type PipelinePage,
 } from "@/lib/demo-agent/profile-pipeline";
 
@@ -221,6 +224,145 @@ test("voice answers are short, source-free, and use structured prices", () => {
   assert.ok(priceAnswer);
   assert.match(priceAnswer.answer_text, /\$185/);
   assert.equal(/Source:/i.test(priceAnswer.answer_text), false);
+});
+
+test("generated voice answer types stay aligned with the database allow-list", () => {
+  const result = extractNormalizedClinicProfile(fixturePages(), { websiteUrl: "https://dang.example" });
+  const allowed = new Set(ALLOWED_VOICE_ANSWER_TYPES);
+
+  assert.equal(result.voiceAnswers.every((answer) => allowed.has(answer.answer_type)), true);
+});
+
+test("voice answer sanitizer maps known legacy or category-specific answer types", () => {
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  const errors: unknown[][] = [];
+  const warnings: unknown[][] = [];
+  console.error = (...args: unknown[]) => errors.push(args);
+  console.warn = (...args: unknown[]) => warnings.push(args);
+
+  try {
+    const result = sanitizeVoiceAnswerRows({
+      leadDemoProfileId: "profile-1",
+      extractionRunId: "run-1",
+      rows: [
+        { id: "1", answer_type: "service_categories", service_id: null, answer_text: "Categories" },
+        { id: "2", answer_type: "location", service_id: null, answer_text: "Address" },
+        { id: "3", answer_type: "pricing", service_id: null, answer_text: "Pricing" },
+      ],
+    });
+
+    assert.deepEqual(result.rows.map((row) => row.answer_type), ["services_list", "address", "pricing_summary"]);
+    assert.deepEqual(result.mappedAnswerTypes, ["location->address", "pricing->pricing_summary", "service_categories->services_list"]);
+    assert.deepEqual(result.skippedAnswerTypes, []);
+    assert.equal(errors[0][0], "demo_agent.invalid_voice_answer_types");
+    assert.equal(warnings.length, 1);
+  } finally {
+    console.error = originalError;
+    console.warn = originalWarn;
+  }
+});
+
+test("voice answer sanitizer skips unmapped invalid answer types and logs safely", () => {
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  const errors: unknown[][] = [];
+  const warnings: unknown[][] = [];
+  console.error = (...args: unknown[]) => errors.push(args);
+  console.warn = (...args: unknown[]) => warnings.push(args);
+
+  try {
+    const result = sanitizeVoiceAnswerRows({
+      leadDemoProfileId: "profile-1",
+      extractionRunId: "run-1",
+      rows: [
+        { id: "1", answer_type: "unknown_context_bucket", service_id: null, answer_text: "Do not log this full optional answer." },
+        { id: "2", answer_type: "fallback", service_id: null, answer_text: "Fallback" },
+      ],
+    });
+
+    assert.deepEqual(result.rows.map((row) => row.answer_type), ["fallback"]);
+    assert.deepEqual(result.skippedAnswerTypes, ["unknown_context_bucket"]);
+    assert.equal(errors[0][0], "demo_agent.invalid_voice_answer_types");
+    assert.deepEqual((errors[0][1] as Record<string, unknown>).invalidAnswerTypes, ["unknown_context_bucket"]);
+    assert.equal(JSON.stringify(errors).includes("Do not log this full optional answer"), false);
+    assert.equal(warnings.length, 1);
+  } finally {
+    console.error = originalError;
+    console.warn = originalWarn;
+  }
+});
+
+test("writeNormalizedExtraction does not fail the whole job when optional voice answer insert fails", async () => {
+  const result = extractNormalizedClinicProfile(fixturePages(), {
+    websiteUrl: "https://dang.example",
+    businessNameHint: null,
+  });
+  const inserted: Record<string, unknown[]> = {};
+  const client = {
+    from(table: string) {
+      return {
+        update() {
+          return { eq: async () => ({ error: null }) };
+        },
+        insert: async (rows: Record<string, unknown>[]) => {
+          if (table === "lead_clinic_voice_answers") {
+            return { error: { message: "violates check constraint lead_clinic_voice_answers_answer_type_check" } };
+          }
+          inserted[table] = rows;
+          return { error: null };
+        },
+      };
+    },
+  };
+
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  console.error = () => undefined;
+  console.warn = () => undefined;
+  try {
+    const counts = await writeNormalizedExtraction({
+      result,
+      organizationId: "org-1",
+      leadId: "lead-1",
+      leadDemoProfileId: "profile-1",
+      supabaseClient: client,
+    });
+
+    assert.equal(counts.voiceAnswers, 0);
+    assert.equal(counts.voiceAnswerWarnings, 1);
+    assert.equal(typeof inserted.lead_clinic_services?.length, "number");
+    assert.equal(typeof inserted.lead_clinic_knowledge_chunks?.length, "number");
+  } finally {
+    console.error = originalError;
+    console.warn = originalWarn;
+  }
+});
+
+test("Refine-like categories, facials, injectables, and pricing produce valid voice answer types", () => {
+  const result = extractNormalizedClinicProfile([
+    page({
+      url: "https://refine.example",
+      title: "Refine Aesthetics",
+      cleanedText:
+        "Refine Aesthetics\nCall (949) 555-2222\n12 Beauty Lane, Newport Beach, CA 92660\nMonday 9:00 AM - 5:00 PM\nFacials\nSignature Facial $150\nHydraFacial $225\nInjectables\nBotox $14 per unit\nDermal Filler starting at $650\nPricing\nBook Online",
+    }),
+    page({
+      url: "https://refine.example/services/facials",
+      title: "Facials",
+      cleanedText: "Facials\nSignature Facial is a customized facial treatment.\nHydraFacial deeply cleanses and hydrates skin.",
+    }),
+    page({
+      url: "https://refine.example/services/injectables",
+      title: "Injectables",
+      cleanedText: "Injectables\nBotox softens dynamic lines.\nDermal Filler restores facial volume.",
+    }),
+  ], { websiteUrl: "https://refine.example", businessNameHint: "Refine Aesthetics" });
+  const allowed = new Set(ALLOWED_VOICE_ANSWER_TYPES);
+
+  assert.equal(result.voiceAnswers.every((answer) => allowed.has(answer.answer_type)), true);
+  assert.equal(result.voiceAnswers.some((answer) => answer.answer_type === "services_list" && /facials|injectables/i.test(answer.answer_text)), true);
+  assert.equal(result.voiceAnswers.some((answer) => answer.answer_type === "pricing_summary"), true);
 });
 
 test("specials with unclear month date create maybe_stale warning", () => {
