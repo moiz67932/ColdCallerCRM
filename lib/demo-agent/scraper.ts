@@ -206,6 +206,141 @@ function summarizeJsonLd(jsonLd: unknown[]) {
   return { types, names, node_count: nodes.length };
 }
 
+function decodeHtmlEntities(value: string) {
+  const named: Record<string, string> = {
+    amp: "&",
+    apos: "'",
+    gt: ">",
+    lt: "<",
+    nbsp: " ",
+    quot: "\"",
+  };
+
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, entity: string) => {
+    const lower = entity.toLowerCase();
+    if (lower.startsWith("#x")) {
+      const codePoint = Number.parseInt(lower.slice(2), 16);
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : match;
+    }
+    if (lower.startsWith("#")) {
+      const codePoint = Number.parseInt(lower.slice(1), 10);
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : match;
+    }
+    return named[lower] ?? match;
+  });
+}
+
+function stripHtml(value: string) {
+  return decodeHtmlEntities(
+    value
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+      .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, " ")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/(p|div|section|article|li|tr|h[1-6])>/gi, "\n")
+      .replace(/<[^>]+>/g, " "),
+  );
+}
+
+function readAttribute(tag: string, attribute: string) {
+  const match = tag.match(new RegExp(`${attribute}\\s*=\\s*("[^"]*"|'[^']*'|[^\\s>]+)`, "i"));
+  if (!match) return null;
+  return match[1].replace(/^["']|["']$/g, "").trim() || null;
+}
+
+function extractFirst(html: string, pattern: RegExp) {
+  const match = html.match(pattern);
+  return match?.[1] ? decodeHtmlEntities(match[1].trim()) : null;
+}
+
+function extractJsonLdFromHtml(html: string) {
+  return [...html.matchAll(/<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)]
+    .map((match) => {
+      try {
+        return JSON.parse(decodeHtmlEntities(match[1].trim()));
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+function extractLinksFromHtml(html: string): ScrapedLink[] {
+  return [...html.matchAll(/<a\b[^>]*href\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)[^>]*>([\s\S]*?)<\/a>/gi)].map((match) => {
+    const tag = match[0];
+    return {
+      href: match[1].replace(/^["']|["']$/g, "").trim(),
+      text: normalizeText(stripHtml(match[2])).slice(0, 140),
+      ariaLabel: readAttribute(tag, "aria-label"),
+      title: readAttribute(tag, "title"),
+    };
+  });
+}
+
+function extractStructuredBlocksFromHtml(html: string): ScrapedStructuredBlock[] {
+  const blocks = new Map<string, ScrapedStructuredBlock>();
+  const addBlock = (type: ScrapedStructuredBlock["type"], heading: string | null, textValue: string, source: string) => {
+    const text = normalizeText(stripHtml(textValue)).slice(0, 1800);
+    const key = `${type}:${heading ?? ""}:${text.slice(0, 180)}`;
+    if (text.length >= 8 && !blocks.has(key)) blocks.set(key, { type, heading, text, source });
+  };
+
+  for (const match of html.matchAll(/<h([1-4])\b[^>]*>([\s\S]*?)<\/h\1>([\s\S]{0,2400})/gi)) {
+    const heading = normalizeText(stripHtml(match[2]));
+    const text = `${heading}\n${match[3].split(/<h[1-4]\b/i)[0] ?? ""}`;
+    if (heading) addBlock("section", heading, text, `h${match[1]}`);
+  }
+
+  for (const match of html.matchAll(/<(section|article|li|div)\b[^>]*(?:service|treatment|card|price|faq|contact|location|hours)[^>]*>([\s\S]*?)<\/\1>/gi)) {
+    const text = stripHtml(match[2]);
+    const heading = extractFirst(match[2], /<h[1-4]\b[^>]*>([\s\S]*?)<\/h[1-4]>/i);
+    const type = /faq|\?/i.test(text) ? "faq" : /contact|location|hours|monday|tuesday/i.test(text) ? "contact" : "service_card";
+    addBlock(type, heading ? normalizeText(stripHtml(heading)) : null, match[2], match[1].toLowerCase());
+  }
+
+  for (const match of html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const text = stripHtml(match[1]);
+    if (/\$|price|cost|unit|series|package/i.test(text)) addBlock("pricing_row", null, match[1], "table");
+  }
+
+  return [...blocks.values()].slice(0, 80);
+}
+
+function htmlToScrapedPage(input: {
+  url: string;
+  html: string;
+  status: number | null;
+  options: CrawlOptions;
+}): ScrapedPage {
+  const { url, html, status, options } = input;
+  const title = extractFirst(html, /<title\b[^>]*>([\s\S]*?)<\/title>/i);
+  const metaDescription = extractFirst(html, /<meta\b(?=[^>]*name\s*=\s*["']description["'])[^>]*content\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)[^>]*>/i)?.replace(/^["']|["']$/g, "") ?? null;
+  const canonical = extractFirst(html, /<link\b(?=[^>]*rel\s*=\s*["']canonical["'])[^>]*href\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)[^>]*>/i)?.replace(/^["']|["']$/g, "") ?? null;
+  const jsonLd = extractJsonLdFromHtml(html);
+  const cleanedText = stripHtml(html)
+    .split("\n")
+    .map(normalizeText)
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, options.maxTextChars);
+
+  return {
+    url,
+    canonicalUrl: canonical ? new URL(canonical, url).toString().replace(/\/$/, "") : null,
+    title,
+    metaDescription,
+    cleanedText,
+    html: html.slice(0, options.maxHtmlChars),
+    jsonLd,
+    links: [],
+    linkHints: extractLinksFromHtml(html),
+    structuredBlocks: extractStructuredBlocksFromHtml(html),
+    jsonLdSummary: summarizeJsonLd(jsonLd),
+    httpStatus: status,
+    pageType: classifyPage(url, title),
+  };
+}
+
 function mapPlaywrightLaunchError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
 
@@ -233,9 +368,105 @@ function mapPlaywrightLaunchError(error: unknown) {
   return error instanceof Error ? error : new Error(message);
 }
 
-export async function crawlLeadWebsite(rootInput: string): Promise<CrawlResult> {
-  const rootUrl = normalizeWebsiteUrl(rootInput);
-  const options = getCrawlOptions();
+async function crawlLeadWebsiteWithFetch(rootUrl: string, options: CrawlOptions): Promise<CrawlResult> {
+  const robotsRules = await loadRobotsRules(rootUrl, options.userAgent);
+  const sitemapUrls = await discoverSitemapUrls(rootUrl, options);
+  const queue: Array<{ url: string; depth: number; hint?: string }> = [
+    { url: rootUrl, depth: 0 },
+    ...sitemapUrls.map((url) => ({ url, depth: 1, hint: "sitemap" })),
+  ];
+  const visited = new Set<string>();
+  const pages: ScrapedPage[] = [];
+  let pagesFailed = 0;
+
+  logWarn("lead_scraper.browser_unavailable_fetch_fallback", { rootUrl });
+
+  while (queue.length > 0 && pages.length < options.maxPages) {
+    queue.sort((left, right) => rankUrl(left.url, left.hint) - rankUrl(right.url, right.hint));
+    const next = queue.shift();
+    if (!next || visited.has(next.url)) continue;
+    visited.add(next.url);
+
+    try {
+      const parsedUrl = new URL(next.url);
+      if (!isAllowedByRobots(parsedUrl, robotsRules)) {
+        logWarn("lead_scraper.page_skipped", { url: next.url, reason: "robots_disallow" });
+        continue;
+      }
+
+      const response = await fetch(next.url, {
+        headers: {
+          accept: "text/html,application/xhtml+xml",
+          "user-agent": options.userAgent,
+        },
+        signal: AbortSignal.timeout(options.pageTimeoutMs),
+      });
+
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!response.ok || !contentType.toLowerCase().includes("html")) {
+        pagesFailed += 1;
+        logWarn("lead_scraper.page_failed", { url: next.url, status: response.status, contentType });
+        continue;
+      }
+
+      const pageRecord = htmlToScrapedPage({
+        url: next.url,
+        html: await response.text(),
+        status: response.status,
+        options,
+      });
+      const linkHints = sameDomainLinks(new URL(next.url), pageRecord.linkHints ?? []);
+      pageRecord.linkHints = linkHints;
+      pageRecord.links = linkHints.map((link) => link.href);
+
+      const duplicatePage = pages.some(
+        (entry) => entry.url === pageRecord.url || (Boolean(entry.canonicalUrl) && entry.canonicalUrl === pageRecord.canonicalUrl),
+      );
+
+      if (pageRecord.cleanedText && !duplicatePage) {
+        pages.push(pageRecord);
+        logInfo("lead_scraper.page_scraped", {
+          url: pageRecord.url,
+          status: pageRecord.httpStatus,
+          pageType: pageRecord.pageType,
+          textChars: pageRecord.cleanedText.length,
+          links: pageRecord.links.length,
+          renderer: "fetch",
+        });
+      }
+
+      if (next.depth < options.maxDepth) {
+        for (const link of pageRecord.links) {
+          if (!visited.has(link) && queue.length + pages.length < options.maxPages * 3) {
+            const hint = pageRecord.linkHints?.find((entry) => entry.href === link);
+            queue.push({ url: link, depth: next.depth + 1, hint: [hint?.text, hint?.ariaLabel, hint?.title].filter(Boolean).join(" ") });
+          }
+        }
+      }
+    } catch (error) {
+      pagesFailed += 1;
+      logWarn("lead_scraper.page_failed", {
+        url: next.url,
+        error: error instanceof Error ? error.message : String(error),
+        renderer: "fetch",
+      });
+    }
+  }
+
+  if (!pages.length) {
+    throw new Error(
+      `No readable website pages were scraped from ${rootUrl}. Check that the URL is reachable, public, and not blocking automated browsers.`,
+    );
+  }
+
+  return {
+    pages,
+    pagesDiscovered: visited.size,
+    pagesFailed,
+  };
+}
+
+async function crawlLeadWebsiteWithPlaywright(rootUrl: string, options: CrawlOptions): Promise<CrawlResult> {
   const { chromium } = await import("playwright");
   const robotsRules = await loadRobotsRules(rootUrl, options.userAgent);
   const sitemapUrls = await discoverSitemapUrls(rootUrl, options);
@@ -476,4 +707,27 @@ export async function crawlLeadWebsite(rootInput: string): Promise<CrawlResult> 
     pagesDiscovered: visited.size,
     pagesFailed,
   };
+}
+
+export async function crawlLeadWebsite(rootInput: string): Promise<CrawlResult> {
+  const rootUrl = normalizeWebsiteUrl(rootInput);
+  const options = getCrawlOptions();
+
+  try {
+    return await crawlLeadWebsiteWithPlaywright(rootUrl, options);
+  } catch (error) {
+    const mappedError = mapPlaywrightLaunchError(error);
+    if (
+      mappedError.message.includes("Playwright Chromium is not installed") ||
+      mappedError.message.includes("Playwright Chromium cannot start") ||
+      mappedError.message.includes("Playwright Chromium is missing Linux shared libraries")
+    ) {
+      logWarn("lead_scraper.playwright_unavailable", {
+        rootUrl,
+        error: mappedError.message,
+      });
+      return crawlLeadWebsiteWithFetch(rootUrl, options);
+    }
+    throw mappedError;
+  }
 }
