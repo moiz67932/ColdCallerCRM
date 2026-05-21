@@ -284,12 +284,20 @@ function extractServicesFromPage(page: ScrapedPage) {
     services.push({
       name: serviceName,
       aliases: [],
+      category: null,
+      subcategory: null,
+      voice_label: serviceName,
+      voice_category: null,
       description: sentence,
       duration_minutes: durationMatch ? Number(durationMatch[1]) : null,
       price_text: price.priceText,
       price_min_cents: price.priceMinCents,
+      price_summary: price.priceText,
+      price_available: price.priceMinCents !== null,
       bookable: true,
       source_url: page.url,
+      source_quote: sentence,
+      extraction_method: "legacy_keyword_sentence",
       confidence: page.pageType === "services" ? 0.85 : 0.65,
     });
   }
