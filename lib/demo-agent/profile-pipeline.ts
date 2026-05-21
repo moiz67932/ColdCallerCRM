@@ -160,6 +160,28 @@ type NormalizedOffer = {
   confidence: number;
 };
 
+const allowedOfferTypes = new Set([
+  "special",
+  "discount",
+  "first_time_client",
+  "seasonal",
+  "package",
+  "membership",
+  "unknown",
+]);
+
+function normalizeOfferType(value: unknown) {
+  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (allowedOfferTypes.has(raw)) return raw;
+  if (/discount|coupon|promo|off|save/.test(raw)) return "discount";
+  if (/first/.test(raw)) return "first_time_client";
+  if (/season|holiday|month/.test(raw)) return "seasonal";
+  if (/package|bundle|series/.test(raw)) return "package";
+  if (/member/.test(raw)) return "membership";
+  if (/price|pricing|json_ld_offer|offer|special/.test(raw)) return "special";
+  return "unknown";
+}
+
 type NormalizedStaff = {
   id: string;
   full_name: string;
@@ -1019,7 +1041,7 @@ function servicesFromStructuredBlocks(page: PipelinePage) {
           id: randomUUID(),
           title: heading || shortQuote(text.replace(/\$.*/, ""), 120),
           description: text,
-          offer_type: "pricing_candidate",
+          offer_type: "special",
           related_service_id: null,
           price_cents: prices[0].amount_cents ?? prices[0].amount_min_cents,
           discount_text: null,
@@ -1078,7 +1100,7 @@ function servicesFromJsonLd(page: PipelinePage) {
           id: randomUUID(),
           title: serviceName ?? "Published offer",
           description: description || null,
-          offer_type: "json_ld_offer",
+          offer_type: "special",
           related_service_id: null,
           price_cents: prices[0].amount_cents ?? prices[0].amount_min_cents,
           discount_text: null,
@@ -2339,7 +2361,7 @@ export async function writeNormalizedExtraction(input: {
       source_quote: price.source_quote,
     })),
   ), (row) => [row.service_id, row.raw_price_text, row.price_type, row.price_label].map(nullableKey).join("|"));
-  const offerRows = uniqueRows(input.result.offers.map((offer) => ({ ...base, ...offer })), (row) =>
+  const offerRows = uniqueRows(input.result.offers.map((offer) => ({ ...base, ...offer, offer_type: normalizeOfferType(offer.offer_type) })), (row) =>
     [row.title, row.offer_type, row.discount_text, row.source_url].map(nullableKey).join("|"),
   );
   const faqRows = uniqueRows(input.result.faqs.map((faq) => ({ ...base, ...faq })), (row) => nullableKey(row.question));
