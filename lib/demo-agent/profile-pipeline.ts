@@ -1837,7 +1837,7 @@ function normalizeStrictServicePricing(service: NormalizedService): NormalizedSe
 function shouldGroupUnderPeptideTherapy(service: NormalizedService, hasPeptideParent: boolean) {
   if (!/\b(mots-c|ghk-cu|bpc-157|epithalon)\b/i.test(service.display_name)) return false;
   if (!hasPeptideParent) return true;
-  const bookingProof = /booking|book|appointment/i.test(service.source_url ?? "") || service.extraction_method === "booking_service_card" || (service.price_available && /booking|book|appointment/i.test(service.source_quote ?? ""));
+  const bookingProof = /booking|book|appointment/i.test(`${service.source_url ?? ""} ${service.source_quote ?? ""} ${service.description_long ?? ""}`);
   return !bookingProof;
 }
 
@@ -2760,7 +2760,7 @@ export function extractNormalizedClinicProfile(pages: PipelinePage[], context: E
   const { facts, locations, businessName } = makeFactsAndLocation(normalizedPages, context);
   const hours = extractHours(normalizedPages, context);
   const extracted = normalizedPages.map((page) => extractServicesFromPage(page, page.classification.pageType));
-  let services = mergeServices(extracted.flatMap((entry) => entry.services));
+  let services: NormalizedService[] = mergeServices(extracted.flatMap((entry) => entry.services));
   const products = extracted.flatMap((entry) => entry.products);
   const offers = extracted.flatMap((entry) => entry.offers);
   let rejectedCandidates = uniqueRejectedCandidates(normalizedPages.flatMap((page) => collectRejectedCandidatesFromPage(page, page.classification.pageType)));
