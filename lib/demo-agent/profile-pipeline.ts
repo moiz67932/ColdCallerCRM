@@ -1636,7 +1636,7 @@ function serviceFromLlm(entry: LlmService, sourceUrl: string | null): Normalized
 function applyLlmExtraction(result: NormalizedExtractionResult, llm: LlmExtraction | null, context: ExtractionContext) {
   if (!llm) return result;
   const sourceUrl = result.pageUpdates[0]?.url ?? context.websiteUrl;
-  let services = mergeServices([
+  let services: NormalizedService[] = mergeServices([
     ...result.services,
     ...(llm.services ?? []).map((entry) => serviceFromLlm(entry, sourceUrl)).filter((service): service is NormalizedService => Boolean(service)),
   ]);
