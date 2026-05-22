@@ -26,7 +26,6 @@ export async function GET() {
         Boolean(env.TELNYX_API_KEY) &&
         Boolean(env.TELNYX_CONNECTION_ID) &&
         Boolean(env.TELNYX_FROM_NUMBER),
-      webrtcCredentialConfigured: Boolean(env.TELNYX_API_KEY) && Boolean(env.TELNYX_CONNECTION_ID),
       outboundCallerConfigured: Boolean(env.TELNYX_FROM_NUMBER),
       messagingConfigured: Boolean(env.TELNYX_MESSAGING_FROM_NUMBER),
       webhookBaseUrlConfigured: Boolean(env.APP_BASE_URL),

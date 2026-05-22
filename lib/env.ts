@@ -29,7 +29,6 @@ const envSchema = z
     EXTRACTION_MODEL: z.string().optional(),
     TELNYX_API_KEY: z.string().optional(),
     TELNYX_CONNECTION_ID: z.string().optional(),
-    TELNYX_TELEPHONY_CREDENTIAL_ID: z.string().optional(),
     TELNYX_FROM_NUMBER: z.string().optional(),
     TELNYX_MESSAGING_FROM_NUMBER: z.string().optional(),
     TELNYX_PUBLIC_KEY: z.string().optional(),
@@ -61,7 +60,6 @@ export function getRequiredEnvStatus() {
     SUPABASE_SERVICE_ROLE_KEY: Boolean(env.SUPABASE_SERVICE_ROLE_KEY),
     TELNYX_API_KEY: Boolean(env.TELNYX_API_KEY),
     TELNYX_CONNECTION_ID: Boolean(env.TELNYX_CONNECTION_ID),
-    TELNYX_TELEPHONY_CREDENTIAL_ID: Boolean(env.TELNYX_TELEPHONY_CREDENTIAL_ID),
     TELNYX_FROM_NUMBER: Boolean(env.TELNYX_FROM_NUMBER),
     NEXT_PUBLIC_APP_NAME: Boolean(env.NEXT_PUBLIC_APP_NAME),
   };

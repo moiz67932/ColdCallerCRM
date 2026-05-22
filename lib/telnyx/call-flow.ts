@@ -60,7 +60,7 @@ export async function ensureNoActiveCallAttempt(leadId: string) {
   }
 }
 
-export async function createWebRtcCallAttempt(leadId: string) {
+export async function createOutboundCallAttempt(leadId: string) {
   await ensureNoActiveCallAttempt(leadId);
 
   const lead = await prisma.lead.findUnique({ where: { id: leadId } });
@@ -84,7 +84,7 @@ export async function createWebRtcCallAttempt(leadId: string) {
   };
 }
 
-export async function initiateLeadLeg(callAttemptId: string) {
+export async function initiateOutboundCall(callAttemptId: string) {
   const attempt = await prisma.callAttempt.findUnique({
     where: { id: callAttemptId },
     include: { lead: true },
@@ -106,13 +106,13 @@ export async function initiateLeadLeg(callAttemptId: string) {
     webhook_url: getVoiceWebhookUrl(),
     client_state: encodeClientState({ attemptId: attempt.id, role: "lead" }),
     answering_machine_detection: "detect_beep",
-    command_id: `${attempt.id}-lead-dial`,
+    command_id: `${attempt.id}-outbound-dial`,
   });
 
   const callData = response.data;
 
   if (!callData?.call_control_id) {
-    throw new Error("Lead dial failed to return call_control_id");
+    throw new Error("Outbound dial failed to return call_control_id");
   }
 
   const updatedAttempt = await prisma.callAttempt.update({
@@ -126,40 +126,24 @@ export async function initiateLeadLeg(callAttemptId: string) {
     },
   });
 
-  logInfo("Lead leg initiated", {
+  logInfo("Outbound call initiated through Telnyx Call Control", {
     callAttemptId: attempt.id,
     leadId: attempt.leadId,
+    connectionId: getTelnyxConnectionId(),
     callControlId: callData.call_control_id,
   });
 
   return updatedAttempt;
 }
 
-export async function bridgeAgentLeg(callAttemptId: string) {
-  const attempt = await prisma.callAttempt.findUnique({
-    where: { id: callAttemptId },
-  });
+export async function createAndInitiateOutboundCall(leadId: string) {
+  const { attempt, lead } = await createOutboundCallAttempt(leadId);
+  const initiatedAttempt = await initiateOutboundCall(attempt.id);
 
-  if (!attempt) {
-    throw new Error("Call attempt not found");
-  }
-
-  if (!attempt.telnyxAgentCallControlId || !attempt.telnyxCallControlId) {
-    throw new Error("Both the WebRTC leg and lead leg are required before bridging");
-  }
-
-  const client = getTelnyxClient();
-
-  await client.calls.actions.bridge(attempt.telnyxAgentCallControlId, {
-    call_control_id_to_bridge_with: attempt.telnyxCallControlId,
-    command_id: `${attempt.id}-bridge`,
-  });
-
-  logInfo("Bridge requested", {
-    callAttemptId: attempt.id,
-    agentCallControlId: attempt.telnyxAgentCallControlId,
-    leadCallControlId: attempt.telnyxCallControlId,
-  });
+  return {
+    attempt: initiatedAttempt,
+    lead,
+  };
 }
 
 export async function hangupAttemptLegs(callAttemptId: string) {

@@ -1,9 +1,8 @@
 "use client";
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import type { Call as TelnyxCall, INotification, TelnyxRTC as TelnyxRTCType } from "@telnyx/webrtc";
 import { addDays, format } from "date-fns";
-import { ExternalLink, Mic, MicOff, PhoneCall, PhoneOff, RefreshCcw } from "lucide-react";
+import { ExternalLink, PhoneCall, PhoneOff, RefreshCcw } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -111,26 +110,8 @@ type ScriptKey = keyof SettingsResponse["settings"]["scripts"];
 
 type CallBootstrapResponse = {
   attempt?: CallAttempt;
-  callSession?: {
-    attemptId: string;
-    clientState: string;
-    callerNumber?: string | null;
-    destinationNumber: string;
-  };
   error?: string;
 };
-
-type ClientFailureDebug = {
-  callState: string;
-  callControlId: string | null;
-  callLegId: string | null;
-  callSessionId: string | null;
-  cause: string | null;
-  sipCode: number | null;
-  sipReason: string | null;
-};
-
-type TelnyxRTCInstance = InstanceType<typeof TelnyxRTCType>;
 
 const outcomeButtons: Array<{ outcome: string; label: string }> = [
   { outcome: "answered", label: "Answered" },
@@ -175,39 +156,6 @@ function getCallbackDate(preset: "today_later" | "tomorrow_morning" | "tomorrow_
   return tomorrow;
 }
 
-function getSoftphoneStatusLabel(status: "idle" | "connecting" | "ready" | "error") {
-  switch (status) {
-    case "connecting":
-      return "connecting";
-    case "ready":
-      return "ready";
-    case "error":
-      return "error";
-    default:
-      return "idle";
-  }
-}
-
-function mapBrowserCallStateToStatus(state: string) {
-  switch (state) {
-    case "trying":
-    case "requesting":
-    case "ringing":
-    case "recovering":
-    case "new":
-      return "dialing";
-    case "active":
-    case "held":
-      return "connected";
-    case "hangup":
-    case "destroy":
-    case "purge":
-      return "completed";
-    default:
-      return "idle";
-  }
-}
-
 export default function QueuePage() {
   const searchParams = useSearchParams();
   const [leads, setLeads] = useState<LeadItem[]>([]);
@@ -221,28 +169,18 @@ export default function QueuePage() {
   const [customCallbackAt, setCustomCallbackAt] = useState("");
   const [showScripts, setShowScripts] = useState(true);
   const [calling, setCalling] = useState(false);
-  const [softphoneStatus, setSoftphoneStatus] = useState<"idle" | "connecting" | "ready" | "error">("idle");
-  const [softphoneMessage, setSoftphoneMessage] = useState<string | null>(null);
-  const [activeCall, setActiveCall] = useState<TelnyxCall | null>(null);
-  const [activeCallState, setActiveCallState] = useState("idle");
-  const [callMuted, setCallMuted] = useState(false);
+  const [callMessage, setCallMessage] = useState<string | null>(null);
   const [pendingAttemptId, setPendingAttemptId] = useState<string | null>(null);
   const [savingOutcome, setSavingOutcome] = useState(false);
   const [savingNote, setSavingNote] = useState(false);
   const [savingScripts, setSavingScripts] = useState(false);
   const [demoAgentStatus, setDemoAgentStatus] = useState<DemoAgentStatusResponse | null>(null);
   const [loadingDemoAgentStatus, setLoadingDemoAgentStatus] = useState(false);
-  const syncedAgentLegAttemptIdsRef = useRef<Set<string>>(new Set());
-  const syncingAgentLegAttemptIdsRef = useRef<Set<string>>(new Set());
   const locallyEndedAttemptIdsRef = useRef<Set<string>>(new Set());
   const promptedVoicemailAttemptIdsRef = useRef<Set<string>>(new Set());
-  const didPrewarmSoftphoneRef = useRef(false);
-  const didPrimeMicrophoneRef = useRef(false);
   const didInitialLeadLoadRef = useRef(false);
   const didLoadSettingsRef = useRef(false);
   const notesRef = useRef<HTMLTextAreaElement | null>(null);
-  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
-  const clientRef = useRef<TelnyxRTCInstance | null>(null);
   const refreshLeadsRef = useRef<() => Promise<void>>(async () => undefined);
   const pendingAttemptIdRef = useRef<string | null>(null);
   const requestedLeadId = searchParams.get("leadId");
@@ -302,43 +240,6 @@ export default function QueuePage() {
   }, [refreshLeads]);
 
   useEffect(() => {
-    if (didPrewarmSoftphoneRef.current) {
-      return;
-    }
-
-    didPrewarmSoftphoneRef.current = true;
-
-    window.setTimeout(() => {
-      void ensureSoftphoneReady().catch((error) => {
-        const message = error instanceof Error ? error.message : "Could not prepare browser phone";
-        setSoftphoneMessage(message);
-      });
-    }, 250);
-    // `ensureSoftphoneReady` is intentionally run once to prewarm the browser phone.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    if (didPrimeMicrophoneRef.current || typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
-      return;
-    }
-
-    didPrimeMicrophoneRef.current = true;
-
-    window.setTimeout(() => {
-      void navigator.mediaDevices
-        .getUserMedia({ audio: true })
-        .then((stream) => {
-          stream.getTracks().forEach((track) => track.stop());
-          setSoftphoneMessage((current) => current ?? "Microphone ready");
-        })
-        .catch(() => {
-          setSoftphoneMessage((current) => current ?? "Microphone access will be requested when you place a call");
-        });
-    }, 500);
-  }, []);
-
-  useEffect(() => {
     async function loadSettings() {
       const response = await fetch("/api/settings", { cache: "no-store" });
       const payload = (await response.json()) as SettingsResponse;
@@ -357,127 +258,6 @@ export default function QueuePage() {
     void loadSettings();
   }, []);
 
-  function getClientFailureDebug(call: TelnyxCall): ClientFailureDebug {
-    const telnyxIds = call.telnyxIDs;
-
-    return {
-      callState: call.state ?? "unknown",
-      callControlId: telnyxIds?.telnyxCallControlId || null,
-      callLegId: telnyxIds?.telnyxLegId || null,
-      callSessionId: telnyxIds?.telnyxSessionId || null,
-      cause: "cause" in call && typeof call.cause === "string" ? call.cause : null,
-      sipCode: "sipCode" in call && typeof call.sipCode === "number" ? call.sipCode : null,
-      sipReason: "sipReason" in call && typeof call.sipReason === "string" ? call.sipReason : null,
-    };
-  }
-
-  async function syncAttemptFailure(
-    attemptId: string,
-    status: "failed" | "canceled",
-    clientError: string,
-    debug?: ClientFailureDebug,
-  ) {
-    try {
-      await fetch(`/api/calls/${attemptId}`, {
-        method: "PATCH",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          status,
-          clientError,
-          debug,
-        }),
-      });
-    } catch {
-      // Ignore best-effort sync failures here. Webhooks remain the primary source of truth.
-    } finally {
-      await refreshLeadsRef.current();
-    }
-  }
-
-  async function syncAttemptConnected(attemptId: string) {
-    try {
-      await fetch(`/api/calls/${attemptId}`, {
-        method: "PATCH",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          status: "connected",
-          answeredAt: new Date().toISOString(),
-        }),
-      });
-    } catch {
-      // Ignore best-effort connected sync failures here. Webhooks remain authoritative.
-    } finally {
-      await refreshLeadsRef.current();
-    }
-  }
-
-  async function resetSoftphoneClient() {
-    const client = clientRef.current;
-    clientRef.current = null;
-
-    if (client) {
-      try {
-        await client.disconnect();
-      } catch {
-        // Ignore disconnect cleanup failures while resetting the browser phone.
-      }
-    }
-
-    setActiveCall(null);
-    setActiveCallState("idle");
-    setCallMuted(false);
-    setSoftphoneStatus("idle");
-  }
-
-  function isTelnyxAuthenticationErrorMessage(message: string) {
-    return message.includes("Authentication Required") || message.includes("AUTHENTICATION_REQUIRED");
-  }
-
-  function createBrowserCallSilently(client: TelnyxRTCInstance, callOptions: {
-    destinationNumber: string;
-    callerNumber?: string;
-    clientState: string;
-    audio: true;
-  }) {
-    const originalConsoleInfo = console.info;
-    const originalConsoleLog = console.log;
-    const originalConsoleDebug = console.debug;
-    const originalConsoleWarn = console.warn;
-    const originalConsoleError = console.error;
-
-    // The Telnyx SDK logs the full call options object in dev, which Next.js 16
-    // tries to inspect and turns into noisy dynamic API warnings. Suppress the
-    // bootstrap logging window so those dev-only warnings do not leak through.
-    console.info = () => undefined;
-    console.log = () => undefined;
-    console.debug = () => undefined;
-    console.warn = () => undefined;
-    console.error = () => undefined;
-
-    let restored = false;
-    const restoreConsole = () => {
-      if (restored) {
-        return;
-      }
-
-      restored = true;
-      console.info = originalConsoleInfo;
-      console.log = originalConsoleLog;
-      console.debug = originalConsoleDebug;
-      console.warn = originalConsoleWarn;
-      console.error = originalConsoleError;
-    };
-
-    try {
-      return client.newCall(callOptions);
-    } finally {
-      window.setTimeout(restoreConsole, 3000);
-    }
-  }
 
   function promptVoicemailDetected(leadName: string, phoneNumber: string) {
     const message = `${leadName} (${phoneNumber}) went to voicemail. The call was ended automatically.`;
@@ -493,237 +273,6 @@ export default function QueuePage() {
 
     window.alert(message);
   }
-
-  async function waitForSoftphoneReady(client: TelnyxRTCInstance) {
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      const registered = await client.getIsRegistered().catch(() => false);
-
-      if (registered) {
-        setSoftphoneStatus("ready");
-        setSoftphoneMessage("Browser phone ready");
-        return;
-      }
-
-      await new Promise((resolve) => window.setTimeout(resolve, 250));
-    }
-
-    throw new Error("Browser phone registration timed out");
-  }
-
-  function handleTelnyxNotification(notification: INotification) {
-    if (notification.type !== "callUpdate" || !notification.call) {
-      return;
-    }
-
-    const call = notification.call;
-    setActiveCallState(call.state);
-    setCallMuted(Boolean(call.isAudioMuted));
-
-    const attemptId = pendingAttemptIdRef.current;
-    if (attemptId) {
-      void syncAgentLegToBackend(attemptId, call).catch(async (syncError) => {
-        const message = syncError instanceof Error ? syncError.message : "Could not sync browser leg";
-        setError(message);
-        setSoftphoneMessage(message);
-        setPendingAttemptId(null);
-        await syncAttemptFailure(attemptId, "failed", message, getClientFailureDebug(call));
-      });
-
-      if (call.state === "active") {
-        void syncAttemptConnected(attemptId);
-      }
-    }
-
-    if (["hangup", "destroy", "purge"].includes(call.state)) {
-      setActiveCall(null);
-      setPendingAttemptId(null);
-      void refreshLeadsRef.current();
-      return;
-    }
-
-    setActiveCall(call);
-  }
-
-  async function ensureSoftphoneReady() {
-    const existingClient = clientRef.current;
-
-    if (existingClient) {
-      if (remoteAudioRef.current) {
-        existingClient.remoteElement = remoteAudioRef.current;
-      }
-
-      if (softphoneStatus === "ready") {
-        return existingClient;
-      }
-
-      if (softphoneStatus === "connecting") {
-        await waitForSoftphoneReady(existingClient);
-        return existingClient;
-      }
-
-      await resetSoftphoneClient();
-    }
-
-    setSoftphoneStatus("connecting");
-    setSoftphoneMessage("Connecting browser phone...");
-
-    try {
-      window.localStorage.setItem("loglevel", "ERROR");
-      window.localStorage.setItem("loglevel:default", "ERROR");
-      window.localStorage.setItem("loglevel:TelnyxRTC", "ERROR");
-    } catch {
-      // Ignore localStorage failures in restrictive browser contexts.
-    }
-
-    const { TelnyxRTC } = await import("@telnyx/webrtc");
-
-    const tokenResponse = await fetch("/api/telnyx/webrtc-token", {
-      method: "POST",
-    });
-    const tokenPayload = (await tokenResponse.json()) as { token?: string; error?: string };
-
-    if (!tokenResponse.ok || !tokenPayload.token) {
-      throw new Error(tokenPayload.error ?? "Could not create a WebRTC token");
-    }
-
-    const client = new TelnyxRTC({
-      login_token: tokenPayload.token,
-      keepConnectionAliveOnSocketClose: true,
-      mutedMicOnStart: false,
-    });
-
-    if (remoteAudioRef.current) {
-      client.remoteElement = remoteAudioRef.current;
-    }
-
-    client.on("telnyx.ready", () => {
-      setSoftphoneStatus("ready");
-      setSoftphoneMessage("Browser phone ready");
-    });
-
-    client.on("telnyx.error", ({ error: clientError }) => {
-      const message = clientError?.message ?? "Browser phone error";
-      const attemptId = pendingAttemptIdRef.current;
-
-      setSoftphoneMessage(message);
-      setError(message);
-      setActiveCall(null);
-      setActiveCallState("idle");
-      setCallMuted(false);
-
-      if (isTelnyxAuthenticationErrorMessage(message)) {
-        void resetSoftphoneClient().catch(() => undefined);
-      } else {
-        setSoftphoneStatus("error");
-      }
-
-      if (attemptId) {
-        setPendingAttemptId(null);
-        void syncAttemptFailure(attemptId, "failed", message, activeCall ? getClientFailureDebug(activeCall) : undefined);
-      }
-    });
-
-    client.on("telnyx.notification", handleTelnyxNotification);
-
-    clientRef.current = client;
-
-    await client.connect();
-    await waitForSoftphoneReady(client);
-
-    return client;
-  }
-
-  async function hangupBrowserCall() {
-    if (!activeCall) {
-      return;
-    }
-
-    try {
-      if (pendingAttemptIdRef.current) {
-        locallyEndedAttemptIdsRef.current.add(pendingAttemptIdRef.current);
-      }
-
-      setPendingAttemptId(null);
-      setActiveCall(null);
-      setActiveCallState("hangup");
-      setCallMuted(false);
-      setSoftphoneMessage("Ending call...");
-      await activeCall.hangup();
-    } catch {
-      // Ignore local hangup errors and let webhook/client updates reconcile state.
-    }
-  }
-
-  async function syncAgentLegToBackend(attemptId: string, call: TelnyxCall) {
-    if (syncedAgentLegAttemptIdsRef.current.has(attemptId) || syncingAgentLegAttemptIdsRef.current.has(attemptId)) {
-      return;
-    }
-
-    syncingAgentLegAttemptIdsRef.current.add(attemptId);
-
-    try {
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        const telnyxIds = call.telnyxIDs;
-
-        if (telnyxIds?.telnyxCallControlId || telnyxIds?.telnyxLegId || telnyxIds?.telnyxSessionId) {
-          const response = await fetch(`/api/calls/${attemptId}`, {
-            method: "PATCH",
-            headers: {
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({
-              agentLeg: {
-                ...(telnyxIds?.telnyxCallControlId ? { callControlId: telnyxIds.telnyxCallControlId } : {}),
-                ...(telnyxIds?.telnyxLegId ? { callLegId: telnyxIds.telnyxLegId } : {}),
-                ...(telnyxIds?.telnyxSessionId ? { callSessionId: telnyxIds.telnyxSessionId } : {}),
-              },
-            }),
-          });
-
-          if (!response.ok) {
-            const payload = (await response.json().catch(() => ({ error: "Could not sync browser leg" }))) as { error?: string };
-            throw new Error(payload.error ?? "Could not sync browser leg");
-          }
-
-          syncedAgentLegAttemptIdsRef.current.add(attemptId);
-          setSoftphoneMessage(telnyxIds?.telnyxCallControlId ? "Dialing lead..." : "Browser leg connected");
-          await refreshLeadsRef.current();
-          return;
-        }
-
-        await new Promise((resolve) => window.setTimeout(resolve, 250));
-      }
-
-      const debug = getClientFailureDebug(call);
-      throw new Error(
-        `Browser call started, but no Telnyx leg identifiers were received. ` +
-          `state=${debug.callState}, cause=${debug.cause ?? "-"}, sip=${debug.sipCode ?? "-"} ${debug.sipReason ?? ""}`.trim(),
-      );
-    } finally {
-      syncingAgentLegAttemptIdsRef.current.delete(attemptId);
-    }
-  }
-
-  function toggleMute() {
-    if (!activeCall) {
-      return;
-    }
-
-    if (callMuted) {
-      activeCall.unmuteAudio();
-      setCallMuted(false);
-      return;
-    }
-
-    activeCall.muteAudio();
-    setCallMuted(true);
-  }
-
-  useEffect(() => {
-    return () => {
-      void resetSoftphoneClient();
-    };
-  }, []);
 
   async function saveScriptTemplates() {
     if (!scriptDrafts) {
@@ -776,7 +325,7 @@ export default function QueuePage() {
 
       setDemoAgentStatus(payload);
     } catch (statusError) {
-      setSoftphoneMessage(statusError instanceof Error ? statusError.message : "Failed to load demo agent status");
+      setCallMessage(statusError instanceof Error ? statusError.message : "Failed to load demo agent status");
     } finally {
       setLoadingDemoAgentStatus(false);
     }
@@ -824,15 +373,10 @@ export default function QueuePage() {
     }
 
     setPendingAttemptId(null);
-    setActiveCall(null);
-    setActiveCallState("idle");
-    setCallMuted(false);
     locallyEndedAttemptIdsRef.current.delete(latestAttempt.id);
-    syncedAgentLegAttemptIdsRef.current.delete(latestAttempt.id);
-    syncingAgentLegAttemptIdsRef.current.delete(latestAttempt.id);
 
     if (latestAttempt.status === "voicemail_detected") {
-      setSoftphoneMessage("Voicemail detected. Call ended automatically.");
+      setCallMessage("Voicemail detected. Call ended automatically.");
       if (!promptedVoicemailAttemptIdsRef.current.has(latestAttempt.id) && selectedLead) {
         promptedVoicemailAttemptIdsRef.current.add(latestAttempt.id);
         promptVoicemailDetected(selectedLead.businessName ?? "This lead", selectedLead.phoneNumber);
@@ -841,16 +385,16 @@ export default function QueuePage() {
     }
 
     if (latestAttempt.status === "completed") {
-      setSoftphoneMessage("Call completed.");
+      setCallMessage("Call completed.");
       return;
     }
 
     if (latestAttempt.status === "canceled") {
-      setSoftphoneMessage("Call canceled.");
+      setCallMessage("Call canceled.");
       return;
     }
 
-    setSoftphoneMessage("Call ended.");
+    setCallMessage("Call ended.");
   }, [latestAttempt, selectedLead]);
 
   useEffect(() => {
@@ -928,80 +472,67 @@ export default function QueuePage() {
     }
 
     setError(null);
+    setCallMessage("Starting outbound call...");
     setCalling(true);
 
     try {
-      for (let authRetry = 0; authRetry < 2; authRetry += 1) {
-        try {
-          const client = await ensureSoftphoneReady();
-          const response = await fetch(`/api/leads/${selectedLead.id}/call`, {
-            method: "POST",
-          });
+      const response = await fetch(`/api/leads/${selectedLead.id}/call`, {
+        method: "POST",
+      });
 
-          const payload = (await response.json()) as CallBootstrapResponse;
+      const payload = (await response.json()) as CallBootstrapResponse;
 
-          if (!response.ok || !payload.callSession || !payload.attempt) {
-            setError(payload.error ?? "Call initiation failed");
-            return;
-          }
-
-          const attempt = payload.attempt;
-          setPendingAttemptId(attempt.id);
-          setActiveCallState("dialing");
-
-          const destinationNumber = String(payload.callSession.destinationNumber);
-          const callerNumber = payload.callSession.callerNumber ? String(payload.callSession.callerNumber) : undefined;
-          const clientState = String(payload.callSession.clientState);
-          const callOptions = {
-            destinationNumber,
-            ...(callerNumber ? { callerNumber } : {}),
-            clientState,
-            audio: true as const,
-          };
-
-          const nextCall = createBrowserCallSilently(client, callOptions);
-
-          setActiveCall(nextCall);
-          setActiveCallState(nextCall.state ?? "new");
-          setCallMuted(Boolean(nextCall.isAudioMuted));
-          setSoftphoneMessage("Connecting browser leg...");
-
-          void syncAgentLegToBackend(attempt.id, nextCall).catch((syncError) => {
-            const message = syncError instanceof Error ? syncError.message : "Could not sync browser leg";
-            setError(message);
-            setSoftphoneMessage(message);
-            setPendingAttemptId(null);
-            void syncAttemptFailure(attempt.id, "failed", message, getClientFailureDebug(nextCall));
-          });
-
-          await refreshLeads();
-          return;
-        } catch (callError) {
-          const message = callError instanceof Error ? callError.message : "Call initiation failed";
-
-          if (authRetry === 0 && isTelnyxAuthenticationErrorMessage(message)) {
-            await resetSoftphoneClient();
-            setSoftphoneMessage("Refreshing browser phone session...");
-            continue;
-          }
-
-          throw callError;
-        }
+      if (!response.ok || !payload.attempt) {
+        setError(payload.error ?? "Call initiation failed");
+        setCallMessage(payload.error ?? "Call initiation failed");
+        return;
       }
+
+      setPendingAttemptId(payload.attempt.id);
+      setCallMessage("Outbound call started. Waiting for Telnyx updates...");
+      await refreshLeads();
     } catch (callError) {
       const message = callError instanceof Error ? callError.message : "Call initiation failed";
-      const attemptId = pendingAttemptIdRef.current;
 
       setError(message);
-      setSoftphoneStatus("error");
-      setSoftphoneMessage(message);
-
-      if (attemptId) {
-        setPendingAttemptId(null);
-        await syncAttemptFailure(attemptId, "failed", message);
-      }
+      setCallMessage(message);
     } finally {
       setCalling(false);
+    }
+  }
+
+  async function hangupOutboundCall() {
+    const attemptId = latestAttempt?.id ?? pendingAttemptIdRef.current;
+
+    if (!attemptId) {
+      return;
+    }
+
+    locallyEndedAttemptIdsRef.current.add(attemptId);
+    setPendingAttemptId(null);
+    setCallMessage("Ending call...");
+
+    try {
+      const response = await fetch(`/api/calls/${attemptId}`, {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          status: "canceled",
+        }),
+      });
+      const payload = (await response.json().catch(() => ({ error: "Could not end call" }))) as { error?: string };
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Could not end call");
+      }
+
+      await refreshLeads();
+    } catch (hangupError) {
+      const message = hangupError instanceof Error ? hangupError.message : "Could not end call";
+      setError(message);
+      setCallMessage(message);
     }
   }
 
@@ -1123,11 +654,9 @@ export default function QueuePage() {
     niche: selectedLead?.niche ?? "",
   };
 
-  const displayedCallStatus = latestAttempt?.status ?? mapBrowserCallStateToStatus(activeCallState);
+  const displayedCallStatus = latestAttempt?.status ?? "idle";
   const latestAttemptDismissed = latestAttempt ? locallyEndedAttemptIdsRef.current.has(latestAttempt.id) : false;
-  const callInProgress =
-    Boolean(latestAttempt && !latestAttemptDismissed && ["dialing", "connected"].includes(latestAttempt.status)) ||
-    Boolean(activeCall && !["hangup", "destroy", "purge"].includes(activeCallState));
+  const callInProgress = Boolean(latestAttempt && !latestAttemptDismissed && ["dialing", "connected"].includes(latestAttempt.status));
 
   return (
     <div className="space-y-4">
@@ -1201,13 +730,9 @@ export default function QueuePage() {
                     <PhoneCall className="mr-2 h-4 w-4" />
                     {calling ? "Starting..." : callInProgress ? "Call Live" : "Call"}
                   </Button>
-                  <Button disabled={!activeCall} onClick={() => void hangupBrowserCall()} variant="destructive">
+                  <Button disabled={!callInProgress} onClick={() => void hangupOutboundCall()} variant="destructive">
                     <PhoneOff className="mr-2 h-4 w-4" />
                     Hang up
-                  </Button>
-                  <Button disabled={!activeCall} onClick={toggleMute} variant="outline">
-                    {callMuted ? <Mic className="mr-2 h-4 w-4" /> : <MicOff className="mr-2 h-4 w-4" />}
-                    {callMuted ? "Unmute" : "Mute"}
                   </Button>
                   <Button onClick={moveToNextLead} variant="secondary">
                     Skip
@@ -1282,11 +807,10 @@ export default function QueuePage() {
                     <CardTitle className="text-base">Call controls</CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-2 text-sm">
-                    <audio ref={remoteAudioRef} autoPlay className="hidden" playsInline />
                     <p>
-                      <span className="font-medium">Browser phone:</span> {getSoftphoneStatusLabel(softphoneStatus)}
+                      <span className="font-medium">Outbound path:</span> Telnyx Call Control
                     </p>
-                    {softphoneMessage ? <p className="text-xs text-slate-500">{softphoneMessage}</p> : null}
+                    {callMessage ? <p className="text-xs text-slate-500">{callMessage}</p> : null}
                     <p>
                       <span className="font-medium">State:</span> {displayedCallStatus}
                     </p>

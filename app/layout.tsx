@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: process.env.NEXT_PUBLIC_APP_NAME ?? "ColdCaller CRM",
-  description: "Browser-based cold calling CRM using Telnyx WebRTC and webhook-driven call control",
+  description: "Cold calling CRM using Telnyx Call Control and webhook-driven call status",
 };
 
 export default function RootLayout({

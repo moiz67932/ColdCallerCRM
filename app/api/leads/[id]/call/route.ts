@@ -4,12 +4,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/api-auth";
 import { formatUnknownError, getClientIp, jsonError } from "@/lib/http";
 import { consumeRateLimit } from "@/lib/rate-limit";
-import { env } from "@/lib/env";
 import { logError, logInfo } from "@/lib/logger";
-import { canReceiveTelnyxVoiceWebhooks, createWebRtcCallAttempt, encodeClientState, ensureTelnyxConfigured } from "@/lib/telnyx/call-flow";
+import { canReceiveTelnyxVoiceWebhooks, createAndInitiateOutboundCall, ensureTelnyxConfigured } from "@/lib/telnyx/call-flow";
 import {
   checkVoiceWebhookReachability,
-  ensureTelnyxConnectionWebhookConfigured,
   getTelnyxErrorDiagnostics,
   getWebhookBaseUrlIssue,
 } from "@/lib/telnyx/helpers";
@@ -59,27 +57,19 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       leadId: id,
     });
 
-    await ensureTelnyxConnectionWebhookConfigured();
-    const { attempt, lead } = await createWebRtcCallAttempt(id);
+    const { attempt, lead } = await createAndInitiateOutboundCall(id);
 
-    logInfo("Created lead call bootstrap", {
+    logInfo("Created and initiated outbound Telnyx call", {
       requestId,
       ip,
       leadId: id,
       attemptId: attempt.id,
+      callControlId: attempt.telnyxCallControlId,
     });
 
     return NextResponse.json({
       attempt,
-      callSession: {
-        attemptId: attempt.id,
-        clientState: encodeClientState({
-          attemptId: attempt.id,
-          role: "agent",
-        }),
-        callerNumber: env.TELNYX_FROM_NUMBER,
-        destinationNumber: lead.phoneNumber,
-      },
+      lead,
     });
   } catch (error) {
     const message = formatUnknownError(error);

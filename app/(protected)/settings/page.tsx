@@ -22,14 +22,10 @@ type AppSettings = {
 
 type RuntimeConfig = {
   telnyxConnectionConfigured?: boolean;
-  telnyxTelephonyCredentialConfigured?: boolean;
-  telnyxTelephonyCredentialMode?: "configured" | "auto-managed";
   telnyxFromNumber?: string | null;
   telnyxMessagingFromConfigured?: boolean;
   signatureVerificationConfigured?: boolean;
-  telnyxVoiceWebhookUrl?: string | null;
   telnyxExpectedVoiceWebhookUrl?: string | null;
-  telnyxVoiceWebhookMatchesAppBaseUrl?: boolean | null;
   adminPasswordEnvBased?: boolean;
 };
 
@@ -38,7 +34,6 @@ type HealthCheckResponse = {
     dbConnected?: boolean;
     requiredEnv?: Record<string, boolean>;
     telnyxCredentialsConfigured?: boolean;
-    webrtcCredentialConfigured?: boolean;
     outboundCallerConfigured?: boolean;
     messagingConfigured?: boolean;
     webhookBaseUrlConfigured?: boolean;
@@ -126,15 +121,9 @@ export default function SettingsPage() {
               <p className="text-slate-600">{runtimeConfig?.telnyxConnectionConfigured ? "Configured" : "Not configured"}</p>
             </div>
             <div className="rounded-lg border border-slate-200 p-3 text-sm">
-              <p className="font-medium">TELNYX_TELEPHONY_CREDENTIAL_ID</p>
-              <p className="text-slate-600">
-                {runtimeConfig?.telnyxTelephonyCredentialConfigured
-                  ? runtimeConfig?.telnyxTelephonyCredentialMode === "configured"
-                    ? "Configured"
-                    : "Auto-managed from connection"
-                  : "Not configured"}
-              </p>
-              <p className="mt-2 text-xs text-slate-500">If this id is stale, the backend will reuse or create a valid WebRTC credential automatically.</p>
+              <p className="font-medium">TELNYX_FROM_NUMBER</p>
+              <p className="text-slate-600">{runtimeConfig?.telnyxFromNumber ?? "Not configured"}</p>
+              <p className="mt-2 text-xs text-slate-500">Used as caller ID for Telnyx Call Control outbound calls.</p>
             </div>
           </div>
 
@@ -150,23 +139,15 @@ export default function SettingsPage() {
               />
             </div>
             <div className="rounded-lg border border-slate-200 p-3 text-sm">
-              <p className="font-medium">TELNYX_FROM_NUMBER</p>
-              <p className="text-slate-600">{runtimeConfig?.telnyxFromNumber ?? "Not configured"}</p>
-              <p className="mt-2 text-xs text-slate-500">
-                Browser calling is always WebRTC-based and voicemail detection is always enabled with `detect_beep`.
-              </p>
+              <p className="font-medium">Outbound calling</p>
+              <p className="text-slate-600">Backend Call Control over the configured Telnyx connection.</p>
+              <p className="mt-2 text-xs text-slate-500">Voicemail detection is enabled with `detect_beep`.</p>
             </div>
           </div>
 
           <div className="rounded-lg border border-slate-200 p-3 text-sm">
             <p className="font-medium">Telnyx Voice Webhook URL</p>
-            <p className="break-all text-slate-600">{runtimeConfig?.telnyxVoiceWebhookUrl ?? "Unknown / not readable"}</p>
             <p className="mt-2 break-all text-xs text-slate-500">Expected: {runtimeConfig?.telnyxExpectedVoiceWebhookUrl ?? "Not set"}</p>
-            {runtimeConfig?.telnyxVoiceWebhookMatchesAppBaseUrl === false ? (
-              <p className="mt-2 text-xs text-amber-700">
-                This mismatch prevents webhook-driven call control, recordings, and transcripts from reaching the app.
-              </p>
-            ) : null}
           </div>
 
           <div className="space-y-2">
@@ -226,7 +207,6 @@ export default function SettingsPage() {
         <CardContent className="space-y-2 text-sm">
           <StatusRow label="Database connectivity" ok={Boolean(health?.checks?.dbConnected)} />
           <StatusRow label="Telnyx credentials configured" ok={Boolean(health?.checks?.telnyxCredentialsConfigured)} />
-          <StatusRow label="WebRTC auth ready" ok={Boolean(health?.checks?.webrtcCredentialConfigured)} />
           <StatusRow label="Outbound caller configured" ok={Boolean(health?.checks?.outboundCallerConfigured)} />
           <StatusRow label="Messaging number configured" ok={Boolean(health?.checks?.messagingConfigured)} />
           <StatusRow label="Webhook base URL configured" ok={Boolean(health?.checks?.webhookBaseUrlConfigured)} />
@@ -239,7 +219,7 @@ export default function SettingsPage() {
           {!health?.checks?.webhookBaseUrlPublic ? (
             <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
               Telnyx cannot post call-control webhooks to `localhost` or a private LAN URL. Use a public tunnel such as
-              `ngrok` or `cloudflared`, set `APP_BASE_URL` to that public URL, then restart the app before testing browser calls.
+              `ngrok` or `cloudflared`, set `APP_BASE_URL` to that public URL, then restart the app before testing outbound calls.
             </div>
           ) : null}
 

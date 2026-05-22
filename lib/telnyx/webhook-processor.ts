@@ -4,11 +4,9 @@ import type { CallStatus, JsonObject, TranscriptStatus } from "@/lib/db-types";
 import { logError, logInfo } from "@/lib/logger";
 import { prisma } from "@/lib/workstation-db";
 import {
-  bridgeAgentLeg,
   computeAttemptSummary,
   decodeClientState,
   hangupCallControlIds,
-  initiateLeadLeg,
   isCallTerminalStatus,
   startAttemptRecording,
 } from "@/lib/telnyx/call-flow";
@@ -218,31 +216,8 @@ async function markVoicemailDetected(attempt: ExistingCallAttempt, amdResult: st
 
 async function handleInitiatedEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
   const syncedAttempt = await syncAttemptFromEvent(attempt, event);
-  const payload = (event.data.payload ?? {}) as Record<string, unknown>;
-  const clientState = decodeClientState(getPayloadValue(payload, "client_state"));
-  const role = getCallRole(syncedAttempt, getPayloadValue(payload, "call_control_id"), clientState?.role ?? null);
 
   await updateAttemptStatus(syncedAttempt, "dialing");
-
-  if (role === "agent") {
-    const destinationNumber = getPayloadValue(payload, "to");
-
-    if (destinationNumber) {
-      const lead = await prisma.lead.findUnique({
-        where: { id: syncedAttempt.leadId },
-      });
-
-      if (lead?.phoneNumber === destinationNumber) {
-        logInfo("Skipping lead-leg dial for direct browser outbound call", {
-          callAttemptId: syncedAttempt.id,
-          destinationNumber,
-        });
-        return;
-      }
-    }
-
-    await initiateLeadLeg(syncedAttempt.id);
-  }
 }
 
 async function handleAnsweredEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
@@ -252,7 +227,11 @@ async function handleAnsweredEvent(attempt: ExistingCallAttempt, event: TelnyxWe
   const role = getCallRole(syncedAttempt, getPayloadValue(payload, "call_control_id"), clientState?.role ?? null);
 
   if (role === "lead") {
-    await updateAttemptStatus(syncedAttempt, "dialing");
+    const connectedAttempt = await updateAttemptStatus(syncedAttempt, "connected", {
+      answeredAt: syncedAttempt.answeredAt ?? getEventTimestamp(event),
+    });
+
+    await startAttemptRecording(connectedAttempt.id);
   }
 }
 
@@ -276,7 +255,11 @@ async function handleMachineDetection(attempt: ExistingCallAttempt, event: Telny
   }
 
   if (isHumanDetectionResult(amdResult)) {
-    await bridgeAgentLeg(withAmdResult.id);
+    const connectedAttempt = await updateAttemptStatus(withAmdResult, "connected", {
+      answeredAt: withAmdResult.answeredAt ?? getEventTimestamp(event),
+    });
+
+    await startAttemptRecording(connectedAttempt.id);
   }
 }
 

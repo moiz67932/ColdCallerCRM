@@ -1,12 +1,11 @@
 # Project Documentation
 
-This project is a single-operator outbound CRM with browser-based calling over Telnyx WebRTC.
+This project is a single-operator outbound CRM with backend-initiated outbound calling over Telnyx Call Control.
 
 ## Current Telephony Architecture
 
-- The operator side lives in the browser as a Telnyx WebRTC session.
-- The backend never calls the operator’s real phone.
-- The backend dials only the lead PSTN leg.
+- The browser calls the backend API; it does not register a SIP softphone.
+- The backend dials the lead through the configured Telnyx connection.
 - Telnyx voice webhooks drive status, duration, recording, and transcript persistence.
 - Voicemail detection uses `answering_machine_detection: "detect_beep"` and hangs up immediately on machine detection.
 
@@ -14,7 +13,6 @@ This project is a single-operator outbound CRM with browser-based calling over T
 
 - [lib/telnyx/call-flow.ts](/mnt/c/Users/Moiz/Desktop/ColCaller/lib/telnyx/call-flow.ts)
 - [lib/telnyx/webhook-processor.ts](/mnt/c/Users/Moiz/Desktop/ColCaller/lib/telnyx/webhook-processor.ts)
-- [app/api/telnyx/webrtc-token/route.ts](/mnt/c/Users/Moiz/Desktop/ColCaller/app/api/telnyx/webrtc-token/route.ts)
 - [app/api/leads/[id]/call/route.ts](/mnt/c/Users/Moiz/Desktop/ColCaller/app/api/leads/[id]/call/route.ts)
 - [app/api/webhooks/telnyx/voice/route.ts](/mnt/c/Users/Moiz/Desktop/ColCaller/app/api/webhooks/telnyx/voice/route.ts)
 - [app/(protected)/queue/page.tsx](/mnt/c/Users/Moiz/Desktop/ColCaller/app/(protected)/queue/page.tsx)
@@ -27,8 +25,7 @@ This project is a single-operator outbound CRM with browser-based calling over T
 - `telnyxCallSessionId`
 - `telnyxCallControlId`
 - `telnyxCallLegId`
-- `telnyxAgentCallControlId`
-- `telnyxAgentCallLegId`
+- legacy browser-leg fields from the previous softphone flow
 
 Call statuses are now:
 
@@ -42,4 +39,3 @@ Call statuses are now:
 ## Operational Docs
 
 - Setup and environment: [README.md](/mnt/c/Users/Moiz/Desktop/ColCaller/README.md)
-- Cutover checklist: [docs/webrtc-telnyx-migration.md](/mnt/c/Users/Moiz/Desktop/ColCaller/docs/webrtc-telnyx-migration.md)

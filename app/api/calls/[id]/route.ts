@@ -5,7 +5,7 @@ import { requireApiAuth } from "@/lib/api-auth";
 import type { JsonObject, JsonValue } from "@/lib/db-types";
 import { formatUnknownError, jsonError } from "@/lib/http";
 import { prisma } from "@/lib/workstation-db";
-import { startAttemptRecording } from "@/lib/telnyx/call-flow";
+import { hangupAttemptLegs, startAttemptRecording } from "@/lib/telnyx/call-flow";
 
 function getHangupSourceFromWebhookPayload(payloadJson: JsonValue) {
   if (!payloadJson || typeof payloadJson !== "object" || Array.isArray(payloadJson)) {
@@ -97,25 +97,9 @@ const updateCallAttemptSchema = z
     clientError: z.string().optional(),
     answeredAt: z.string().datetime().optional(),
     debug: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
-    agentLeg: z
-      .object({
-        callControlId: z.string().min(1).optional(),
-        callLegId: z.string().min(1).optional(),
-        callSessionId: z.string().min(1).optional(),
-      })
-      .optional(),
   })
-  .refine((value) => Boolean(value.status) || Boolean(value.agentLeg), {
-    message: "Either a terminal status update or an agent leg payload is required",
-  })
-  .refine((value) => {
-    if (!value.agentLeg) {
-      return true;
-    }
-
-    return Boolean(value.agentLeg.callControlId || value.agentLeg.callLegId || value.agentLeg.callSessionId);
-  }, {
-    message: "Agent leg payload must include at least one Telnyx identifier",
+  .refine((value) => Boolean(value.status), {
+    message: "A status update is required",
   });
 
 export async function PATCH(request: NextRequest, context: { params: Promise<{ id: string }> }) {
@@ -150,18 +134,11 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
 
     let updated = attempt;
 
-    if (payload.agentLeg) {
-      updated = await prisma.callAttempt.update({
-        where: { id },
-        data: {
-          telnyxAgentCallControlId: payload.agentLeg.callControlId ?? attempt.telnyxAgentCallControlId,
-          telnyxAgentCallLegId: payload.agentLeg.callLegId ?? attempt.telnyxAgentCallLegId,
-          telnyxCallSessionId: payload.agentLeg.callSessionId ?? attempt.telnyxCallSessionId,
-        },
-      });
-    }
-
     if (payload.status) {
+      if (payload.status === "canceled" && !updated.endedAt) {
+        await hangupAttemptLegs(updated.id);
+      }
+
       updated = await prisma.callAttempt.update({
         where: { id },
         data: {
