@@ -9,8 +9,12 @@ import {
   parseStructuredPrices,
   sanitizeVoiceAnswerRows,
   stableSyntheticKey,
+  toLeadClinicServiceRow,
+  toRejectedCandidateRow,
   writeNormalizedExtraction,
+  type NormalizedService,
   type PipelinePage,
+  type RejectedServiceCandidate,
 } from "@/lib/demo-agent/profile-pipeline";
 
 function page(input: Partial<PipelinePage> & { url: string; cleanedText: string }): PipelinePage {
@@ -129,6 +133,115 @@ test("GlossGenius deposit and full price stay separated", () => {
   assert.equal(service.price_summary, "$125");
   assert.equal(service.starting_price_cents, 12500);
   assert.equal(service.prices.some((price) => price.price_type === "deposit" && price.amount_cents === 6000), true);
+});
+
+test("lead_clinic_services mapper includes voice-safe columns and excludes internal fields", () => {
+  const service: NormalizedService & Record<string, unknown> = {
+    id: "11111111-1111-4111-8111-111111111111",
+    canonical_name: "Dermaplane Facial",
+    display_name: "Dermaplane Facial",
+    service_slug: "dermaplane-facial",
+    category: "Facials",
+    subcategory: null,
+    description_short: "Dermaplane facial",
+    description_long: null,
+    is_bookable: true,
+    is_product: false,
+    is_membership: false,
+    is_consultation: false,
+    duration_min_minutes: 45,
+    duration_max_minutes: null,
+    starting_price_cents: 12500,
+    price_summary: "$125",
+    price_available: true,
+    currency: "USD",
+    source_url: "https://clinic.example/book",
+    source_page_id: null,
+    source_quote: "Dermaplane Facial $125",
+    extraction_method: "dom_service_card",
+    confidence: 0.92,
+    sort_order: 1,
+    synthetic_key: null,
+    service_kind: "service",
+    rejected: false,
+    rejection_reason: null,
+    aliases: [{ alias: "Dermaplane", alias_type: "test", confidence: 0.8 }],
+    prices: [{
+      price_label: "Standard",
+      price_type: "fixed",
+      amount_min_cents: null,
+      amount_max_cents: null,
+      amount_cents: 12500,
+      currency: "USD",
+      unit: null,
+      package_quantity: null,
+      raw_price_text: "$125",
+      duration_min_minutes: null,
+      duration_max_minutes: null,
+      confidence: 0.9,
+      source_quote: "Dermaplane Facial $125",
+    }],
+    candidate_scores: { bad: true },
+    raw_html: "<div>bad</div>",
+    internal_debug: true,
+  };
+  const row = toLeadClinicServiceRow(service, {
+    organization_id: "org-1",
+    lead_id: "lead-1",
+    lead_demo_profile_id: "profile-1",
+    extraction_run_id: "run-1",
+    clinic_id: null,
+  });
+
+  assert.equal(row.service_kind, "service");
+  assert.equal(row.rejected, false);
+  assert.equal(row.rejection_reason, null);
+  assert.deepEqual(row.price_details, [{
+    price_label: "Standard",
+    price_type: "fixed",
+    amount_min_cents: null,
+    amount_max_cents: null,
+    amount_cents: 12500,
+    currency: "USD",
+    unit: null,
+    package_quantity: null,
+    raw_price_text: "$125",
+    confidence: 0.9,
+  }]);
+  assert.equal(row.voice_label, "Dermaplane Facial");
+  assert.equal(row.voice_category, "Facials");
+  assert.equal("aliases" in row, false);
+  assert.equal("candidate_scores" in row, false);
+  assert.equal("raw_html" in row, false);
+  assert.equal("internal_debug" in row, false);
+});
+
+test("rejected candidate mapper writes debug rows separately", () => {
+  const candidate: RejectedServiceCandidate = {
+    raw_name: "Get In Touch",
+    normalized_name: "Get In Touch",
+    candidate_kind: "navigation",
+    rejection_reason: "navigation_or_contact_label",
+    source_url: "https://clinic.example/contact",
+    source_page_id: null,
+    source_quote: "Get In Touch",
+    extraction_method: "legacy_line_candidate",
+    confidence: 0.52,
+    metadata: { source: "test" },
+  };
+
+  const row = toRejectedCandidateRow(candidate, {
+    organization_id: "org-1",
+    lead_id: "lead-1",
+    lead_demo_profile_id: "profile-1",
+    extraction_run_id: "run-1",
+    clinic_id: null,
+  });
+
+  assert.equal(row.raw_name, "Get In Touch");
+  assert.equal(row.rejection_reason, "navigation_or_contact_label");
+  assert.equal(row.candidate_kind, "navigation");
+  assert.deepEqual(row.metadata, { source: "test" });
 });
 
 test("JSON-LD LocalBusiness, Service, and Offer data feed deterministic extraction", () => {
@@ -530,6 +643,67 @@ test("polluted voice menu is not demo ready", () => {
   });
 
   assert.equal(quality.isDemoReady, false);
+});
+
+test("polluted extraction candidates populate rejection stats", () => {
+  const result = extractNormalizedClinicProfile([
+    page({
+      url: "https://live.example/services",
+      title: "Services",
+      cleanedText: "Live Lovely\nJenny Patton\nGet In Touch\nBook Now\nCustomize Gift Card\n1 H 15 Min\nAll Services\nAge Defying Facial\nProcell Microchanneling",
+    }),
+  ], { websiteUrl: "https://live.example", businessNameHint: "Live Lovely" });
+
+  assert.equal(result.rejectedCandidates.length > 0, true);
+  assert.equal(result.rejectedCandidates.some((candidate) => candidate.rejection_reason === "person_name"), true);
+  assert.equal(result.rejectedCandidates.some((candidate) => candidate.rejection_reason === "navigation_or_contact_label" || candidate.rejection_reason === "banned_label"), true);
+});
+
+test("over-extracted small local profiles are blocked", () => {
+  const services: NormalizedService[] = Array.from({ length: 81 }, (_, index) => ({
+    id: `aaaaaaaa-aaaa-4aaa-8aaa-${String(index).padStart(12, "0")}`,
+    canonical_name: `Service ${index}`,
+    display_name: `Service ${index}`,
+    service_slug: `service-${index}`,
+    category: "Facials",
+    subcategory: null,
+    description_short: null,
+    description_long: null,
+    is_bookable: true,
+    is_product: false,
+    is_membership: false,
+    is_consultation: false,
+    duration_min_minutes: null,
+    duration_max_minutes: null,
+    starting_price_cents: null,
+    price_summary: null,
+    price_available: false,
+    currency: "USD",
+    source_url: "https://clinic.example/services",
+    source_page_id: null,
+    source_quote: `Service ${index}`,
+    extraction_method: "deterministic",
+    confidence: 0.9,
+    sort_order: index,
+    synthetic_key: null,
+    service_kind: "service",
+    aliases: [],
+    prices: [],
+  }));
+  const quality = evaluateProfileQuality({
+    businessName: "Glowing Skin Med Spa",
+    facts: [{ id: "fact", fact_type: "phone", fact_key: "primary", fact_value: "(555) 123-1212", normalized_value: null, confidence: 0.9, source_url: "https://clinic.example", source_page_id: null, source_quote: null, extraction_method: "deterministic" }],
+    locations: [],
+    hours: [],
+    services,
+    faqs: [],
+    offers: [],
+    voiceAnswers: [{ id: "answer", answer_type: "services_list", service_id: null, question_pattern: null, answer_text: "Services.", source_urls: null, confidence: 0.9, max_age_days: null }],
+    pages: [page({ url: "https://clinic.example/services", title: "Services", cleanedText: "Services" })],
+  });
+
+  assert.equal(quality.isDemoReady, false);
+  assert.equal(quality.blockers.some((blocker) => /More than 80 real services/i.test(blocker)), true);
 });
 
 test("privacy, review, cart, and broken-page text do not become services or staff", () => {

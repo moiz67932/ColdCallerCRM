@@ -210,6 +210,19 @@ type NormalizedProduct = {
   confidence: number;
 };
 
+export type RejectedServiceCandidate = {
+  raw_name: string;
+  normalized_name: string | null;
+  candidate_kind: NormalizedService["service_kind"] | null;
+  rejection_reason: string;
+  source_url: string | null;
+  source_page_id: string | null;
+  source_quote: string | null;
+  extraction_method: string | null;
+  confidence: number | null;
+  metadata: Record<string, unknown>;
+};
+
 export const ALLOWED_VOICE_ANSWER_TYPES = [
   "services_list",
   "hours",
@@ -299,6 +312,7 @@ export type NormalizedExtractionResult = {
   offers: NormalizedOffer[];
   staff: NormalizedStaff[];
   products: NormalizedProduct[];
+  rejectedCandidates: RejectedServiceCandidate[];
   voiceAnswers: VoiceAnswer[];
   knowledgeChunks: KnowledgeChunk[];
   quality: QualityResult;
@@ -1278,6 +1292,77 @@ function servicesFromJsonLd(page: PipelinePage) {
   return { services, offers };
 }
 
+function rejectedCandidate(input: {
+  rawName: string;
+  page: PipelinePage;
+  evidence: string;
+  reason: string;
+  serviceKind: NormalizedService["service_kind"] | null;
+  method: string;
+  confidence?: number | null;
+  metadata?: Record<string, unknown>;
+}): RejectedServiceCandidate {
+  const rawName = normalizeText(input.rawName);
+  return {
+    raw_name: rawName || "unknown",
+    normalized_name: rawName ? normalizeServiceName(rawName) : null,
+    candidate_kind: input.serviceKind,
+    rejection_reason: input.reason,
+    source_url: input.page.url,
+    source_page_id: input.page.id ?? null,
+    source_quote: shortQuote(input.evidence || rawName, 300),
+    extraction_method: input.method,
+    confidence: input.confidence ?? null,
+    metadata: input.metadata ?? {},
+  };
+}
+
+function collectRejectedCandidatesFromPage(page: PipelinePage, pageType: PageType) {
+  const rejected: RejectedServiceCandidate[] = [];
+  const addCandidate = (rawName: string, evidence: string, method: string, confidence = 0.7, metadata: Record<string, unknown> = {}) => {
+    const name = normalizeText(rawName).replace(/[:|]+$/, "");
+    if (!name || name.length > 120) return;
+    const classification = classifyCandidateKind({ name, pageType, evidence });
+    if (!classification.rejected) return;
+    rejected.push(rejectedCandidate({
+      rawName: name,
+      page,
+      evidence,
+      reason: classification.reason ?? "rejected",
+      serviceKind: classification.service_kind,
+      method,
+      confidence,
+      metadata,
+    }));
+  };
+
+  for (const block of extractedBlocks(page)) {
+    const heading = normalizeText(block.heading ?? "");
+    const text = normalizeText(block.text);
+    if (heading) addCandidate(heading, [heading, text].filter(Boolean).join(" "), `dom_${blockKind(block)}`, block.confidence ?? 0.72, { block_kind: blockKind(block) });
+  }
+
+  const text = page.normalizedText ?? normalizeExtractionPageText(page.cleanedText);
+  for (const line of text.split(/\n+/).map(normalizeText).filter(Boolean).slice(0, 500)) {
+    if (line.length < 2 || line.length > 120) continue;
+    addCandidate(line, line, "legacy_line_candidate", 0.52);
+  }
+
+  return uniqueRejectedCandidates(rejected);
+}
+
+function uniqueRejectedCandidates(candidates: RejectedServiceCandidate[]) {
+  const seen = new Set<string>();
+  const unique: RejectedServiceCandidate[] = [];
+  for (const candidate of candidates) {
+    const key = [candidate.raw_name, candidate.rejection_reason, candidate.source_url].map(nullableKey).join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(candidate);
+  }
+  return unique;
+}
+
 function extractServicesFromPage(page: PipelinePage, pageType: PageType): { services: NormalizedService[]; products: NormalizedProduct[]; offers: NormalizedOffer[] } {
   if (shouldIgnorePageForExtraction(page)) return { services: [], products: [], offers: [] };
   const text = page.normalizedText ?? normalizeExtractionPageText(page.cleanedText);
@@ -1588,6 +1673,7 @@ function applyLlmExtraction(result: NormalizedExtractionResult, llm: LlmExtracti
     faqs,
     offers,
     staff,
+    rejectedCandidates: result.rejectedCandidates,
     voiceAnswers,
     knowledgeChunks,
     snapshot,
@@ -1923,6 +2009,15 @@ function sourceUrlsFromPages(pages: PipelinePage[]) {
   return [...new Set(pages.map((page) => page.url).filter(Boolean))];
 }
 
+function voiceApprovedServices(services: NormalizedService[]) {
+  return services.filter((service) =>
+    !service.rejected &&
+    service.confidence >= 0.75 &&
+    !["staff", "navigation", "product", "unknown"].includes(service.service_kind) &&
+    (service.service_kind === "service" || service.service_kind === "consultation" || service.service_kind === "package" || service.service_kind === "membership"),
+  );
+}
+
 function buildKnowledgeChunks(input: {
   facts: NormalizedFact[];
   services: NormalizedService[];
@@ -2075,7 +2170,7 @@ export function evaluateProfileQuality(input: {
   if (!address) warn("address", 10, "No address was extracted for this local clinic.");
   else pass("address", "Address extracted.");
 
-  if (input.services.length > 80) warn("over_extraction", 25, "More than 80 service candidates were approved for a small local site.", { services: input.services.length });
+  if (realServices.length > 80) fail("over_extraction_services_count", "More than 80 real services were approved for a small local site.", { services: realServices.length });
   if (hasServicePages && realServices.length < 5) warn("services_count", 30, "Website appears service-rich but fewer than 5 real voice-approved services were extracted.", { services: realServices.length });
   else if (realServices.length < 3 && childCategoryCount < 2) warn("non_generic_services_count", 25, "Fewer than 3 real voice-approved services were extracted.", { services: realServices.length, categories: childCategoryCount });
   else pass("services_count", "Service count is sufficient for the scraped pages.", { services: realServices.length });
@@ -2401,6 +2496,7 @@ export function extractNormalizedClinicProfile(pages: PipelinePage[], context: E
   const services = mergeServices(extracted.flatMap((entry) => entry.services));
   const products = extracted.flatMap((entry) => entry.products);
   const offers = extracted.flatMap((entry) => entry.offers);
+  const rejectedCandidates = uniqueRejectedCandidates(normalizedPages.flatMap((page) => collectRejectedCandidatesFromPage(page, page.classification.pageType)));
   const faqs = extractFaqs(normalizedPages);
   const staff = extractStaff(normalizedPages);
   const voiceAnswers = buildVoiceAnswers({ businessName, facts, locations, hours, services, faqs, offers });
@@ -2441,6 +2537,7 @@ export function extractNormalizedClinicProfile(pages: PipelinePage[], context: E
     offers,
     staff,
     products,
+    rejectedCandidates,
     voiceAnswers,
     knowledgeChunks,
     quality,
@@ -2459,6 +2556,80 @@ function baseDbFields(input: { organizationId: string; leadId: string; leadDemoP
   };
 }
 
+type BaseDbFields = ReturnType<typeof baseDbFields>;
+
+export function toLeadClinicServiceRow(service: NormalizedService, base: BaseDbFields) {
+  return {
+    organization_id: base.organization_id,
+    lead_id: base.lead_id,
+    lead_demo_profile_id: base.lead_demo_profile_id,
+    extraction_run_id: base.extraction_run_id,
+    clinic_id: base.clinic_id ?? null,
+    id: service.id,
+    canonical_name: service.canonical_name,
+    display_name: service.display_name,
+    service_slug: service.service_slug,
+    category: service.category ?? null,
+    subcategory: service.subcategory ?? null,
+    description_short: service.description_short ?? null,
+    description_long: service.description_long ?? null,
+    is_bookable: service.is_bookable ?? true,
+    is_product: service.is_product ?? false,
+    is_membership: service.is_membership ?? false,
+    is_consultation: service.is_consultation ?? false,
+    duration_min_minutes: service.duration_min_minutes ?? null,
+    duration_max_minutes: service.duration_max_minutes ?? null,
+    starting_price_cents: service.starting_price_cents ?? null,
+    price_summary: service.price_summary ?? null,
+    price_available: service.price_available ?? false,
+    currency: service.currency ?? "USD",
+    source_url: service.source_url ?? null,
+    source_page_id: service.source_page_id ?? null,
+    source_quote: service.source_quote ?? null,
+    confidence: service.confidence ?? 0,
+    sort_order: service.sort_order ?? null,
+    synthetic_key: service.synthetic_key ?? null,
+    is_active: true,
+    extraction_method: service.extraction_method ?? null,
+    service_kind: service.service_kind ?? "service",
+    rejected: service.rejected ?? false,
+    rejection_reason: service.rejection_reason ?? null,
+    price_details: service.prices.map((price) => ({
+      price_label: price.price_label,
+      price_type: price.price_type,
+      amount_min_cents: price.amount_min_cents,
+      amount_max_cents: price.amount_max_cents,
+      amount_cents: price.amount_cents,
+      currency: price.currency,
+      unit: price.unit,
+      package_quantity: price.package_quantity,
+      raw_price_text: price.raw_price_text,
+      confidence: price.confidence,
+    })),
+    voice_label: service.display_name,
+    voice_category: service.category ?? null,
+  };
+}
+
+export function toRejectedCandidateRow(candidate: RejectedServiceCandidate, base: BaseDbFields) {
+  return {
+    organization_id: base.organization_id,
+    lead_id: base.lead_id,
+    lead_demo_profile_id: base.lead_demo_profile_id,
+    extraction_run_id: base.extraction_run_id,
+    source_page_id: candidate.source_page_id,
+    raw_name: candidate.raw_name,
+    normalized_name: candidate.normalized_name,
+    candidate_kind: candidate.candidate_kind,
+    rejection_reason: candidate.rejection_reason,
+    source_url: candidate.source_url,
+    source_quote: candidate.source_quote,
+    extraction_method: candidate.extraction_method,
+    confidence: candidate.confidence,
+    metadata: candidate.metadata,
+  };
+}
+
 async function deactivatePreviousRows(leadDemoProfileId: string) {
   const supabase = await getAdminClient();
   const replaceTables = [
@@ -2474,6 +2645,7 @@ async function deactivatePreviousRows(leadDemoProfileId: string) {
     "lead_clinic_locations",
     "lead_clinic_facts",
     "lead_profile_quality_checks",
+    "lead_clinic_rejected_candidates",
     "lead_clinic_services",
   ];
   for (const table of replaceTables) {
@@ -2487,10 +2659,14 @@ async function insertRows(table: string, rows: Record<string, unknown>[], supaba
   const client = supabase ?? await getAdminClient();
   const { error } = await client.from(table).insert(rows);
   if (error) {
+    const firstRow = rows[0] ?? {};
+    const rowKeys = Object.keys(firstRow).sort();
+    const unknownColumnHint = /Could not find the '.*' column|schema cache|column .* does not exist/i.test(error.message)
+      ? " Run the latest Supabase migration and then `notify pgrst, 'reload schema';` to refresh the PostgREST schema cache."
+      : "";
     if (table === "lead_clinic_voice_answers") {
       const allAnswerTypes = getDistinctVoiceAnswerTypes(rows);
       const invalidAnswerTypes = allAnswerTypes.filter((answerType) => !allowedVoiceAnswerTypeSet.has(answerType));
-      const firstRow = rows[0] ?? {};
       const metadata = {
         table,
         allAnswerTypes,
@@ -2500,9 +2676,17 @@ async function insertRows(table: string, rows: Record<string, unknown>[], supaba
         extraction_run_id: firstRow.extraction_run_id,
       };
       console.error("demo_agent.voice_answer_insert_failed", metadata);
-      throw new Error(`Failed writing ${table}: ${error.message}; metadata=${JSON.stringify(metadata)}`);
+      throw new Error(`Failed writing ${table}: ${error.message}${unknownColumnHint}; metadata=${JSON.stringify(metadata)}`);
     }
-    throw new Error(`Failed writing ${table}: ${error.message}`);
+    console.error("demo_agent.table_insert_failed", {
+      table,
+      rowCount: rows.length,
+      rowKeys,
+      lead_demo_profile_id: firstRow.lead_demo_profile_id,
+      extraction_run_id: firstRow.extraction_run_id,
+      error: error.message,
+    });
+    throw new Error(`Failed writing ${table}: ${error.message}${unknownColumnHint}; row_keys=${rowKeys.join(",")}`);
   }
   return rows.length;
 }
@@ -2635,14 +2819,14 @@ export async function writeNormalizedExtraction(input: {
   const hourRows = uniqueRows(input.result.hours.map((hour) => ({ ...base, ...hour })), (row) =>
     [row.day_of_week, row.opens_at, row.closes_at, row.raw_text].map(nullableKey).join("|"),
   );
-  const serviceRows = uniqueRows(input.result.services.map((service) => {
-    const row = { ...service } as Record<string, unknown>;
-    delete row.aliases;
-    delete row.prices;
-    return { ...base, ...row };
-  }), (row) => nullableKey(row.service_slug));
+  const serviceRows = uniqueRows(input.result.services
+    .filter((service) => !service.rejected)
+    .map((service) => toLeadClinicServiceRow(service, base)), (row) => nullableKey(row.service_slug));
   const insertedServiceIds = new Set(serviceRows.map((row) => String(row.id)));
   const servicesToWrite = input.result.services.filter((service) => insertedServiceIds.has(service.id));
+  const rejectedCandidateRows = uniqueRows(input.result.rejectedCandidates.map((candidate) => toRejectedCandidateRow(candidate, base)), (row) =>
+    [row.raw_name, row.rejection_reason, row.source_url].map(nullableKey).join("|"),
+  );
   const aliasRows = uniqueRows(servicesToWrite.flatMap((service) =>
     service.aliases.map((alias) => ({
       id: randomUUID(),
@@ -2697,7 +2881,25 @@ export async function writeNormalizedExtraction(input: {
   writeCounts.facts = await insertRows("lead_clinic_facts", factRows, supabase);
   writeCounts.locations = await insertRows("lead_clinic_locations", locationRows, supabase);
   writeCounts.hours = await insertRows("lead_clinic_hours", hourRows, supabase);
+  logInfo("demo_agent.service_rows_prepared", {
+    lead_demo_profile_id: input.leadDemoProfileId,
+    extraction_run_id: input.result.extractionRunId,
+    rowCount: serviceRows.length,
+    rowKeys: Object.keys(serviceRows[0] ?? {}).sort(),
+    sampleServices: serviceRows.slice(0, 5).map((row) => row.display_name),
+  });
   writeCounts.services = await insertRows("lead_clinic_services", serviceRows, supabase);
+  try {
+    writeCounts.rejectedCandidates = await insertRows("lead_clinic_rejected_candidates", rejectedCandidateRows, supabase);
+  } catch (error) {
+    logWarn("demo_agent.rejected_candidates_insert_failed", {
+      lead_demo_profile_id: input.leadDemoProfileId,
+      extraction_run_id: input.result.extractionRunId,
+      rowCount: rejectedCandidateRows.length,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    writeCounts.rejectedCandidates = 0;
+  }
   writeCounts.aliases = await insertRows("lead_clinic_service_aliases", aliasRows, supabase);
   writeCounts.prices = await insertRows("lead_clinic_service_prices", priceRows, supabase);
   writeCounts.offers = await insertRows("lead_clinic_offers", offerRows, supabase);
@@ -2849,12 +3051,14 @@ export async function executeLeadProfileExtraction(options: DbExtractionOptions)
 
   const stats = {
     pagesProcessed: pages.length,
-    rawCandidatesCount: result.services.length + result.offers.length,
+    rawCandidatesCount: result.services.length + result.offers.length + result.rejectedCandidates.length,
     servicesExtracted: result.services.filter((service) => service.service_kind === "service" && !service.rejected).length,
     approvedServicesCount: result.services.filter((service) => service.service_kind === "service" && !service.rejected).length,
-    rejectedCandidatesCount: result.services.filter((service) => service.rejected).length,
-    rejectedByReason: result.services.reduce<Record<string, number>>((counts, service) => {
-      if (service.rejected) counts[service.rejection_reason ?? "unknown"] = (counts[service.rejection_reason ?? "unknown"] ?? 0) + 1;
+    categoryOnlyCount: result.services.filter((service) => service.service_kind !== "service" && !service.rejected).length,
+    voiceApprovedServicesCount: voiceApprovedServices(result.services).length,
+    rejectedCandidatesCount: result.rejectedCandidates.length,
+    rejectedByReason: result.rejectedCandidates.reduce<Record<string, number>>((counts, candidate) => {
+      counts[candidate.rejection_reason] = (counts[candidate.rejection_reason] ?? 0) + 1;
       return counts;
     }, {}),
     categoryCount: new Set(result.services.map((service) => service.category).filter(Boolean)).size,
@@ -2881,6 +3085,8 @@ export async function executeLeadProfileExtraction(options: DbExtractionOptions)
     extracted_prices_count: stats.pricesExtracted,
     raw_candidates_count: stats.rawCandidatesCount,
     approved_services_count: stats.approvedServicesCount,
+    category_only_count: stats.categoryOnlyCount,
+    voice_approved_services_count: stats.voiceApprovedServicesCount,
     rejected_item_count: stats.rejectedCandidatesCount,
     rejected_by_reason: stats.rejectedByReason,
     category_count: stats.categoryCount,
