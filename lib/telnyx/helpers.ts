@@ -106,7 +106,7 @@ export function getTelnyxErrorDiagnostics(error: unknown) {
   return {
     errorName: error instanceof Error ? error.name : undefined,
     errorMessage: error instanceof Error ? error.message : "Unknown Telnyx error",
-    status: getTelnyxErrorStatus(error),
+    telnyxStatus: getTelnyxErrorStatus(error),
     telnyxRequestId: getTelnyxRequestId(error),
     telnyxError: getTelnyxErrorSummary(error),
   };
