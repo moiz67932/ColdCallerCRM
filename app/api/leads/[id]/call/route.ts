@@ -1,13 +1,21 @@
+import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireApiAuth } from "@/lib/api-auth";
 import { formatUnknownError, getClientIp, jsonError } from "@/lib/http";
 import { consumeRateLimit } from "@/lib/rate-limit";
 import { env } from "@/lib/env";
+import { logError, logInfo } from "@/lib/logger";
 import { canReceiveTelnyxVoiceWebhooks, createWebRtcCallAttempt, encodeClientState, ensureTelnyxConfigured } from "@/lib/telnyx/call-flow";
-import { checkVoiceWebhookReachability, ensureTelnyxConnectionWebhookConfigured, getWebhookBaseUrlIssue } from "@/lib/telnyx/helpers";
+import {
+  checkVoiceWebhookReachability,
+  ensureTelnyxConnectionWebhookConfigured,
+  getTelnyxErrorDiagnostics,
+  getWebhookBaseUrlIssue,
+} from "@/lib/telnyx/helpers";
 
 export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
+  const requestId = request.headers.get("x-vercel-id") ?? randomUUID();
   const authError = await requireApiAuth(request, { mutation: true });
 
   if (authError) {
@@ -45,8 +53,21 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   const { id } = await context.params;
 
   try {
+    logInfo("Handling lead call bootstrap request", {
+      requestId,
+      ip,
+      leadId: id,
+    });
+
     await ensureTelnyxConnectionWebhookConfigured();
     const { attempt, lead } = await createWebRtcCallAttempt(id);
+
+    logInfo("Created lead call bootstrap", {
+      requestId,
+      ip,
+      leadId: id,
+      attemptId: attempt.id,
+    });
 
     return NextResponse.json({
       attempt,
@@ -63,6 +84,15 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   } catch (error) {
     const message = formatUnknownError(error);
     const status = message.includes("active call") ? 409 : 400;
+
+    logError("Lead call bootstrap request failed", {
+      requestId,
+      ip,
+      leadId: id,
+      status,
+      ...getTelnyxErrorDiagnostics(error),
+    });
+
     return jsonError(message, status);
   }
 }

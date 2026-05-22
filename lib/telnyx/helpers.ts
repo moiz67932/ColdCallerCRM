@@ -1,5 +1,5 @@
 import { env, requireEnv } from "@/lib/env";
-import { logInfo, logWarn } from "@/lib/logger";
+import { logError, logInfo, logWarn } from "@/lib/logger";
 import { getTelnyxClient } from "@/lib/telnyx/client";
 
 let cachedWebRtcTelephonyCredentialId: string | null = null;
@@ -46,6 +46,77 @@ function getTelnyxErrorStatus(error: unknown) {
   }
 
   return (error as { status?: number }).status;
+}
+
+function getTelnyxErrorBody(error: unknown) {
+  if (typeof error !== "object" || error === null || !("error" in error)) {
+    return undefined;
+  }
+
+  return (error as { error?: unknown }).error;
+}
+
+function getTelnyxRequestId(error: unknown) {
+  if (typeof error !== "object" || error === null || !("headers" in error)) {
+    return undefined;
+  }
+
+  const headers = (error as { headers?: unknown }).headers;
+
+  if (!headers || typeof headers !== "object" || !("get" in headers)) {
+    return undefined;
+  }
+
+  const getHeader = (headers as { get: (name: string) => string | null }).get.bind(headers);
+
+  return getHeader("x-request-id") ?? getHeader("telnyx-request-id") ?? undefined;
+}
+
+function getTelnyxErrorSummary(error: unknown) {
+  const body = getTelnyxErrorBody(error);
+
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return undefined;
+  }
+
+  const errors = (body as { errors?: unknown }).errors;
+
+  if (!Array.isArray(errors)) {
+    return body;
+  }
+
+  return errors.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return entry;
+    }
+
+    const typed = entry as Record<string, unknown>;
+
+    return {
+      code: typed.code,
+      title: typed.title,
+      detail: typed.detail,
+      source: typed.source,
+      meta: typed.meta,
+    };
+  });
+}
+
+export function getTelnyxErrorDiagnostics(error: unknown) {
+  return {
+    errorName: error instanceof Error ? error.name : undefined,
+    errorMessage: error instanceof Error ? error.message : "Unknown Telnyx error",
+    status: getTelnyxErrorStatus(error),
+    telnyxRequestId: getTelnyxRequestId(error),
+    telnyxError: getTelnyxErrorSummary(error),
+  };
+}
+
+function logTelnyxOperationError(message: string, error: unknown, context: Record<string, unknown> = {}) {
+  logError(message, {
+    ...context,
+    ...getTelnyxErrorDiagnostics(error),
+  });
 }
 
 function isTelnyxCredentialTokenError(error: unknown) {
@@ -185,6 +256,12 @@ async function findExistingWebRtcTelephonyCredentialId(connectionId: string) {
   const resourceIds = [connectionId, `connection:${connectionId}`];
 
   async function scanCredentials(resourceId: string, tag?: string) {
+    logInfo("Scanning Telnyx telephony credentials for WebRTC", {
+      connectionId,
+      resourceId,
+      tag: tag ?? null,
+    });
+
     const credentialPages = getTelnyxClient().telephonyCredentials.list(
       {
         filter: {
@@ -224,10 +301,21 @@ async function findExistingWebRtcTelephonyCredentialId(connectionId: string) {
 
   const bestMatch = matches.sort((left, right) => right.rank - left.rank)[0];
 
+  logInfo("Finished Telnyx telephony credential scan", {
+    connectionId,
+    matchCount: matches.length,
+    selectedCredentialId: bestMatch?.id ?? null,
+  });
+
   return bestMatch?.id ?? null;
 }
 
 async function createWebRtcTelephonyCredential(connectionId: string) {
+  logInfo("Creating Telnyx telephony credential for WebRTC", {
+    connectionId,
+    tag: WEBRTC_CREDENTIAL_TAG,
+  });
+
   const response = await getTelnyxClient().telephonyCredentials.create(
     {
       connection_id: connectionId,
@@ -266,6 +354,12 @@ export async function createTelnyxWebRtcToken() {
   const configuredCredentialId = normalizeOptionalValue(env.TELNYX_TELEPHONY_CREDENTIAL_ID);
   const connectionId = getTelnyxConnectionId();
 
+  logInfo("Starting Telnyx WebRTC token creation", {
+    connectionId,
+    hasConfiguredCredentialId: Boolean(configuredCredentialId),
+    cachedCredentialId: cachedWebRtcTelephonyCredentialId,
+  });
+
   if (configuredCredentialId && credentialIdLooksLikeConnectionId(configuredCredentialId, connectionId)) {
     invalidConfiguredTelephonyCredentialId = configuredCredentialId;
     logWarn(
@@ -283,14 +377,33 @@ export async function createTelnyxWebRtcToken() {
 
   for (const credentialId of candidateIds) {
     try {
+      logInfo("Minting Telnyx WebRTC token with candidate credential", {
+        connectionId,
+        credentialId,
+        source:
+          credentialId === cachedWebRtcTelephonyCredentialId
+            ? "cache"
+            : credentialId === configuredCredentialId
+              ? "env"
+              : "candidate",
+      });
+
       const token = await getTelnyxClient().telephonyCredentials.createToken(
         credentialId,
         TELNYX_FAST_REQUEST_OPTIONS,
       );
       cachedWebRtcTelephonyCredentialId = credentialId;
+      logInfo("Minted Telnyx WebRTC token with candidate credential", {
+        connectionId,
+        credentialId,
+      });
       return token;
     } catch (error) {
       if (!isTelnyxCredentialTokenError(error)) {
+        logTelnyxOperationError("Unexpected Telnyx error while minting WebRTC token", error, {
+          connectionId,
+          credentialId,
+        });
         throw error;
       }
 
@@ -301,18 +414,39 @@ export async function createTelnyxWebRtcToken() {
       logWarn("Telnyx telephony credential could not mint a WebRTC token. Falling back to connection lookup.", {
         credentialId,
         connectionId,
-        status: getTelnyxErrorStatus(error),
+        ...getTelnyxErrorDiagnostics(error),
       });
     }
   }
 
   const resolvedCredentialId = await resolveWebRtcTelephonyCredentialId();
-  const token = await getTelnyxClient().telephonyCredentials.createToken(
-    resolvedCredentialId,
-    TELNYX_FAST_REQUEST_OPTIONS,
-  );
+
+  logInfo("Minting Telnyx WebRTC token with resolved credential", {
+    connectionId,
+    credentialId: resolvedCredentialId,
+  });
+
+  let token: string;
+
+  try {
+    token = await getTelnyxClient().telephonyCredentials.createToken(
+      resolvedCredentialId,
+      TELNYX_FAST_REQUEST_OPTIONS,
+    );
+  } catch (error) {
+    logTelnyxOperationError("Failed to mint Telnyx WebRTC token with resolved credential", error, {
+      connectionId,
+      credentialId: resolvedCredentialId,
+    });
+    throw error;
+  }
 
   cachedWebRtcTelephonyCredentialId = resolvedCredentialId;
+
+  logInfo("Minted Telnyx WebRTC token with resolved credential", {
+    connectionId,
+    credentialId: resolvedCredentialId,
+  });
 
   return token;
 }
@@ -328,7 +462,7 @@ export async function getTelnyxConnectionWebhookConfig() {
     return null;
   }
 
-  const response = await getTelnyxClient().connections.retrieve(connectionId);
+  const response = await getTelnyxClient().credentialConnections.retrieve(connectionId);
   const data = response.data;
 
   if (!data) {
@@ -359,7 +493,22 @@ export async function ensureTelnyxConnectionWebhookConfigured() {
     };
   }
 
-  const current = await getTelnyxConnectionWebhookConfig();
+  let current: Awaited<ReturnType<typeof getTelnyxConnectionWebhookConfig>>;
+
+  try {
+    logInfo("Checking Telnyx credential connection webhook config", {
+      connectionId,
+      expectedWebhookUrl,
+    });
+
+    current = await getTelnyxConnectionWebhookConfig();
+  } catch (error) {
+    logTelnyxOperationError("Failed to retrieve Telnyx credential connection webhook config", error, {
+      connectionId,
+      expectedWebhookUrl,
+    });
+    throw error;
+  }
 
   if (current?.webhookEventUrl === expectedWebhookUrl && current.webhookApiVersion === "2") {
     cachedWebhookSyncKey = cacheKey;
@@ -369,10 +518,20 @@ export async function ensureTelnyxConnectionWebhookConfigured() {
     };
   }
 
-  await getTelnyxClient().credentialConnections.update(connectionId, {
-    webhook_event_url: expectedWebhookUrl,
-    webhook_api_version: "2",
-  });
+  try {
+    await getTelnyxClient().credentialConnections.update(connectionId, {
+      webhook_event_url: expectedWebhookUrl,
+      webhook_api_version: "2",
+    });
+  } catch (error) {
+    logTelnyxOperationError("Failed to update Telnyx credential connection webhook config", error, {
+      connectionId,
+      expectedWebhookUrl,
+      currentWebhookUrl: current?.webhookEventUrl ?? null,
+      currentWebhookApiVersion: current?.webhookApiVersion ?? null,
+    });
+    throw error;
+  }
 
   cachedWebhookSyncKey = cacheKey;
 
