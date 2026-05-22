@@ -12,7 +12,13 @@ export type VoiceContextCompact = {
   category_lists: Record<string, string>;
   facials_list_text: string;
   injectables_list_text: string;
+  laser_list_text: string;
+  skin_list_text: string;
+  waxing_brows_list_text: string;
+  lashes_list_text: string;
   pricing_lookup_text: string;
+  voice_quality_score: number;
+  voice_context_warnings: string;
   booking_cta: string;
   clinic_phone: string;
   location_short: string;
@@ -21,6 +27,7 @@ export type VoiceContextCompact = {
 };
 
 const MAX_SPOKEN_SERVICES = 8;
+const bannedVoiceMenuPattern = /\b(get in touch|contact|book now|gift card|customize gift card|buy gift card|address|staff|team|prices|pricing|all services|menu of services|learn more|read more|home|about)\b/i;
 
 function cleanText(value: unknown) {
   return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
@@ -29,6 +36,8 @@ function cleanText(value: unknown) {
 function canonicalServiceName(name: string) {
   const normalized = cleanText(name).toLowerCase().replace(/&/g, "and");
   if (!normalized) return null;
+  if (bannedVoiceMenuPattern.test(normalized)) return null;
+  if (/^[A-Z][a-z]+\s+[A-Z][a-z]+$/.test(cleanText(name)) && !/\b(facial|botox|filler|laser|peel|wax|lash|brow|dental|cleaning|hydra|micro|procell)\b/i.test(name)) return null;
   if (/\b(botox|dysport)\b/.test(normalized)) return { key: "botox-dysport", label: "Botox and Dysport" };
   if (/\brussian lip\b/.test(normalized) || (/\blip\b/.test(normalized) && /\bfiller/.test(normalized))) {
     return { key: "lip-filler", label: "lip filler services" };
@@ -49,7 +58,9 @@ function serviceVoiceCategory(service: ExtractedProfile["services"][number]) {
   const lower = cleanText(service.name).toLowerCase();
   if (/botox|dysport|filler|kybella|sculptra|pdo|thread/.test(lower)) return "Injectables";
   if (/facial|hydra|acne/.test(lower)) return "Facials";
-  if (/microchannel|microneedl|peel|resurfac|plasma/.test(lower)) return "Advanced skin services";
+  if (/wax|brow/.test(lower)) return "Waxing and brows";
+  if (/lash/.test(lower)) return "Lashes";
+  if (/microchannel|microneedl|peel|resurfac|plasma/.test(lower)) return "Skin resurfacing";
   if (/laser|ipl|radiofrequency|rf/.test(lower)) return "Laser services";
   if (/consult/.test(lower)) return "Consultations";
   if (/cleaning|exam|filling|root canal|emergency/.test(lower)) return "Dental general";
@@ -71,7 +82,23 @@ function categoryKey(category: string) {
   if (/inject/.test(lower)) return "injectables";
   if (/laser|energy/.test(lower)) return "laser";
   if (/skin|microchannel|resurfacing/.test(lower)) return "skin";
+  if (/wax|brow/.test(lower)) return "waxing_brows";
+  if (/lash/.test(lower)) return "lashes";
   return lower.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function isVoiceApprovedService(service: ExtractedProfile["services"][number], childCategories: Set<string>) {
+  const name = cleanText(service.voice_label || service.name);
+  const kind = service.service_kind ?? "service";
+  if (!name || service.rejected || bannedVoiceMenuPattern.test(name)) return false;
+  if (kind === "staff" || kind === "navigation" || kind === "product" || kind === "unknown") return false;
+  if (kind !== "service" && kind !== "consultation" && kind !== "package" && kind !== "membership") {
+    return !childCategories.has(cleanText(service.voice_category ?? service.category));
+  }
+  if ((service.confidence ?? 0) < 0.75) return false;
+  if (/^\d{1,2}\s*h|\$[0-9]|^\d{1,3}\s*min/i.test(name)) return false;
+  if (/^[A-Z][a-z]+\s+[A-Z][a-z]+$/.test(name) && !/\b(facial|botox|filler|laser|peel|wax|lash|brow|dental|cleaning|hydra|micro|procell)\b/i.test(name)) return false;
+  return true;
 }
 
 function shortenServiceLabel(name: string) {
@@ -105,8 +132,15 @@ export function buildVoiceContextCompact(input: {
   const safeServices = new Map<string, string>();
   const grouped = new Map<string, string[]>();
   const pricing: string[] = [];
+  const warnings: string[] = [];
+  const childCategories = new Set(profile.services
+    .filter((service) => (service.service_kind ?? "service") === "service")
+    .map((service) => cleanText(service.voice_category ?? service.category))
+    .filter(Boolean));
 
-  for (const service of profile.services) {
+  const voiceServices = profile.services.filter((service) => isVoiceApprovedService(service, childCategories));
+
+  for (const service of voiceServices) {
     const canonical = canonicalServiceName(service.name);
     if (canonical && !safeServices.has(canonical.key)) safeServices.set(canonical.key, canonical.label);
     const category = serviceVoiceCategory(service);
@@ -132,10 +166,12 @@ export function buildVoiceContextCompact(input: {
       formatServiceList([...new Set(names.map(shortenServiceLabel))].slice(0, 8)),
     ]),
   );
-  const spokenServices = safeServiceNames
-    .filter((name) => !/^(services|facials|facial|skin|injectables|wellness)$/i.test(name))
-    .slice(0, MAX_SPOKEN_SERVICES)
-    .map(shortenServiceLabel);
+  let serviceMenuShort = serviceCategoriesShort
+    ? `The menu includes ${serviceCategoriesShort}.`
+    : formatServiceList(safeServiceNames.slice(0, MAX_SPOKEN_SERVICES).map(shortenServiceLabel));
+  if (serviceMenuShort.length > 220) serviceMenuShort = serviceMenuShort.slice(0, 220).replace(/\s+\S*$/, "").replace(/[,.]$/, "");
+  if (bannedVoiceMenuPattern.test(serviceMenuShort)) warnings.push("voice menu contained banned terms and was filtered");
+  const voiceQualityScore = Math.max(0, Math.min(100, 100 - (warnings.length * 15) - (voiceServices.length < 3 ? 15 : 0) - (!serviceMenuShort ? 25 : 0)));
 
   return {
     clinic_name: clinicName,
@@ -143,13 +179,19 @@ export function buildVoiceContextCompact(input: {
     binding_id: input.bindingId ?? null,
     phone_e164: input.phoneE164,
     service_categories_short: serviceCategoriesShort,
-    service_menu_short: formatServiceList(spokenServices).slice(0, 220),
+    service_menu_short: serviceMenuShort,
     safe_service_names: safeServiceNames,
     safe_service_names_text: safeServiceNames.join(", "),
     category_lists: categoryLists,
     facials_list_text: categoryLists.facials_list_text ?? "",
     injectables_list_text: categoryLists.injectables_list_text ?? "",
+    laser_list_text: categoryLists.laser_list_text ?? "",
+    skin_list_text: categoryLists.skin_list_text ?? "",
+    waxing_brows_list_text: categoryLists.waxing_brows_list_text ?? "",
+    lashes_list_text: categoryLists.lashes_list_text ?? "",
     pricing_lookup_text: pricing.join("; ").slice(0, 600),
+    voice_quality_score: voiceQualityScore,
+    voice_context_warnings: warnings.join("; "),
     booking_cta: "Would you like to book a consultation?",
     clinic_phone: cleanText(profile.clinic.phone),
     location_short: summarizeLocation(profile),
@@ -164,6 +206,10 @@ export function voiceContextText(context: VoiceContextCompact) {
     `Service categories: ${context.service_categories_short || context.service_menu_short || "Ask the clinic about available services."}.`,
     context.facials_list_text ? `Facials: ${context.facials_list_text}.` : "",
     context.injectables_list_text ? `Injectables: ${context.injectables_list_text}.` : "",
+    context.laser_list_text ? `Laser services: ${context.laser_list_text}.` : "",
+    context.skin_list_text ? `Skin services: ${context.skin_list_text}.` : "",
+    context.waxing_brows_list_text ? `Waxing and brows: ${context.waxing_brows_list_text}.` : "",
+    context.lashes_list_text ? `Lashes: ${context.lashes_list_text}.` : "",
     context.pricing_lookup_text ? `Known pricing: ${context.pricing_lookup_text}.` : "",
     "Use this safely: list service names only. Do not explain medical benefits, outcomes, risks, or suitability. For details, say a licensed provider can explain during consultation.",
     `Booking CTA: ${context.booking_cta}`,
@@ -193,7 +239,13 @@ export function parseVoiceContextCompact(value: unknown): VoiceContextCompact | 
     category_lists: categoryLists,
     facials_list_text: cleanText(record.facials_list_text) || categoryLists.facials_list_text || "",
     injectables_list_text: cleanText(record.injectables_list_text) || categoryLists.injectables_list_text || "",
+    laser_list_text: cleanText(record.laser_list_text) || categoryLists.laser_list_text || "",
+    skin_list_text: cleanText(record.skin_list_text) || categoryLists.skin_list_text || "",
+    waxing_brows_list_text: cleanText(record.waxing_brows_list_text) || categoryLists.waxing_brows_list_text || "",
+    lashes_list_text: cleanText(record.lashes_list_text) || categoryLists.lashes_list_text || "",
     pricing_lookup_text: cleanText(record.pricing_lookup_text),
+    voice_quality_score: typeof record.voice_quality_score === "number" ? record.voice_quality_score : Number(record.voice_quality_score ?? 0) || 0,
+    voice_context_warnings: cleanText(record.voice_context_warnings),
     booking_cta: cleanText(record.booking_cta) || "Would you like to book a consultation?",
     clinic_phone: cleanText(record.clinic_phone),
     location_short: cleanText(record.location_short),

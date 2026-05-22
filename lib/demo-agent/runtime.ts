@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { DEFAULT_DEMO_AGENT_DB_ID, PUBLIC_DEMO_AGENT_ID, type ExtractedProfile, weekdayOrder } from "@/lib/demo-agent/contracts";
+import { buildVoiceContextCompact } from "@/lib/elevenlabs/voice-context";
 import { contentHash, normalizeServiceName } from "@/lib/demo-agent/extraction";
 import { env, requireEnv } from "@/lib/env";
 import { logInfo, logWarn } from "@/lib/logger";
@@ -55,6 +56,17 @@ function listForSpeech(items: string[]) {
 }
 
 export function buildKnowledgeArticles(profile: ExtractedProfile, clinicId: string, organizationId: string) {
+  const voiceContext = buildVoiceContextCompact({
+    extractedProfileJson: profile,
+    leadId: "",
+    phoneE164: profile.clinic.phone,
+  });
+  const safePricedServices = profile.services.filter((service) =>
+    service.price_text &&
+    !service.rejected &&
+    !["staff", "navigation", "product", "unknown"].includes(service.service_kind ?? "service") &&
+    !/\b(get in touch|contact|book now|gift card|address|staff|team|prices|all services|menu of services)\b/i.test(service.name)
+  );
   const articles = [
     {
       organization_id: organizationId,
@@ -62,8 +74,8 @@ export function buildKnowledgeArticles(profile: ExtractedProfile, clinicId: stri
       title: "Services Overview",
       category: "Services",
       active: true,
-      body: profile.services.length
-        ? cleanRuntimeSentence(`${profile.clinic.name} offers ${listForSpeech(profile.services.map((service) => service.name))}.`)
+      body: voiceContext.service_categories_short || voiceContext.service_menu_short
+        ? cleanRuntimeSentence(`${profile.clinic.name} offers ${voiceContext.service_categories_short || voiceContext.service_menu_short.replace(/^The menu includes\s+/i, "")}.`)
         : "Services are not clearly published. The office can confirm current offerings.",
     },
     {
@@ -72,11 +84,10 @@ export function buildKnowledgeArticles(profile: ExtractedProfile, clinicId: stri
       title: "Service Pricing",
       category: "Pricing",
       active: true,
-      body: profile.services.some((service) => service.price_text)
-        ? profile.services
-            .filter((service) => service.price_text)
-            .map((service) => cleanRuntimeSentence(`For ${service.name}, ${service.price_text}`))
-            .join(" ")
+      body: voiceContext.pricing_lookup_text
+        ? voiceContext.pricing_lookup_text.split(";").map((entry) => cleanRuntimeSentence(entry)).join(" ")
+        : safePricedServices.length
+          ? safePricedServices.map((service) => cleanRuntimeSentence(`For ${service.name}, ${service.price_text}`)).join(" ")
         : "Pricing is not published. The office can confirm current pricing.",
     },
     {

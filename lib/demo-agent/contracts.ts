@@ -59,10 +59,14 @@ export const extractedProfileSchema = z.object({
       price_min_cents: z.number().int().nullable(),
       price_summary: z.string().nullable().optional().default(null),
       price_available: z.boolean().optional().default(false),
+      price_details: z.array(z.record(z.string(), z.unknown())).optional().default([]),
       bookable: z.boolean().default(true),
       source_url: z.string().default(""),
       source_quote: z.string().nullable().optional().default(null),
       extraction_method: z.string().nullable().optional().default(null),
+      service_kind: z.enum(["service", "category", "add_on", "package", "membership", "consultation", "product", "staff", "navigation", "unknown"]).optional().default("service"),
+      rejected: z.boolean().optional().default(false),
+      rejection_reason: z.string().nullable().optional().default(null),
       confidence: z.number().min(0).max(1).default(0),
     }),
   ),
@@ -104,17 +108,29 @@ export type ScrapedLink = {
 };
 
 export type ScrapedStructuredBlock = {
-  type:
-    | "section"
+  kind:
+    | "heading_section"
     | "service_card"
-    | "pricing_row"
-    | "faq"
-    | "accordion"
-    | "tab"
-    | "contact"
-    | "hours";
+    | "pricing_table_row"
+    | "booking_service_card"
+    | "faq_pair"
+    | "contact_block"
+    | "hours_block"
+    | "staff_card"
+    | "offer_card"
+    | "navigation_link"
+    | "jsonld_node";
+  type?: string;
   heading: string | null;
   text: string;
+  price_text?: string | null;
+  duration_text?: string | null;
+  link_text?: string | null;
+  href?: string | null;
+  aria_label?: string | null;
+  source_url?: string | null;
+  dom_hint?: string | null;
+  confidence?: number;
   items?: Array<Record<string, unknown>>;
   source?: string | null;
 };
@@ -127,7 +143,7 @@ export type ScrapedPage = {
   cleanedText: string;
   html: string;
   jsonLd: unknown[];
-  links: string[];
+  links: ScrapedLink[];
   linkHints?: ScrapedLink[];
   structuredBlocks?: ScrapedStructuredBlock[];
   jsonLdSummary?: Record<string, unknown>;

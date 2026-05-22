@@ -45,7 +45,13 @@ function compactContext(overrides: Row = {}) {
     safe_service_names_text: "Botox and Dysport, fillers, Kybella",
     facials_list_text: "New Client Facial and Clarifying Acne Facial",
     injectables_list_text: "Botox and Dysport, fillers, and Kybella",
+    laser_list_text: "",
+    skin_list_text: "",
+    waxing_brows_list_text: "",
+    lashes_list_text: "",
     pricing_lookup_text: "Clarifying Acne Facial: starts at $120",
+    voice_quality_score: 95,
+    voice_context_warnings: "",
     booking_cta: "Would you like to book a consultation?",
     clinic_phone: "+13103318914",
     location_short: "Los Angeles, CA",
@@ -130,6 +136,8 @@ test("conversation initiation resolves valid caller_number without plus and call
   assert.equal(variables.service_categories_short, "injectables and facials");
   assert.equal(variables.facials_list_text, "New Client Facial and Clarifying Acne Facial");
   assert.equal(variables.pricing_lookup_text, "Clarifying Acne Facial: starts at $120");
+  assert.equal(variables.laser_list_text, "");
+  assert.equal(variables.voice_quality_score, 95);
 });
 
 test("conversation initiation falls back by called_number only", async () => {

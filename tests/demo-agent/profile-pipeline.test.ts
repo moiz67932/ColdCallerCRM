@@ -102,6 +102,33 @@ test("parseStructuredPrices supports starting, series, split fixed/series, and r
   assert.equal(parseStructuredPrices("package of 3 $600")[0].price_type, "package");
   assert.equal(parseStructuredPrices("consultation $50")[0].price_type, "consultation");
   assert.equal(parseStructuredPrices("add-on $30")[0].price_type, "add_on");
+  assert.equal(parseStructuredPrices("$60 deposit required $125").find((price) => price.price_type === "deposit")?.amount_cents, 6000);
+});
+
+test("GlossGenius deposit and full price stay separated", () => {
+  const result = extractNormalizedClinicProfile([
+    page({
+      url: "https://gloss.example/book",
+      title: "Booking",
+      pageType: "booking",
+      cleanedText: "Dermaplane Facial\n$60 deposit required\n$125\nBook now",
+      structuredBlocks: [{
+        kind: "booking_service_card",
+        heading: "Dermaplane Facial",
+        text: "Dermaplane Facial $60 deposit required $125",
+        price_text: "$60 $125",
+        source_url: "https://gloss.example/book",
+        dom_hint: "booking_card",
+        confidence: 0.92,
+      }],
+    }),
+  ], { websiteUrl: "https://gloss.example", businessNameHint: "Gloss Spa" });
+
+  const service = result.services.find((entry) => entry.display_name === "Dermaplane Facial");
+  assert.ok(service);
+  assert.equal(service.price_summary, "$125");
+  assert.equal(service.starting_price_cents, 12500);
+  assert.equal(service.prices.some((price) => price.price_type === "deposit" && price.amount_cents === 6000), true);
 });
 
 test("JSON-LD LocalBusiness, Service, and Offer data feed deterministic extraction", () => {
@@ -404,6 +431,7 @@ test("quality gate fails rich clinic pages with too few services or no facts", (
         confidence: 0.8,
         sort_order: 0,
         synthetic_key: null,
+        service_kind: "service",
         aliases: [],
         prices: [],
       },
@@ -433,6 +461,7 @@ test("quality gate fails rich clinic pages with too few services or no facts", (
         confidence: 0.8,
         sort_order: 1,
         synthetic_key: null,
+        service_kind: "service",
         aliases: [],
         prices: [],
       },
@@ -448,12 +477,59 @@ test("quality gate fails rich clinic pages with too few services or no facts", (
   assert.equal(poor.warnings.some((warning) => /fewer than 5/i.test(warning)), true);
 });
 
-test("warning quality above 50 is accepted as demo ready", () => {
+test("warning quality above 50 requires review instead of demo-ready auto activation", () => {
   const result = extractNormalizedClinicProfile(fixturePages(), { websiteUrl: "https://dang.example" });
 
   assert.equal(result.quality.score >= 50, true);
-  assert.equal(result.quality.isDemoReady, true);
+  if (result.quality.status !== "demo_ready") assert.equal(result.quality.isDemoReady, false);
   assert.notEqual(result.quality.status, "not_demo_ready");
+});
+
+test("polluted voice menu is not demo ready", () => {
+  const quality = evaluateProfileQuality({
+    businessName: "Live Lovely",
+    facts: [{ id: "fact", fact_type: "phone", fact_key: "primary", fact_value: "(555) 123-1212", normalized_value: null, confidence: 0.9, source_url: "https://live.example", source_page_id: null, source_quote: null, extraction_method: "deterministic" }],
+    locations: [],
+    hours: [],
+    services: [
+      {
+        id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        canonical_name: "Get In Touch",
+        display_name: "Get In Touch",
+        service_slug: "get-in-touch",
+        category: null,
+        subcategory: null,
+        description_short: null,
+        description_long: null,
+        is_bookable: false,
+        is_product: false,
+        is_membership: false,
+        is_consultation: false,
+        duration_min_minutes: null,
+        duration_max_minutes: null,
+        starting_price_cents: null,
+        price_summary: null,
+        price_available: false,
+        currency: "USD",
+        source_url: "https://live.example",
+        source_page_id: null,
+        source_quote: "Get In Touch",
+        extraction_method: "deterministic",
+        confidence: 0.9,
+        sort_order: 0,
+        synthetic_key: null,
+        service_kind: "navigation",
+        aliases: [],
+        prices: [],
+      },
+    ],
+    faqs: [],
+    offers: [],
+    voiceAnswers: [],
+    pages: [page({ url: "https://live.example/services", title: "Services", cleanedText: "Get In Touch\nJenny Patton\nFacials\nBotox" })],
+  });
+
+  assert.equal(quality.isDemoReady, false);
 });
 
 test("privacy, review, cart, and broken-page text do not become services or staff", () => {

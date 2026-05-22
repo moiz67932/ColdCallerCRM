@@ -22,6 +22,7 @@ function service(name: string, description: string, category?: string, price?: s
     source_url: "https://clinic.example/services",
     source_quote: name,
     extraction_method: "test",
+    service_kind: "service" as const,
     confidence: 0.9,
   };
 }
@@ -64,7 +65,7 @@ test("buildVoiceContextCompact deduplicates service names and excludes medical c
   const serialized = JSON.stringify({ context_text: voiceContextText(compact), context: compact });
 
   assert.deepEqual(compact.safe_service_names, ["Botox and Dysport", "lip filler services", "fillers", "Kybella"]);
-  assert.ok(serialized.length < 1500);
+  assert.ok(serialized.length < 1800);
   assert.doesNotMatch(serialized, /reduce fat|lasts? 3 to 4 months|enhance shape|improve body contour|treatment outcome|restore volume/i);
 });
 
@@ -95,4 +96,31 @@ test("buildVoiceContextCompact groups services by category and keeps full safe n
   assert.equal(compact.safe_service_names.length, 9);
   assert.match(compact.facials_list_text, /Age Defying Facial/);
   assert.match(compact.pricing_lookup_text, /Clarifying Acne Facial/);
+});
+
+test("Live Lovely-style polluted services are filtered into voice-safe categories", () => {
+  const profile = createEmptyExtractedProfile("https://livelovely.example");
+  profile.clinic.name = "Live Lovely";
+  profile.services = [
+    { ...service("Jenny Patton", "", null), service_kind: "staff", confidence: 0.95 },
+    { ...service("Get In Touch", "", null), service_kind: "navigation", confidence: 0.95 },
+    { ...service("Add-ons", "", "Add-ons"), service_kind: "add_on", confidence: 0.9 },
+    { ...service("Peels", "", "Skin resurfacing"), service_kind: "category", confidence: 0.9 },
+    { ...service("Waxing & Brows", "", "Waxing and brows"), service_kind: "category", confidence: 0.9 },
+    service("Age Defying Facial", "", "Facials"),
+    service("Lash Lift", "", "Lashes"),
+    service("Procell Microchanneling", "", "Skin resurfacing", "$350"),
+  ];
+
+  const compact = buildVoiceContextCompact({
+    extractedProfileJson: profile,
+    leadId: "lead-1",
+    phoneE164: "+13103318914",
+  });
+
+  assert.doesNotMatch(compact.service_menu_short, /Jenny Patton|Get In Touch|Book Now|Gift Card/i);
+  assert.match(compact.service_menu_short, /facials|skin resurfacing|waxing and brows|lashes/i);
+  assert.match(compact.safe_service_names_text, /Procell Microchanneling/);
+  assert.match(compact.pricing_lookup_text, /Procell Microchanneling: \$350/);
+  assert.ok(compact.service_menu_short.length <= 220);
 });

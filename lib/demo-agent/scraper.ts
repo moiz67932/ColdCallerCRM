@@ -7,6 +7,11 @@ const blockedHosts = ["google-analytics.com", "googletagmanager.com", "doublecli
 const preferredSegments = [
   "services",
   "treatments",
+  "pricing",
+  "book",
+  "booking",
+  "appointments",
+  "menu",
   "facial",
   "facials",
   "injectables",
@@ -14,7 +19,7 @@ const preferredSegments = [
   "filler",
   "laser",
   "skin",
-  "pricing",
+  "wellness",
   "membership",
   "specials",
   "contact",
@@ -28,7 +33,7 @@ const preferredSegments = [
   "forms",
 ];
 
-const highValueSitemapPattern = /service|treatment|facial|injectable|botox|filler|laser|skin|pricing|membership|special|contact|hours|faq|about/i;
+const highValueSitemapPattern = /service|treatment|pricing|book|booking|appointment|menu|facial|injectable|botox|filler|laser|skin|wellness|membership|special|contact|hours|faq|about/i;
 
 type CrawlOptions = {
   maxPages: number;
@@ -206,6 +211,14 @@ function summarizeJsonLd(jsonLd: unknown[]) {
   return { types, names, node_count: nodes.length };
 }
 
+function extractPriceText(text: string) {
+  return normalizeText([...text.matchAll(/\$[0-9][0-9,]*(?:\.\d{2})?(?:\s*(?:-|to)\s*\$?[0-9][0-9,]*(?:\.\d{2})?)?(?:\s*(?:\/|per)\s*\w+)?/gi)].map((match) => match[0]).join(" ")) || null;
+}
+
+function extractDurationText(text: string) {
+  return normalizeText([...text.matchAll(/\b(?:\d{1,2}\s*h(?:ours?)?(?:\s*\d{1,2}\s*min(?:utes?)?)?|\d{1,3}\s*(?:-|to)?\s*\d{0,3}\s*(?:minutes?|mins?|min))\b/gi)].map((match) => match[0]).join(" ")) || null;
+}
+
 function decodeHtmlEntities(value: string) {
   const named: Record<string, string> = {
     amp: "&",
@@ -277,30 +290,44 @@ function extractLinksFromHtml(html: string): ScrapedLink[] {
   });
 }
 
-function extractStructuredBlocksFromHtml(html: string): ScrapedStructuredBlock[] {
+function extractStructuredBlocksFromHtml(html: string, sourceUrl: string): ScrapedStructuredBlock[] {
   const blocks = new Map<string, ScrapedStructuredBlock>();
-  const addBlock = (type: ScrapedStructuredBlock["type"], heading: string | null, textValue: string, source: string) => {
+  const addBlock = (kind: ScrapedStructuredBlock["kind"], heading: string | null, textValue: string, domHint: string, confidence = 0.7, items?: Array<Record<string, unknown>>) => {
     const text = normalizeText(stripHtml(textValue)).slice(0, 1800);
-    const key = `${type}:${heading ?? ""}:${text.slice(0, 180)}`;
-    if (text.length >= 8 && !blocks.has(key)) blocks.set(key, { type, heading, text, source });
+    const key = `${kind}:${heading ?? ""}:${text.slice(0, 180)}`;
+    if (text.length >= 8 && !blocks.has(key)) {
+      blocks.set(key, {
+        kind,
+        type: kind,
+        heading,
+        text,
+        price_text: extractPriceText(text),
+        duration_text: extractDurationText(text),
+        source_url: sourceUrl,
+        dom_hint: domHint,
+        confidence,
+        items,
+        source: domHint,
+      });
+    }
   };
 
   for (const match of html.matchAll(/<h([1-4])\b[^>]*>([\s\S]*?)<\/h\1>([\s\S]{0,2400})/gi)) {
     const heading = normalizeText(stripHtml(match[2]));
     const text = `${heading}\n${match[3].split(/<h[1-4]\b/i)[0] ?? ""}`;
-    if (heading) addBlock("section", heading, text, `h${match[1]}`);
+    if (heading) addBlock("heading_section", heading, text, `h${match[1]}`, 0.58);
   }
 
   for (const match of html.matchAll(/<(section|article|li|div)\b[^>]*(?:service|treatment|card|price|faq|contact|location|hours)[^>]*>([\s\S]*?)<\/\1>/gi)) {
     const text = stripHtml(match[2]);
     const heading = extractFirst(match[2], /<h[1-4]\b[^>]*>([\s\S]*?)<\/h[1-4]>/i);
-    const type = /faq|\?/i.test(text) ? "faq" : /contact|location|hours|monday|tuesday/i.test(text) ? "contact" : "service_card";
-    addBlock(type, heading ? normalizeText(stripHtml(heading)) : null, match[2], match[1].toLowerCase());
+    const kind = /faq|\?/i.test(text) ? "faq_pair" : /hours|monday|tuesday/i.test(text) ? "hours_block" : /contact|location|address|phone/i.test(text) ? "contact_block" : /book|deposit|required/i.test(text) ? "booking_service_card" : /team|staff|provider|esthetician|doctor|nurse/i.test(text) ? "staff_card" : /special|package|membership|gift/i.test(text) ? "offer_card" : "service_card";
+    addBlock(kind, heading ? normalizeText(stripHtml(heading)) : null, match[2], match[1].toLowerCase(), kind === "service_card" ? 0.82 : 0.72);
   }
 
   for (const match of html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
     const text = stripHtml(match[1]);
-    if (/\$|price|cost|unit|series|package/i.test(text)) addBlock("pricing_row", null, match[1], "table");
+    if (/\$|price|cost|unit|series|package/i.test(text)) addBlock("pricing_table_row", null, match[1], "table", 0.9);
   }
 
   return [...blocks.values()].slice(0, 80);
@@ -334,7 +361,7 @@ function htmlToScrapedPage(input: {
     jsonLd,
     links: [],
     linkHints: extractLinksFromHtml(html),
-    structuredBlocks: extractStructuredBlocksFromHtml(html),
+    structuredBlocks: extractStructuredBlocksFromHtml(html, url),
     jsonLdSummary: summarizeJsonLd(jsonLd),
     httpStatus: status,
     pageType: classifyPage(url, title),
@@ -417,7 +444,7 @@ async function crawlLeadWebsiteWithFetch(rootUrl: string, options: CrawlOptions)
       });
       const linkHints = sameDomainLinks(new URL(next.url), pageRecord.linkHints ?? []);
       pageRecord.linkHints = linkHints;
-      pageRecord.links = linkHints.map((link) => link.href);
+      pageRecord.links = linkHints;
 
       const duplicatePage = pages.some(
         (entry) => entry.url === pageRecord.url || (Boolean(entry.canonicalUrl) && entry.canonicalUrl === pageRecord.canonicalUrl),
@@ -437,9 +464,8 @@ async function crawlLeadWebsiteWithFetch(rootUrl: string, options: CrawlOptions)
 
       if (next.depth < options.maxDepth) {
         for (const link of pageRecord.links) {
-          if (!visited.has(link) && queue.length + pages.length < options.maxPages * 3) {
-            const hint = pageRecord.linkHints?.find((entry) => entry.href === link);
-            queue.push({ url: link, depth: next.depth + 1, hint: [hint?.text, hint?.ariaLabel, hint?.title].filter(Boolean).join(" ") });
+          if (!visited.has(link.href) && queue.length + pages.length < options.maxPages * 3) {
+            queue.push({ url: link.href, depth: next.depth + 1, hint: [link.text, link.ariaLabel, link.title].filter(Boolean).join(" ") });
           }
         }
       }
@@ -556,53 +582,61 @@ async function crawlLeadWebsiteWithPlaywright(rootUrl: string, options: CrawlOpt
                 ariaLabel: clean(anchor.getAttribute("aria-label")) || null,
                 title: clean(anchor.getAttribute("title")) || null,
               }));
-              const structuredBlocks = new Map<string, { type: string; heading: string | null; text: string; items?: Array<Record<string, unknown>>; source?: string | null }>();
-              const addBlock = (type: string, heading: string | null, textValue: string, items?: Array<Record<string, unknown>>, source?: string | null) => {
+              const priceText = (value: string) => [...value.matchAll(/\$[0-9][0-9,]*(?:\.\d{2})?(?:\s*(?:-|to)\s*\$?[0-9][0-9,]*(?:\.\d{2})?)?(?:\s*(?:\/|per)\s*\w+)?/gi)].map((match) => match[0]).join(" ") || null;
+              const durationText = (value: string) => [...value.matchAll(/\b(?:\d{1,2}\s*h(?:ours?)?(?:\s*\d{1,2}\s*min(?:utes?)?)?|\d{1,3}\s*(?:-|to)?\s*\d{0,3}\s*(?:minutes?|mins?|min))\b/gi)].map((match) => match[0]).join(" ") || null;
+              const structuredBlocks = new Map<string, { kind: string; type: string; heading: string | null; text: string; price_text?: string | null; duration_text?: string | null; source_url?: string | null; dom_hint?: string | null; confidence?: number; items?: Array<Record<string, unknown>>; source?: string | null }>();
+              const addBlock = (kind: string, heading: string | null, textValue: string, items?: Array<Record<string, unknown>>, source?: string | null, confidence = 0.7) => {
                 const text = clean(textValue).slice(0, 1800);
-                const key = `${type}:${heading ?? ""}:${text.slice(0, 180)}`;
-                if (text.length >= 8 && !structuredBlocks.has(key)) structuredBlocks.set(key, { type, heading: heading ? clean(heading) : null, text, items, source: source ?? null });
+                const key = `${kind}:${heading ?? ""}:${text.slice(0, 180)}`;
+                if (text.length >= 8 && !structuredBlocks.has(key)) structuredBlocks.set(key, { kind, type: kind, heading: heading ? clean(heading) : null, text, price_text: priceText(text), duration_text: durationText(text), source_url: location.href, dom_hint: source ?? null, confidence, items, source: source ?? null });
               };
 
               for (const heading of document.querySelectorAll("h1,h2,h3,h4")) {
                 const section = heading.closest("section,article,main,div") ?? heading.parentElement;
                 const headingValue = clean(heading.textContent);
                 const textValue = compactText(section);
-                if (headingValue && textValue) addBlock("section", headingValue, textValue, undefined, heading.tagName.toLowerCase());
+                if (headingValue && textValue) addBlock("heading_section", headingValue, textValue, undefined, heading.tagName.toLowerCase(), 0.58);
               }
 
               for (const element of document.querySelectorAll("[class*='service' i], [class*='treatment' i], [class*='card' i], article, li")) {
                 const heading = headingText(element);
                 const textValue = compactText(element);
                 if (heading && /service|treatment|facial|inject|botox|filler|laser|skin|price|\$/i.test(`${heading} ${textValue}`)) {
-                  addBlock("service_card", heading, textValue, undefined, "dom_card");
+                  const kind = /book|deposit|required/i.test(textValue) ? "booking_service_card" : /special|package|membership|gift/i.test(textValue) ? "offer_card" : "service_card";
+                  addBlock(kind, heading, textValue, undefined, "dom_card", 0.84);
                 }
               }
 
               for (const row of document.querySelectorAll("table tr")) {
                 const cells = [...row.querySelectorAll("th,td")].map((cell) => clean(cell.textContent)).filter(Boolean);
                 if (cells.length >= 2 && /\$|price|cost|unit|series|package/i.test(cells.join(" "))) {
-                  addBlock("pricing_row", cells[0] ?? null, cells.join(" | "), cells.map((cell, index) => ({ index, text: cell })), "table");
+                  addBlock("pricing_table_row", cells[0] ?? null, cells.join(" | "), cells.map((cell, index) => ({ index, text: cell })), "table", 0.92);
                 }
               }
 
               for (const element of document.querySelectorAll("details, [class*='accordion' i], [class*='faq' i]")) {
                 const heading = clean(element.querySelector("summary,h1,h2,h3,h4,button")?.textContent) || headingText(element);
                 const textValue = compactText(element);
-                if (textValue.includes("?")) addBlock("faq", heading || null, textValue, undefined, "faq_dom");
-                else addBlock("accordion", heading || null, textValue, undefined, "accordion_dom");
+                if (textValue.includes("?")) addBlock("faq_pair", heading || null, textValue, undefined, "faq_dom", 0.82);
+                else addBlock("heading_section", heading || null, textValue, undefined, "accordion_dom", 0.6);
               }
 
               for (const element of document.querySelectorAll("[role='tab'], [role='tabpanel'], [class*='tab' i]")) {
                 const heading = headingText(element) || clean(element.getAttribute("aria-label"));
                 const textValue = compactText(element);
-                if (textValue) addBlock("tab", heading || null, textValue, undefined, "tab_dom");
+                if (textValue) addBlock("heading_section", heading || null, textValue, undefined, "tab_dom", 0.6);
               }
 
               for (const element of document.querySelectorAll("address, [class*='contact' i], [class*='location' i], [class*='hours' i]")) {
                 const textValue = compactText(element);
                 if (/@|\(?\d{3}\)?|hours|monday|tuesday|wednesday|thursday|friday/i.test(textValue)) {
-                  addBlock(/hours|monday|tuesday|wednesday/i.test(textValue) ? "hours" : "contact", headingText(element) || null, textValue, undefined, "contact_dom");
+                  addBlock(/hours|monday|tuesday|wednesday/i.test(textValue) ? "hours_block" : "contact_block", headingText(element) || null, textValue, undefined, "contact_dom", 0.88);
                 }
+              }
+
+              for (const anchor of document.querySelectorAll("nav a[href], header a[href], footer a[href]")) {
+                const textValue = clean(anchor.textContent);
+                if (textValue) addBlock("navigation_link", textValue, textValue, undefined, "navigation", 0.95);
               }
 
               return {
@@ -635,7 +669,7 @@ async function crawlLeadWebsiteWithPlaywright(rootUrl: string, options: CrawlOpt
               cleanedText,
               html: extracted.html.slice(0, options.maxHtmlChars),
               jsonLd: extracted.jsonLd.filter(Boolean),
-              links: linkHints.map((link) => link.href),
+              links: linkHints,
               linkHints,
               structuredBlocks: (extracted.structuredBlocks as ScrapedStructuredBlock[]).slice(0, 80),
               jsonLdSummary: summarizeJsonLd(extracted.jsonLd.filter(Boolean)),
@@ -666,9 +700,8 @@ async function crawlLeadWebsiteWithPlaywright(rootUrl: string, options: CrawlOpt
 
             if (next.depth < options.maxDepth) {
               for (const link of pageRecord.links) {
-                if (!visited.has(link) && queue.length + pages.length < options.maxPages * 3) {
-                  const hint = pageRecord.linkHints?.find((entry) => entry.href === link);
-                  queue.push({ url: link, depth: next.depth + 1, hint: [hint?.text, hint?.ariaLabel, hint?.title].filter(Boolean).join(" ") });
+                if (!visited.has(link.href) && queue.length + pages.length < options.maxPages * 3) {
+                  queue.push({ url: link.href, depth: next.depth + 1, hint: [link.text, link.ariaLabel, link.title].filter(Boolean).join(" ") });
                 }
               }
             }

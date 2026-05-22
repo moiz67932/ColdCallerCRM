@@ -83,7 +83,10 @@ test("extractProfileFromPages normalizes mocked page output into the clinic prof
         "Bright Smile Dental\nCall us at (310) 555-0123\n123 Main St, Austin, TX 78701\nMonday 9:00 AM - 5:00 PM\nTuesday 9:00 AM - 5:00 PM\nWe offer dental cleaning and teeth whitening.",
       html: "<h1>Bright Smile Dental</h1>",
       jsonLd: [{ "@type": "Dentist", name: "Bright Smile Dental", telephone: "+13105550123" }],
-      links: ["https://clinic.com/services", "https://clinic.com/faq"],
+      links: [
+        { href: "https://clinic.com/services", text: "Services", ariaLabel: null, title: null },
+        { href: "https://clinic.com/faq", text: "FAQ", ariaLabel: null, title: null },
+      ],
       httpStatus: 200,
       pageType: "general",
     },
