@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { createEmptyExtractedProfile, type ExtractedProfile, type ScrapedPage, type ScrapedStructuredBlock, weekdayOrder } from "@/lib/demo-agent/contracts";
+import { createEmptyExtractedProfile, createExtractedService, type ExtractedProfile, type ScrapedPage, type ScrapedStructuredBlock, weekdayOrder } from "@/lib/demo-agent/contracts";
 import { contentHash, normalizeServiceName, normalizeText, parseHours } from "@/lib/demo-agent/extraction";
 import { env } from "@/lib/env";
 import { logInfo, logWarn } from "@/lib/logger";
@@ -1216,13 +1216,14 @@ function servicesFromStructuredBlocks(page: PipelinePage) {
       continue;
     }
 
-    if (["service_card", "booking_service_card", "offer_card", "heading_section"].includes(kind)) {
+    const serviceLikeBlock = kind === "service_card";
+    if (serviceLikeBlock || kind === "offer_card" || kind === "heading_section") {
       const service = serviceFromCandidate({
         rawName: heading || text.split(/[.\n]/)[0],
         page,
         evidence,
-        confidence: kind === "service_card" || kind === "booking_service_card" ? 0.86 : 0.62,
-        method: kind === "service_card" || kind === "booking_service_card" ? "dom_service_card" : "heading_with_following_text",
+        confidence: serviceLikeBlock ? 0.86 : 0.62,
+        method: serviceLikeBlock ? "dom_service_card" : "heading_with_following_text",
       });
       if (service) services.push(service);
     }
@@ -2996,7 +2997,7 @@ export async function loadRuntimeProfileFromNormalized(leadDemoProfileId: string
     const service = row as Record<string, unknown>;
     const serviceId = String(service.id);
     const priceText = pricesByService.get(serviceId)?.join(", ") ?? (typeof service.price_summary === "string" ? service.price_summary : null);
-    return {
+    return createExtractedService({
       name: String(service.display_name),
       aliases: aliasesByService.get(serviceId) ?? [],
       category: typeof service.category === "string" ? service.category : null,
@@ -3013,8 +3014,11 @@ export async function loadRuntimeProfileFromNormalized(leadDemoProfileId: string
       source_url: String(service.source_url ?? ""),
       source_quote: typeof service.source_quote === "string" ? service.source_quote : null,
       extraction_method: typeof service.extraction_method === "string" ? service.extraction_method : null,
+      service_kind: typeof service.service_kind === "string" ? service.service_kind as ExtractedProfile["services"][number]["service_kind"] : "service",
+      rejected: Boolean(service.rejected),
+      rejection_reason: typeof service.rejection_reason === "string" ? service.rejection_reason : null,
       confidence: typeof service.confidence === "number" ? service.confidence : 0.75,
-    };
+    });
   });
   profile.faqs = (faqResult.data ?? []).map((row) => {
     const faq = row as Record<string, unknown>;

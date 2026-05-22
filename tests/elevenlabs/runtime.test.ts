@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createEmptyExtractedProfile } from "@/lib/demo-agent/contracts";
+import { createEmptyExtractedProfile, createExtractedService } from "@/lib/demo-agent/contracts";
 import { activateElevenLabsLeadDemoAgent } from "@/lib/elevenlabs/runtime";
 
 type Row = Record<string, unknown>;
@@ -14,9 +14,8 @@ function makeDb(input: { phoneNumber?: string | null; clinicId?: string | null; 
   const extractedProfileJson = createEmptyExtractedProfile("https://clinic.example");
   extractedProfileJson.clinic.name = "SG Essentials Med Spa";
   extractedProfileJson.services = [
-    {
+    createExtractedService({
       name: "Botox/dysport",
-      aliases: [],
       description: "Can reduce wrinkles and last 3 to 4 months.",
       duration_minutes: 30,
       price_text: null,
@@ -24,10 +23,9 @@ function makeDb(input: { phoneNumber?: string | null; clinicId?: string | null; 
       bookable: true,
       source_url: "https://clinic.example/services",
       confidence: 0.9,
-    },
-    {
+    }),
+    createExtractedService({
       name: "Basic Lip Fillers",
-      aliases: [],
       description: "Can enhance shape.",
       duration_minutes: 45,
       price_text: null,
@@ -35,7 +33,7 @@ function makeDb(input: { phoneNumber?: string | null; clinicId?: string | null; 
       bookable: true,
       source_url: "https://clinic.example/services",
       confidence: 0.9,
-    },
+    }),
   ];
 
   const state = {

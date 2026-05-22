@@ -97,6 +97,7 @@ test("createElevenLabsBookingRequest saves valid booking with caller_number with
   const result = await createElevenLabsBookingRequest(validInput({ caller_number: "+923351897839" }), { db: db as never });
 
   assert.equal(result.ok, true);
+  if (result.status !== "saved") assert.fail("Expected booking request to save.");
   assert.equal(result.request_id, "request-1");
   assert.equal(state.requests[0].callerE164, "+923351897839");
 });
@@ -118,12 +119,13 @@ test("createElevenLabsBookingRequest duplicate request returns same request_id",
 
   assert.equal(first.ok, true);
   assert.equal(second.ok, true);
+  if (first.status !== "saved" || second.status !== "saved") assert.fail("Expected duplicate booking requests to save.");
   assert.equal(second.request_id, first.request_id);
 });
 
 test("createElevenLabsBookingRequest missing required field returns ok false", async () => {
   const { db } = makeDb();
-  const input = validInput();
+  const input: Partial<ReturnType<typeof validInput>> = validInput();
   delete input.client_name;
 
   const result = await createElevenLabsBookingRequest(input as never, { db: db as never });

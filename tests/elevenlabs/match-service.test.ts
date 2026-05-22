@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createEmptyExtractedProfile } from "@/lib/demo-agent/contracts";
+import { createEmptyExtractedProfile, createExtractedService } from "@/lib/demo-agent/contracts";
 
 type Row = Record<string, unknown>;
 
@@ -15,7 +15,7 @@ function makeDb() {
   const profile = createEmptyExtractedProfile("https://clinic.example");
   profile.clinic.name = "Glow Clinic";
   profile.services = [
-    {
+    createExtractedService({
       name: "Hydrafacial",
       aliases: ["Hydra Facial", "Hydro Facial"],
       description: "Hydrating facial treatment.",
@@ -25,8 +25,8 @@ function makeDb() {
       bookable: true,
       source_url: "https://clinic.example/services",
       confidence: 0.92,
-    },
-    {
+    }),
+    createExtractedService({
       name: "Botox",
       aliases: ["Tox"],
       description: "Wrinkle relaxer.",
@@ -36,7 +36,7 @@ function makeDb() {
       bookable: true,
       source_url: "https://clinic.example/botox",
       confidence: 0.88,
-    },
+    }),
   ];
 
   const state = {

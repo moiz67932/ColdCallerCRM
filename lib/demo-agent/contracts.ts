@@ -99,6 +99,33 @@ export const extractedProfileSchema = z.object({
 });
 
 export type ExtractedProfile = z.infer<typeof extractedProfileSchema>;
+export type ExtractedService = ExtractedProfile["services"][number];
+
+export function createExtractedService(input: Partial<ExtractedService> & { name: string }): ExtractedService {
+  return {
+    name: input.name,
+    aliases: input.aliases ?? [],
+    category: input.category ?? null,
+    subcategory: input.subcategory ?? null,
+    voice_label: input.voice_label ?? input.name,
+    voice_category: input.voice_category ?? input.category ?? null,
+    description: input.description ?? "",
+    duration_minutes: input.duration_minutes ?? null,
+    price_text: input.price_text ?? null,
+    price_min_cents: input.price_min_cents ?? null,
+    price_summary: input.price_summary ?? input.price_text ?? null,
+    price_available: input.price_available ?? Boolean(input.price_text || input.price_min_cents),
+    price_details: input.price_details ?? [],
+    bookable: input.bookable ?? true,
+    source_url: input.source_url ?? "",
+    source_quote: input.source_quote ?? null,
+    extraction_method: input.extraction_method ?? "legacy_line_signal",
+    service_kind: input.service_kind ?? "service",
+    rejected: input.rejected ?? false,
+    rejection_reason: input.rejection_reason ?? null,
+    confidence: input.confidence ?? 0.72,
+  };
+}
 
 export type ScrapedLink = {
   href: string;

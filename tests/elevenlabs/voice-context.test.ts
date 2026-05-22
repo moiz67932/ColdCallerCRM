@@ -1,13 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createEmptyExtractedProfile } from "@/lib/demo-agent/contracts";
+import { createEmptyExtractedProfile, createExtractedService } from "@/lib/demo-agent/contracts";
 import { buildVoiceContextCompact, voiceContextText } from "@/lib/elevenlabs/voice-context";
 
-function service(name: string, description: string, category?: string, price?: string | null) {
-  return {
+function service(name: string, description: string, category?: string | null, price?: string | null) {
+  return createExtractedService({
     name,
-    aliases: [],
     category: category ?? null,
     subcategory: null,
     voice_label: name,
@@ -24,7 +23,7 @@ function service(name: string, description: string, category?: string, price?: s
     extraction_method: "test",
     service_kind: "service" as const,
     confidence: 0.9,
-  };
+  });
 }
 
 test("buildVoiceContextCompact deduplicates service names and excludes medical claims", () => {

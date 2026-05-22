@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createEmptyExtractedProfile, PUBLIC_DEMO_AGENT_ID } from "@/lib/demo-agent/contracts";
+import { createEmptyExtractedProfile, createExtractedService, PUBLIC_DEMO_AGENT_ID } from "@/lib/demo-agent/contracts";
 import { formatActivationResult } from "@/lib/demo-agent/responses";
 import { buildAgentSettingsConfig, buildDeployPublishEndpoint, buildKnowledgeArticles, STALE_RUNTIME_CONFIG_WARNING } from "@/lib/demo-agent/runtime";
 
@@ -15,7 +15,7 @@ function makeProfile() {
   profile.clinic.address.zip = "78701";
   profile.hours.monday = { open: true, start: "09:00", end: "17:00" };
   profile.services = [
-    {
+    createExtractedService({
       name: "Teeth Whitening",
       aliases: ["Whitening"],
       description: "Professional whitening treatment",
@@ -25,7 +25,7 @@ function makeProfile() {
       bookable: true,
       source_url: "https://clinic.com/services",
       confidence: 0.9,
-    },
+    }),
   ];
   profile.faqs = [
     {

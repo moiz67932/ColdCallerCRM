@@ -174,11 +174,11 @@ test("DOM service cards and pricing rows produce grouped medspa services", () =>
       title: "Services",
       cleanedText: "Glow Clinic\nCall (949) 555-0101\n10 Glow Way, Irvine, CA 92618\nFacials\nInjectables",
       structuredBlocks: [
-        { type: "service_card", heading: "Age Defying Facial", text: "Age Defying Facial restorative facial service" },
-        { type: "service_card", heading: "New Client Facial", text: "New Client Facial first visit service" },
-        { type: "pricing_row", heading: "Clarifying Acne Facial", text: "Clarifying Acne Facial | 60 minutes | starting at $120" },
-        { type: "service_card", heading: "Botox", text: "Botox injectable service $12 per unit" },
-        { type: "section", heading: "Facials", text: "Facials" },
+        { kind: "service_card", type: "service_card", heading: "Age Defying Facial", text: "Age Defying Facial restorative facial service" },
+        { kind: "service_card", type: "service_card", heading: "New Client Facial", text: "New Client Facial first visit service" },
+        { kind: "pricing_table_row", type: "pricing_row", heading: "Clarifying Acne Facial", text: "Clarifying Acne Facial | 60 minutes | starting at $120" },
+        { kind: "service_card", type: "service_card", heading: "Botox", text: "Botox injectable service $12 per unit" },
+        { kind: "heading_section", type: "section", heading: "Facials", text: "Facials" },
       ],
     }),
   ], { websiteUrl: "https://clinic.example" });

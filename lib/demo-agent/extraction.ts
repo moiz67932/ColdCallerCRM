@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { createEmptyExtractedProfile, extractedProfileSchema, type ExtractedProfile, type ScrapedPage, weekdayOrder } from "@/lib/demo-agent/contracts";
+import { createEmptyExtractedProfile, createExtractedService, extractedProfileSchema, type ExtractedProfile, type ScrapedPage, weekdayOrder } from "@/lib/demo-agent/contracts";
 
 const serviceKeywords = [
   "cleaning",
@@ -281,9 +281,8 @@ function extractServicesFromPage(page: ScrapedPage) {
     const price = parsePriceText(sentence);
     const durationMatch = sentence.match(/(\d+)\s*(minute|min)\b/i);
 
-    services.push({
+    services.push(createExtractedService({
       name: serviceName,
-      aliases: [],
       category: null,
       subcategory: null,
       voice_label: serviceName,
@@ -299,7 +298,7 @@ function extractServicesFromPage(page: ScrapedPage) {
       source_quote: sentence,
       extraction_method: "legacy_keyword_sentence",
       confidence: page.pageType === "services" ? 0.85 : 0.65,
-    });
+    }));
   }
 
   return services;

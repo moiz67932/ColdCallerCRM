@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createEmptyExtractedProfile } from "@/lib/demo-agent/contracts";
+import { createEmptyExtractedProfile, createExtractedService } from "@/lib/demo-agent/contracts";
 import { resolveElevenLabsDemoContext } from "@/lib/elevenlabs/resolve-demo-context";
 
 type Row = Record<string, unknown>;
@@ -37,7 +37,7 @@ function makeDb() {
   const profile = createEmptyExtractedProfile("https://clinic.example");
   profile.clinic.name = "Bright Smile Dental";
   profile.services = [
-    {
+    createExtractedService({
       name: "Teeth Whitening",
       aliases: ["Whitening"],
       description: "Professional whitening.",
@@ -47,7 +47,7 @@ function makeDb() {
       bookable: true,
       source_url: "https://clinic.example/services",
       confidence: 0.9,
-    },
+    }),
   ];
   profile.hours.monday = { open: true, start: "09:00", end: "17:00" };
   profile.faqs = [

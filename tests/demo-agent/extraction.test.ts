@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createEmptyExtractedProfile } from "@/lib/demo-agent/contracts";
+import { createEmptyExtractedProfile, createExtractedService } from "@/lib/demo-agent/contracts";
 import {
   classifyPage,
   dedupeServices,
@@ -42,7 +42,7 @@ test("parseHours normalizes office hours into 24-hour time", () => {
 
 test("dedupeServices keeps the highest-confidence service and merges sparse facts", () => {
   const services = dedupeServices([
-    {
+    createExtractedService({
       name: "teeth whitening",
       aliases: ["Whitening"],
       description: "Basic description",
@@ -52,10 +52,9 @@ test("dedupeServices keeps the highest-confidence service and merges sparse fact
       bookable: true,
       source_url: "https://clinic.com/services",
       confidence: 0.6,
-    },
-    {
+    }),
+    createExtractedService({
       name: "Teeth Whitening",
-      aliases: [],
       description: "Professional whitening treatment",
       duration_minutes: 60,
       price_text: "Starts at $299",
@@ -63,7 +62,7 @@ test("dedupeServices keeps the highest-confidence service and merges sparse fact
       bookable: true,
       source_url: "https://clinic.com/pricing",
       confidence: 0.9,
-    },
+    }),
   ]);
 
   assert.equal(services.length, 1);
@@ -132,9 +131,8 @@ test("missing pricing never invents a price", () => {
   const emptyProfile = createEmptyExtractedProfile("https://clinic.com");
   emptyProfile.clinic.name = "Plain Dental";
   emptyProfile.services = [
-    {
+    createExtractedService({
       name: "Dental Cleaning",
-      aliases: [],
       description: "Routine preventive cleaning",
       duration_minutes: 60,
       price_text: null,
@@ -142,7 +140,7 @@ test("missing pricing never invents a price", () => {
       bookable: true,
       source_url: "https://clinic.com/services",
       confidence: 0.8,
-    },
+    }),
   ];
 
   assert.equal(emptyProfile.services[0].price_text, null);
