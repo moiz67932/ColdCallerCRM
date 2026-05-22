@@ -86,10 +86,8 @@ type DemoAgentStatusResponse = {
   pages_failed?: number;
   last_scraped_at?: string | null;
   last_prepared_at?: string | null;
-  last_activated_at?: string | null;
   is_demo_ready?: boolean;
   demo_ready_blockers?: string[];
-  can_activate?: boolean;
   can_prepare?: boolean;
   can_retry?: boolean;
   clinic_id: string | null;
@@ -235,7 +233,6 @@ export default function QueuePage() {
   const [demoAgentStatus, setDemoAgentStatus] = useState<DemoAgentStatusResponse | null>(null);
   const [loadingDemoAgentStatus, setLoadingDemoAgentStatus] = useState(false);
   const [preparingDemoAgent, setPreparingDemoAgent] = useState(false);
-  const [activatingDemoAgent, setActivatingDemoAgent] = useState(false);
   const [demoAgentMessage, setDemoAgentMessage] = useState<string | null>(null);
   const syncedAgentLegAttemptIdsRef = useRef<Set<string>>(new Set());
   const syncingAgentLegAttemptIdsRef = useRef<Set<string>>(new Set());
@@ -1127,7 +1124,6 @@ export default function QueuePage() {
         },
         body: JSON.stringify({
           website_url: selectedLead.website,
-          activate: false,
           force_rescrape: demoAgentStatus?.profile_status === "failed",
         }),
       });
@@ -1146,44 +1142,17 @@ export default function QueuePage() {
     }
   }
 
-  async function activateDemoAgent() {
-    if (!selectedLead) {
-      return;
-    }
-
-    setActivatingDemoAgent(true);
-    setDemoAgentMessage(null);
-
-    try {
-      const response = await fetch(`/api/leads/${selectedLead.id}/demo-agent/activate`, {
-        method: "POST",
-      });
-      const payload = (await response.json()) as { agent_id?: string; error?: string; warning?: string | null };
-
-      if (!response.ok || !payload.agent_id) {
-        throw new Error(payload.error ?? "Failed to activate demo agent");
-      }
-
-      setDemoAgentMessage(payload.warning ? `Agent ready: ${payload.agent_id}. ${payload.warning}` : `Agent ready: ${payload.agent_id}`);
-      await refreshDemoAgentStatus(selectedLead.id);
-    } catch (activateError) {
-      setDemoAgentMessage(activateError instanceof Error ? activateError.message : "Failed to activate demo agent");
-    } finally {
-      setActivatingDemoAgent(false);
-    }
-  }
-
   function getDemoAgentActionLabel() {
     if (preparingDemoAgent || demoAgentStatus?.profile_status === "scraping") {
       return "Preparing...";
     }
 
     if (demoAgentStatus?.profile_status === "ready") {
-      return "Activate Demo";
+      return "Prepared";
     }
 
     if (demoAgentStatus?.profile_status === "active") {
-      return "Active Demo";
+      return "Prepared";
     }
 
     if (demoAgentStatus?.profile_status === "failed") {
@@ -1197,20 +1166,15 @@ export default function QueuePage() {
     if (loadingDemoAgentStatus) return "Loading status";
     if (!demoAgentStatus || demoAgentStatus.profile_status === "draft") return "Not prepared";
     if (demoAgentStatus.profile_status === "scraping") return "Preparing";
-    if (demoAgentStatus.profile_status === "ready" && demoAgentStatus.is_demo_ready) return "Ready to activate";
+    if (demoAgentStatus.profile_status === "ready" && demoAgentStatus.is_demo_ready) return "Prepared";
     if (demoAgentStatus.profile_status === "ready") return "Prepared";
-    if (demoAgentStatus.profile_status === "active") return "Active";
+    if (demoAgentStatus.profile_status === "active") return "Prepared";
     if (demoAgentStatus.profile_status === "failed") return "Failed";
     return demoAgentStatus.profile_status;
   }
 
   function handleDemoAgentAction() {
-    if (demoAgentStatus?.profile_status === "ready") {
-      void activateDemoAgent();
-      return;
-    }
-
-    if (demoAgentStatus?.profile_status === "active" || demoAgentStatus?.profile_status === "scraping") {
+    if (demoAgentStatus?.profile_status === "ready" || demoAgentStatus?.profile_status === "active" || demoAgentStatus?.profile_status === "scraping") {
       return;
     }
 
@@ -1332,9 +1296,9 @@ export default function QueuePage() {
                   </Button>
                   <Button
                     disabled={!selectedLead.website || demoAgentStatus?.profile_status === "active" || demoAgentStatus?.profile_status === "scraping"}
-                    loading={preparingDemoAgent || activatingDemoAgent}
+                    loading={preparingDemoAgent}
                     onClick={handleDemoAgentAction}
-                    variant={demoAgentStatus?.profile_status === "ready" ? "default" : "secondary"}
+                    variant="secondary"
                   >
                     {getDemoAgentActionLabel()}
                   </Button>
@@ -1380,9 +1344,6 @@ export default function QueuePage() {
                     <p className="mt-2 text-red-700">{demoAgentStatus.demo_ready_blockers.join("; ")}</p>
                   ) : null}
                   {demoAgentStatus?.scrape_error ? <p className="mt-2 text-red-700">{demoAgentStatus.scrape_error}</p> : null}
-                  {demoAgentStatus?.profile_status === "active" && demoAgentStatus.summary?.businessName ? (
-                    <p className="mt-2 text-slate-700">Inbound demo number now answers as: {demoAgentStatus.summary.businessName}</p>
-                  ) : null}
                   {demoAgentStatus?.profile_status === "draft" || !demoAgentStatus ? (
                     <Link className="mt-2 inline-flex text-sm font-medium text-cyan-700 hover:text-cyan-900" href="/automations">
                       Open Automations

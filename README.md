@@ -65,9 +65,9 @@ This matches the practical billing model of the Telnyx Web Dialer: one PSTN bill
 
 ## Automations Workflow (Demo Prep)
 
-The Automations page prepares website-derived demo profiles so the shared demo agent can activate instantly during calls.
+The Automations page prepares website-derived demo profiles for review and future use while the inbound demo number stays connected to the shared clinic agent.
 
-1. Open Automations and review the summary metrics (total website leads, prepared, ready, running, failed).
+1. Open Automations and review the summary metrics (total website leads, prepared, running, failed).
 2. Configure a batch:
 	- Number of leads to prepare (count).
 	- Max concurrency (1 to 5).
@@ -80,7 +80,6 @@ The Automations page prepares website-derived demo profiles so the shared demo a
 	- Marks each job `completed`, `failed`, or `skipped_existing`.
 4. Monitor batches in real time; cancel a running batch if needed.
 5. Review Prepared Leads:
-	- Activate a ready demo profile for the shared demo agent.
 	- Re-scrape a lead when data is stale or incomplete.
 6. Review Failed Jobs and retry individual jobs.
 7. The backend automatically resumes any pending or running batches when the summary is requested.

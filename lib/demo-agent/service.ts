@@ -1,15 +1,12 @@
 import { PUBLIC_DEMO_AGENT_ID, extractedProfileSchema } from "@/lib/demo-agent/contracts";
 import { normalizeWebsiteUrl, summarizeExtractedProfile, contentHash } from "@/lib/demo-agent/extraction";
-import { executeLeadProfileExtraction, loadRuntimeProfileFromNormalized } from "@/lib/demo-agent/profile-pipeline";
-import { formatActivationResult } from "@/lib/demo-agent/responses";
-import { activateRuntimeProfile, refreshDeployedRuntimeConfig, writeRuntimeProfile } from "@/lib/demo-agent/runtime";
+import { executeLeadProfileExtraction } from "@/lib/demo-agent/profile-pipeline";
 import { crawlLeadWebsite } from "@/lib/demo-agent/scraper";
 import { prisma } from "@/lib/workstation-db";
 import { requireEnv } from "@/lib/env";
 import { logError, logInfo, logWarn } from "@/lib/logger";
 
 const activeJobs = new Map<string, Promise<void>>();
-const autoActivateJobs = new Set<string>();
 const PROCESSING_JOB_STALE_MS = 10 * 60 * 1000;
 
 function getOrganizationId() {
@@ -23,7 +20,6 @@ function getAgentDbId() {
 export async function prepareLeadDemoAgent(input: {
   leadId: string;
   websiteUrl: string;
-  activate?: boolean;
   forceRescrape?: boolean;
   queue?: boolean;
 }) {
@@ -160,16 +156,11 @@ export async function prepareLeadDemoAgent(input: {
     },
   });
 
-  if (input.activate) {
-    autoActivateJobs.add(job.id);
-  }
-
   logInfo("demo_agent.prepare_created", {
     leadId: input.leadId,
     jobId: job.id,
     profileId: profile.id,
     websiteUrl,
-    autoActivate: Boolean(input.activate),
   });
 
   if (input.queue !== false) {
@@ -201,7 +192,6 @@ export function queueLeadDemoPreparation(jobId: string) {
     })
     .finally(() => {
       activeJobs.delete(jobId);
-      autoActivateJobs.delete(jobId);
       logInfo("demo_agent.queue_finished", { jobId });
     });
 
@@ -228,10 +218,8 @@ export async function getLeadDemoAgentStatus(leadId: string) {
       scrape_status: "pending",
       last_scraped_at: null,
       last_prepared_at: null,
-      last_activated_at: null,
       is_demo_ready: false,
       demo_ready_blockers: [],
-      can_activate: false,
       can_prepare: true,
       can_retry: false,
       clinic_id: null,
@@ -271,10 +259,8 @@ export async function getLeadDemoAgentStatus(leadId: string) {
     scrape_job_id: latestJob?.id ?? null,
     last_scraped_at: profile.lastScrapedAt ?? null,
     last_prepared_at: profile.updatedAt ?? null,
-    last_activated_at: profile.lastActivatedAt ?? null,
     is_demo_ready: Boolean(profile.isDemoReady),
     demo_ready_blockers: profile.demoReadyBlockers ?? [],
-    can_activate: (profile.status === "ready" || profile.status === "active") && Boolean(profile.isDemoReady),
     can_prepare: profile.status !== "scraping",
     can_retry: profile.status === "failed",
     pages_discovered: latestJob?.pagesDiscovered ?? 0,
@@ -292,81 +278,6 @@ export async function getLeadDemoAgentStatus(leadId: string) {
       blockers: profile.demoReadyBlockers ?? [],
     },
   };
-}
-
-export async function activateLeadDemoAgent(leadId: string) {
-  const profile = await prisma.leadDemoProfile.findUnique({
-    where: { leadId },
-  });
-
-  if (!profile) {
-    throw new Error("This lead has not been prepared yet. Prepare the demo first from Automations or this lead page.");
-  }
-
-  if (profile.status !== "ready" && profile.status !== "active") {
-    const blockers = Array.isArray(profile.demoReadyBlockers) && profile.demoReadyBlockers.length
-      ? ` Blockers: ${profile.demoReadyBlockers.join("; ")}`
-      : "";
-    throw new Error(`Lead demo profile is not ready.${blockers}`);
-  }
-
-  if (profile.isDemoReady === false) {
-    const blockers = Array.isArray(profile.demoReadyBlockers) && profile.demoReadyBlockers.length
-      ? profile.demoReadyBlockers.join("; ")
-      : "Extraction quality gate did not pass.";
-    throw new Error(`Lead demo profile is not demo ready. ${blockers}`);
-  }
-
-  const extractedProfile = (await loadRuntimeProfileFromNormalized(String(profile.id))) ?? extractedProfileSchema.parse(profile.extractedProfileJson);
-  logInfo("demo_agent.activate_start", {
-    leadId,
-    profileId: profile.id,
-    existingClinicId: profile.clinicId,
-  });
-
-  const runtimeWrite = await writeRuntimeProfile(extractedProfile, profile.clinicId);
-  const activation = await activateRuntimeProfile(leadId, profile.id, runtimeWrite.clinicId);
-
-  await prisma.$transaction(async (tx: typeof prisma) => {
-    await tx.leadDemoProfile.update({
-      where: { id: profile.id },
-      data: {
-        clinicId: runtimeWrite.clinicId,
-        status: "active",
-        lastActivatedAt: new Date(),
-      },
-    });
-
-    await tx.leadDemoActivation.create({
-      data: {
-        leadId,
-        leadDemoProfileId: profile.id,
-        organizationId: activation.organizationId,
-        clinicId: runtimeWrite.clinicId,
-        agentId: activation.agentDbId,
-        phoneE164: activation.phoneE164,
-        previousClinicId: activation.previousClinicId,
-      },
-    });
-  });
-
-  logInfo("demo_agent.activate_complete", {
-    leadId,
-    profileId: profile.id,
-    clinicId: runtimeWrite.clinicId,
-    agentDbId: activation.agentDbId,
-    phoneE164: activation.phoneE164,
-  });
-
-  const runtimeRefresh = await refreshDeployedRuntimeConfig(activation.agentDbId);
-
-  return formatActivationResult({
-    clinicId: runtimeWrite.clinicId,
-    leadDemoProfileId: profile.id,
-    phoneE164: activation.phoneE164,
-    agentDbId: activation.agentDbId,
-    runtimeRefresh,
-  });
 }
 
 export async function runLeadDemoPreparationJob(jobId: string) {
@@ -502,23 +413,10 @@ export async function runLeadDemoPreparationJob(jobId: string) {
       isDemoReady: extraction.result?.quality.isDemoReady ?? false,
     });
 
-    if (autoActivateJobs.has(jobId) && extraction.result?.quality.isDemoReady) {
-      await activateLeadDemoAgent(job.leadId);
-    } else if (autoActivateJobs.has(jobId)) {
-      logWarn("demo_agent.auto_activate_blocked_quality", {
-        jobId,
-        leadId: job.leadId,
-        profileId: job.profile.id,
-        qualityStatus: extraction.result?.quality.status ?? null,
-        blockers: extraction.result?.quality.blockers ?? [],
-      });
-    }
-
     logInfo("demo_agent.job_complete", {
       jobId,
       leadId: job.leadId,
       profileId: job.profile.id,
-      autoActivated: autoActivateJobs.has(jobId),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Lead website scraping failed";

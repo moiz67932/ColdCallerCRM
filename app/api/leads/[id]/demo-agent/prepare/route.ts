@@ -7,7 +7,6 @@ import { prepareLeadDemoAgent } from "@/lib/demo-agent/service";
 
 const prepareSchema = z.object({
   website_url: z.string().min(1),
-  activate: z.boolean().optional().default(false),
   force_rescrape: z.boolean().optional().default(false),
 });
 
@@ -26,7 +25,6 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     const result = await prepareLeadDemoAgent({
       leadId: id,
       websiteUrl: payload.website_url,
-      activate: payload.activate,
       forceRescrape: payload.force_rescrape,
     });
 

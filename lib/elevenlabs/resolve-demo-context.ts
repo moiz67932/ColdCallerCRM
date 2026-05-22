@@ -1,11 +1,8 @@
 import { z } from "zod";
 
 import { normalizePhoneDigits } from "@/lib/phone";
-import { prisma } from "@/lib/workstation-db";
-import { parseVoiceContextCompact, voiceContextText } from "@/lib/elevenlabs/voice-context";
-import { resolveActiveDemoBindingForCall } from "@/lib/elevenlabs/demo-binding-resolver";
-
-type ResolveDb = typeof prisma;
+import { voiceContextText } from "@/lib/elevenlabs/voice-context";
+import { getSharedDemoVoiceContext } from "@/lib/elevenlabs/shared-demo-context";
 
 export const resolveDemoContextRequestSchema = z.object({
   conversation_id: z.string().min(1),
@@ -17,11 +14,10 @@ export const resolveDemoContextRequestSchema = z.object({
 export type ResolveDemoContextRequest = z.infer<typeof resolveDemoContextRequestSchema>;
 
 type ResolveDemoContextDeps = {
-  db?: ResolveDb;
+  db?: unknown;
 };
 
-export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequest, deps: ResolveDemoContextDeps = {}) {
-  const db = deps.db ?? prisma;
+export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequest, _deps: ResolveDemoContextDeps = {}) {
   const callerDigits = normalizePhoneDigits(input.caller_number);
   const calledDigits = normalizePhoneDigits(input.called_number);
 
@@ -33,57 +29,17 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
     throw new Error("Invalid called_number. Expected a valid phone number.");
   }
 
-  const lookup = await resolveActiveDemoBindingForCall(
-    {
-      callerNumber: input.caller_number,
-      calledNumber: input.called_number,
-      agentId: input.agent_id,
-    },
-    {
-      db,
-    },
-  );
-  const binding = lookup.binding;
+  const context = getSharedDemoVoiceContext();
 
-  console.info("ElevenLabs resolve-demo-context lookup.", {
+  console.info("ElevenLabs resolve-demo-context shared demo context.", {
     conversation_id: input.conversation_id,
     agent_id: input.agent_id,
     caller_number: input.caller_number,
     called_number: input.called_number,
     normalized_caller_digits: callerDigits,
     normalized_called_digits: calledDigits,
-    called_number_matched: lookup.calledNumberMatched,
-    caller_matched: lookup.callerMatched,
-    binding_id: binding?.id ?? null,
+    clinic_name: context.clinic_name,
   });
-
-  if (!binding) {
-    return {
-      ok: false,
-      status: "not_found" as const,
-      resolved: false,
-      reason: "no_active_demo_binding_found" as const,
-      conversation_id: input.conversation_id,
-      agent_id: input.agent_id,
-      normalized_caller_digits: callerDigits,
-      normalized_called_digits: calledDigits,
-      caller_matched: false,
-      called_number_matched: false,
-    };
-  }
-
-  const cachedContext = parseVoiceContextCompact(binding.voiceContextCompactJson);
-
-  if (!cachedContext) {
-    throw new Error("Active demo binding is missing voice_context_compact_json. Reactivate this demo profile.");
-  }
-
-  const context = {
-    ...cachedContext,
-    lead_id: binding.leadId,
-    binding_id: binding.id,
-    phone_e164: binding.phoneE164,
-  };
 
   return {
     ok: true,
@@ -91,17 +47,13 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
     resolved: true,
     conversation_id: input.conversation_id,
     agent_id: input.agent_id,
-    caller_e164: binding.callerE164,
-    phone_e164: binding.phoneE164,
-    lead_id: binding.leadId,
-    lead_demo_profile_id: binding.leadDemoProfileId,
-    binding_id: binding.id,
-    ...(lookup.matchType === "called_number_fallback"
-      ? {
-          match_type: "called_number_fallback" as const,
-          caller_matched: false,
-        }
-      : {}),
+    caller_e164: input.caller_number,
+    phone_e164: context.phone_e164 || input.called_number,
+    lead_id: "",
+    lead_demo_profile_id: "",
+    binding_id: null,
+    match_type: "shared_demo_context" as const,
+    caller_matched: false,
     context_text: voiceContextText(context),
     context,
   };

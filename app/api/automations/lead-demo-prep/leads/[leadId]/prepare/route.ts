@@ -26,7 +26,6 @@ export async function POST(request: NextRequest, context: { params: Promise<{ le
       leadId,
       websiteUrl: payload.website_url,
       forceRescrape: payload.force_rescrape,
-      activate: false,
     });
 
     return NextResponse.json(result);

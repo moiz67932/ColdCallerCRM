@@ -356,7 +356,6 @@ async function runAutomationJob(batchId: string, job: AutomationJobRow, forceRep
     const prepared = await prepareLeadDemoAgent({
       leadId: job.lead_id,
       websiteUrl: job.website_url,
-      activate: false,
       forceRescrape: forceReprocess,
       queue: false,
     });
@@ -678,13 +677,8 @@ export async function getLeadDemoAutomationSummary() {
   await markStaleAutomationJobsFailed();
   await resumeLeadDemoAutomationBatches();
 
-  const [leadsResult, profilesResult, readyProfilesResult, runningJobsResult, failedJobsResult, batchesResult] = await Promise.all([
+  const [leadsResult, profilesResult, runningJobsResult, failedJobsResult, batchesResult] = await Promise.all([
     supabase.from("leads").select("id", { count: "exact", head: true }).not("website", "is", null).neq("website", ""),
-    supabase
-      .from("lead_demo_profiles")
-      .select("id", { count: "exact", head: true })
-      .eq("organization_id", organizationId)
-      .in("status", ["ready", "active"]),
     supabase
       .from("lead_demo_profiles")
       .select("id", { count: "exact", head: true })
@@ -708,7 +702,7 @@ export async function getLeadDemoAutomationSummary() {
       .limit(8),
   ]);
 
-  for (const result of [leadsResult, profilesResult, readyProfilesResult, runningJobsResult, failedJobsResult, batchesResult]) {
+  for (const result of [leadsResult, profilesResult, runningJobsResult, failedJobsResult, batchesResult]) {
     if (result.error) throw new Error(result.error.message);
   }
 
@@ -719,7 +713,6 @@ export async function getLeadDemoAutomationSummary() {
   return {
     total_leads: totalWebsiteLeads,
     prepared_count: preparedCount,
-    ready_to_activate_count: readyProfilesResult.count ?? 0,
     scraping_count: runningCount,
     running_count: runningCount,
     failed_count: failedJobsResult.count ?? 0,
@@ -759,7 +752,7 @@ export async function getPreparedLeadDemoProfiles(limit = 25) {
 
   const { data: profiles, error } = await supabase
     .from("lead_demo_profiles")
-    .select("id,lead_id,business_name,status,last_scraped_at,last_activated_at,source_website_url,updated_at")
+    .select("id,lead_id,business_name,status,last_scraped_at,source_website_url,updated_at")
     .eq("organization_id", organizationId)
     .in("status", ["ready", "active"])
     .order("updated_at", { ascending: false })

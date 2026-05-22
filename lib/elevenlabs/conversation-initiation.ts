@@ -1,9 +1,8 @@
 import { normalizePhoneDigits } from "@/lib/phone";
-import { prisma } from "@/lib/workstation-db";
-import { parseVoiceContextCompact, type VoiceContextCompact } from "@/lib/elevenlabs/voice-context";
-import { resolveActiveDemoBindingForCall, type ActiveDemoBindingMatchType } from "@/lib/elevenlabs/demo-binding-resolver";
+import type { VoiceContextCompact } from "@/lib/elevenlabs/voice-context";
+import type { ActiveDemoBindingMatchType } from "@/lib/elevenlabs/demo-binding-resolver";
+import { getSharedDemoVoiceContext } from "@/lib/elevenlabs/shared-demo-context";
 
-type ResolveDb = typeof prisma;
 type JsonRecord = Record<string, unknown>;
 type DynamicVariableValue = string | number | boolean;
 type ConversationInitiationResponse = {
@@ -12,7 +11,7 @@ type ConversationInitiationResponse = {
 };
 
 type ConversationInitiationDeps = {
-  db?: ResolveDb;
+  db?: unknown;
   nowMs?: () => number;
 };
 
@@ -45,10 +44,6 @@ function atPath(source: unknown, path: string[]) {
     current = current[part];
   }
   return current;
-}
-
-function cleanText(value: unknown) {
-  return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
 }
 
 function truncate(value: string, maxLength: number) {
@@ -127,48 +122,6 @@ function compactContextDynamicVariables(input: {
   };
 }
 
-async function buildMinimalContextFromProfile(binding: JsonRecord, db: ResolveDb, nowMs: () => number) {
-  const leadDemoProfileId = typeof binding.leadDemoProfileId === "string" ? binding.leadDemoProfileId : null;
-  if (!leadDemoProfileId) return null;
-
-  const profileQueryStartedAt = nowMs();
-  const profile = await db.leadDemoProfile.findUnique({ where: { id: leadDemoProfileId } });
-  console.info("ElevenLabs conversation-initiation query.", {
-    route: "/api/elevenlabs/hooks/conversation-initiation",
-    stage: "minimal_profile_context_fallback",
-    lead_demo_profile_id: leadDemoProfileId,
-    found: Boolean(profile),
-    duration_ms: Math.round(nowMs() - profileQueryStartedAt),
-  });
-  const clinicName = cleanText(profile?.businessName);
-  if (!clinicName) return null;
-
-  return {
-    clinic_name: clinicName,
-    lead_id: String(binding.leadId ?? ""),
-    binding_id: String(binding.id ?? ""),
-    phone_e164: cleanText(binding.phoneE164),
-    service_categories_short: "",
-    service_menu_short: "",
-    safe_service_names: [],
-    safe_service_names_text: "",
-    category_lists: {},
-    facials_list_text: "",
-    injectables_list_text: "",
-    laser_list_text: "",
-    skin_list_text: "",
-    waxing_brows_list_text: "",
-    lashes_list_text: "",
-    pricing_lookup_text: "",
-    voice_quality_score: 0,
-    voice_context_warnings: "",
-    booking_cta: "Would you like to book a consultation?",
-    clinic_phone: cleanText(binding.phoneE164),
-    location_short: "",
-    hours_short: "",
-  } satisfies VoiceContextCompact;
-}
-
 export function normalizeConversationInitiationInput(body: unknown): NormalizedConversationInitiationInput {
   const dynamicVariables = atPath(body, ["dynamic_variables"]);
   const metadata = atPath(body, ["metadata"]);
@@ -203,7 +156,6 @@ export async function buildElevenLabsConversationInitiationClientData(
   body: unknown,
   deps: ConversationInitiationDeps = {},
 ): Promise<ConversationInitiationResponse> {
-  const db = deps.db ?? prisma;
   const nowMs = deps.nowMs ?? Date.now;
   const startedAt = nowMs();
   const input = normalizeConversationInitiationInput(body);
@@ -211,71 +163,27 @@ export async function buildElevenLabsConversationInitiationClientData(
   const calledDigits = normalizePhoneDigits(input.called_number);
 
   try {
-    const lookup = await resolveActiveDemoBindingForCall(
-      {
-        callerNumber: input.caller_number,
-        calledNumber: input.called_number,
-        agentId: input.agent_id,
-      },
-      { db, nowMs },
-    );
-    const durationMs = Math.round(nowMs() - startedAt);
+    const context = getSharedDemoVoiceContext();
 
-    if (!lookup.binding) {
-      console.info("ElevenLabs conversation-initiation lookup.", {
-        route: "/api/elevenlabs/hooks/conversation-initiation",
-        conversation_id: input.conversation_id,
-        agent_id: input.agent_id,
-        normalized_caller_digits: callerDigits,
-        normalized_called_digits: calledDigits,
-        match_type: "none",
-        binding_id: null,
-        lead_id: null,
-        duration_ms: durationMs,
-      });
-
-      return response(emptyDynamicVariables("no_active_demo_binding_found", "none"));
-    }
-
-    const binding = lookup.binding as JsonRecord;
-    const cachedContext = parseVoiceContextCompact(binding.voiceContextCompactJson);
-    const context = cachedContext ?? (await buildMinimalContextFromProfile(binding, db, nowMs));
-
-    if (!context) {
-      console.info("ElevenLabs conversation-initiation lookup.", {
-        route: "/api/elevenlabs/hooks/conversation-initiation",
-        conversation_id: input.conversation_id,
-        agent_id: input.agent_id,
-        normalized_caller_digits: callerDigits,
-        normalized_called_digits: calledDigits,
-        match_type: lookup.matchType,
-        binding_id: binding.id ?? null,
-        lead_id: binding.leadId ?? null,
-        duration_ms: Math.round(nowMs() - startedAt),
-      });
-
-      return response(emptyDynamicVariables("missing_compact_context", lookup.matchType));
-    }
-
-    console.info("ElevenLabs conversation-initiation lookup.", {
+    console.info("ElevenLabs conversation-initiation shared demo context.", {
       route: "/api/elevenlabs/hooks/conversation-initiation",
       conversation_id: input.conversation_id,
       agent_id: input.agent_id,
       normalized_caller_digits: callerDigits,
       normalized_called_digits: calledDigits,
-      match_type: lookup.matchType,
-      binding_id: binding.id ?? null,
-      lead_id: binding.leadId ?? null,
+      match_type: "shared_demo_context",
+      binding_id: null,
+      lead_id: null,
       duration_ms: Math.round(nowMs() - startedAt),
     });
 
     return response(
       compactContextDynamicVariables({
         context,
-        leadId: binding.leadId,
-        bindingId: binding.id,
-        leadDemoProfileId: binding.leadDemoProfileId,
-        matchType: lookup.matchType === "caller_and_called" ? "caller_and_called" : "called_number_fallback",
+        leadId: "",
+        bindingId: "",
+        leadDemoProfileId: "",
+        matchType: "called_number_fallback",
       }),
     );
   } catch (error) {

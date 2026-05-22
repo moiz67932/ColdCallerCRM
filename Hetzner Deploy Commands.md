@@ -27,30 +27,9 @@ There are two different workflows:
 1. If you are only switching the shared demo agent to a different clinic/database, update the Supabase rows and runtime config. That is a data/config change, not a Hetzner code deployment.
 2. If you changed the agent code itself in this repo, use the redeploy flow below so Hetzner receives the updated runtime bundle.
 
-## What The CRM Already Does
+## Current CRM Behavior
 
-When you click Activate Demo in the CRM, this code path runs:
-
-```text
-POST /api/leads/:leadId/demo-agent/activate
-  -> activateLeadDemoAgent()
-  -> writeRuntimeProfile()
-  -> activateRuntimeProfile()
-  -> refreshDeployedRuntimeConfig()
-  -> POST {DEPLOY_API_URL}/api/agents/{EXISTING_DEMO_AGENT_DB_ID}/publish
-```
-
-Important files:
-
-```text
-app/api/leads/[id]/demo-agent/activate/route.ts
-lib/demo-agent/service.ts
-lib/demo-agent/runtime.ts
-lib/demo-agent/responses.ts
-tests/demo-agent/runtime.test.ts
-```
-
-That means the normal client-switch flow is database update plus runtime refresh for the existing shared agent. It is not creating another agent, and it is not a Docker Compose rollout.
+The CRM no longer exposes per-lead demo activation. The inbound demo number remains connected to the same shared clinic agent, and Automations only prepares website-derived lead profile data for review and future use.
 
 ## Normal Command: Redeploy Shared Agent Code
 
@@ -88,22 +67,9 @@ server_manager.redeploy_agent()
 
 So the code update path is SSH-based runtime sync, not `git pull` on Hetzner and not `docker compose up` for the live agent.
 
-## Trigger The Shared-Agent Refresh Through The CRM Instead
-
-If the lead is already prepared and demo-ready, the CRM activation route does the Supabase update and Hetzner publish in one step:
-
-```bash
-curl -X POST "https://YOUR_CRM_DOMAIN/api/leads/LEAD_ID/demo-agent/activate" \
-  -H "Cookie: YOUR_AUTH_COOKIE"
-```
-
-In normal use, click Activate Demo in the CRM UI instead of calling this manually.
-
-If you only changed which database the shared agent should read from, this is the path to use. You do not need to create a new agent for each client.
-
 ## What Gets Changed In Supabase
 
-The activation flow updates these runtime tables for the same shared agent:
+When you intentionally update the shared demo agent runtime data outside the CRM, these are the relevant runtime tables:
 
 ```text
 clinics
@@ -170,7 +136,7 @@ Then call the demo number and confirm it answers using the updated runtime or th
 
 ## Common Failures
 
-If CRM activation returns a warning like "deployed runtime config may still be stale", the Supabase write succeeded but the Hetzner publish refresh did not confirm.
+If a shared-agent redeploy or runtime refresh returns a stale-config warning, the Supabase write succeeded but the Hetzner publish refresh did not confirm.
 
 Check:
 

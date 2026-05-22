@@ -37,7 +37,6 @@ const tableNames = {
   leadDemoProfile: "lead_demo_profiles",
   leadWebsiteScrapeJob: "lead_website_scrape_jobs",
   leadWebsitePage: "lead_website_pages",
-  leadDemoActivation: "lead_demo_activations",
   elevenlabsDemoBinding: "elevenlabs_demo_bindings",
   elevenlabsConversation: "elevenlabs_conversations",
   appointmentRequest: "appointment_requests",
@@ -164,17 +163,6 @@ const columnMaps: Record<keyof typeof tableNames, Record<string, string>> = {
     extractedJson: "extracted_json",
     contentHash: "content_hash",
     scrapedAt: "scraped_at",
-  },
-  leadDemoActivation: {
-    leadId: "lead_id",
-    leadDemoProfileId: "lead_demo_profile_id",
-    organizationId: "organization_id",
-    clinicId: "clinic_id",
-    agentId: "agent_id",
-    phoneE164: "phone_e164",
-    activatedBy: "activated_by",
-    previousClinicId: "previous_clinic_id",
-    createdAt: "created_at",
   },
   elevenlabsDemoBinding: {
     organizationId: "organization_id",
@@ -564,10 +552,6 @@ export const leadWebsitePage = {
   },
 };
 
-export const leadDemoActivation = {
-  create: ({ data }: { data: Record<string, unknown> }) => insertOne("leadDemoActivation", data),
-};
-
 export const elevenlabsDemoBinding = {
   create: ({ data }: { data: Record<string, unknown> }) => insertOne("elevenlabsDemoBinding", data),
   findUnique: ({ where }: { where: Record<string, unknown> }) => selectOne("elevenlabsDemoBinding", where),
@@ -632,7 +616,6 @@ const workstationDb = {
   leadDemoProfile,
   leadWebsiteScrapeJob,
   leadWebsitePage,
-  leadDemoActivation,
   elevenlabsDemoBinding,
   elevenlabsConversation,
   appointmentRequest,

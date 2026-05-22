@@ -38,7 +38,6 @@ type PreparedLead = {
   demo_readiness_status?: string | null;
   source_website_url: string;
   last_scraped_at?: string | null;
-  last_activated_at?: string | null;
   updated_at: string;
   services_count?: number;
   prices_count?: number;
@@ -54,7 +53,6 @@ type PreparedLead = {
 type Summary = {
   total_leads: number;
   prepared_count: number;
-  ready_to_activate_count: number;
   scraping_count: number;
   running_count?: number;
   failed_count: number;
@@ -79,7 +77,6 @@ type FailedJob = {
 const emptySummary: Summary = {
   total_leads: 0,
   prepared_count: 0,
-  ready_to_activate_count: 0,
   scraping_count: 0,
   failed_count: 0,
   needs_scraping_count: 0,
@@ -196,23 +193,6 @@ export default function AutomationsPage() {
     }
   }
 
-  async function activatePreparedLead(profile: PreparedLead) {
-    setActionId(`activate-${profile.id}`);
-    setMessage(null);
-
-    try {
-      const response = await fetch(`/api/leads/${profile.lead_id}/demo-agent/activate`, { method: "POST" });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? "Failed to activate demo");
-      setMessage(`Activated demo for ${profile.business_name ?? "lead"}.`);
-      await refresh();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Failed to activate demo");
-    } finally {
-      setActionId(null);
-    }
-  }
-
   async function rescrapePreparedLead(profile: PreparedLead) {
     setActionId(`rescrape-${profile.id}`);
     setMessage(null);
@@ -279,7 +259,7 @@ export default function AutomationsPage() {
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Automations</h1>
             <p className="mt-1 max-w-3xl text-sm text-slate-600">
-              Pre prepare clinic demo agents before outreach so activation is instant during calls.
+              Pre prepare clinic demo profile data before outreach while the inbound demo number stays connected to the shared clinic agent.
             </p>
           </div>
           <Button onClick={() => void refresh()} loading={loading} variant="outline">
@@ -292,7 +272,6 @@ export default function AutomationsPage() {
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard icon={Activity} title="Total leads" value={summary.total_leads} />
         <StatCard icon={CheckCircle2} title="Demo prepared" value={summary.prepared_count} />
-        <StatCard icon={Play} title="Ready to activate" value={summary.ready_to_activate_count} />
         <StatCard icon={RotateCcw} title="Scraping in progress" value={summary.scraping_count} />
         <StatCard icon={XCircle} title="Needs scraping" value={summary.needs_scraping_count} />
         <StatCard icon={XCircle} title="Failed preparation" value={summary.failed_count} />
@@ -352,7 +331,7 @@ export default function AutomationsPage() {
                 onChange={(event) => setStaleAfterDays(Number(event.target.value))}
               />
             </div>
-            <p className="text-xs text-slate-500">Only leads with websites will be selected. Prepared demos can be activated instantly in the calling workspace.</p>
+            <p className="text-xs text-slate-500">Only leads with websites will be selected. Scraping stays available, but the inbound demo agent remains shared.</p>
             {hasRunningBatch ? <p className="text-xs text-amber-700">A batch is currently running. Cancel it from the table if you want to free the queue for a new run.</p> : null}
             <Button className="w-full" onClick={() => void startBatch()} loading={starting}>
               <Play className="mr-2 h-4 w-4" />
@@ -425,7 +404,7 @@ export default function AutomationsPage() {
       <Card>
         <CardHeader>
           <CardTitle>Prepared Leads</CardTitle>
-          <CardDescription>These leads should activate quickly from the calling workspace.</CardDescription>
+          <CardDescription>Prepared website data is kept for review and future use.</CardDescription>
         </CardHeader>
         <CardContent>
           <Table>
@@ -435,14 +414,13 @@ export default function AutomationsPage() {
                 <TableHead>Demo readiness</TableHead>
                 <TableHead>Extracted data</TableHead>
                 <TableHead>Last scraped</TableHead>
-                <TableHead>Last activated</TableHead>
                 <TableHead>Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {preparedLeads.length === 0 ? (
                 <TableRow>
-                  <TableCell className="py-6 text-center text-slate-500" colSpan={6}>
+                  <TableCell className="py-6 text-center text-slate-500" colSpan={5}>
                     No prepared leads yet.
                   </TableCell>
                 </TableRow>
@@ -466,18 +444,8 @@ export default function AutomationsPage() {
                       <p className="text-xs">Facts: {profile.facts_count ?? 0}</p>
                     </TableCell>
                     <TableCell>{formatDate(profile.last_scraped_at ?? profile.updated_at)}</TableCell>
-                    <TableCell>{formatDate(profile.last_activated_at ?? null)}</TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-2">
-                        <Button
-                          disabled={!profile.is_demo_ready}
-                          loading={actionId === `activate-${profile.id}`}
-                          onClick={() => void activatePreparedLead(profile)}
-                          size="sm"
-                        >
-                          <Play className="mr-1 h-3 w-3" />
-                          Activate
-                        </Button>
                         <Button loading={actionId === `rescrape-${profile.id}`} onClick={() => void rescrapePreparedLead(profile)} size="sm" variant="outline">
                           <RotateCcw className="mr-1 h-3 w-3" />
                           Re scrape
