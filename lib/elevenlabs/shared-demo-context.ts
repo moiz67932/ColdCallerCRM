@@ -184,7 +184,23 @@ function listForSpeech(values: string[]) {
 }
 
 function servicesByCategory(category: string) {
-  return PORTIVE_SERVICES.filter((service) => service.category === category).map((service) => service.name);
+  return PORTIVE_SERVICES.filter((service) => service.category === category);
+}
+
+function serviceDetail(service: PortiveService) {
+  return `${service.name} (${service.duration}, ${service.price})`;
+}
+
+function categoryDetail(category: string) {
+  const services = servicesByCategory(category).map(serviceDetail);
+  return services.length ? `${category}: ${services.join("; ")}` : "";
+}
+
+export function portiveCategoryDetailsText() {
+  return [...new Set(PORTIVE_SERVICES.map((service) => service.category))]
+    .map(categoryDetail)
+    .filter(Boolean)
+    .join(". ");
 }
 
 export function portiveFaqText() {
@@ -199,6 +215,7 @@ export function getSharedDemoVoiceContext(): VoiceContextCompact {
   const phone = env.ELEVENLABS_PHONE_E164 ?? env.DEMO_TELNYX_PHONE_E164 ?? "";
   const categories = [...new Set(PORTIVE_SERVICES.map((service) => service.category))];
   const pricing = PORTIVE_SERVICES.map((service) => `${service.name}: ${service.price}`).join("; ");
+  const detailsByCategory = Object.fromEntries(categories.map((category) => [category, servicesByCategory(category).map(serviceDetail)]));
 
   return {
     clinic_name: PORTIVE_CLINIC_NAME,
@@ -206,21 +223,21 @@ export function getSharedDemoVoiceContext(): VoiceContextCompact {
     binding_id: null,
     phone_e164: phone,
     service_categories_short: listForSpeech(categories),
-    service_menu_short: `The menu includes ${listForSpeech(categories.map((category) => category.toLowerCase()))}.`,
+    service_menu_short: `The menu includes ${portiveCategoryDetailsText()}.`,
     safe_service_names: PORTIVE_SERVICES.map((service) => service.name),
     safe_service_names_text: PORTIVE_SERVICES.map((service) => service.name).join(", "),
     category_lists: {
-      facials_list_text: listForSpeech(servicesByCategory("Facials")),
-      injectables_list_text: listForSpeech(servicesByCategory("Injectables")),
-      laser_list_text: listForSpeech(servicesByCategory("Laser Services")),
-      skin_list_text: listForSpeech(servicesByCategory("Skin Treatments")),
-      wellness_list_text: listForSpeech(servicesByCategory("Wellness")),
-      body_list_text: listForSpeech(servicesByCategory("Body Treatments")),
+      facials_list_text: (detailsByCategory.Facials ?? []).join("; "),
+      injectables_list_text: (detailsByCategory.Injectables ?? []).join("; "),
+      laser_list_text: (detailsByCategory["Laser Services"] ?? []).join("; "),
+      skin_list_text: (detailsByCategory["Skin Treatments"] ?? []).join("; "),
+      wellness_list_text: (detailsByCategory.Wellness ?? []).join("; "),
+      body_list_text: (detailsByCategory["Body Treatments"] ?? []).join("; "),
     },
-    facials_list_text: listForSpeech(servicesByCategory("Facials")),
-    injectables_list_text: listForSpeech(servicesByCategory("Injectables")),
-    laser_list_text: listForSpeech(servicesByCategory("Laser Services")),
-    skin_list_text: listForSpeech(servicesByCategory("Skin Treatments")),
+    facials_list_text: (detailsByCategory.Facials ?? []).join("; "),
+    injectables_list_text: (detailsByCategory.Injectables ?? []).join("; "),
+    laser_list_text: (detailsByCategory["Laser Services"] ?? []).join("; "),
+    skin_list_text: (detailsByCategory["Skin Treatments"] ?? []).join("; "),
     waxing_brows_list_text: "",
     lashes_list_text: "",
     pricing_lookup_text: pricing,

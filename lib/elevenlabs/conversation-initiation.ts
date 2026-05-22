@@ -1,7 +1,7 @@
 import { normalizePhoneDigits } from "@/lib/phone";
 import type { VoiceContextCompact } from "@/lib/elevenlabs/voice-context";
 import type { ActiveDemoBindingMatchType } from "@/lib/elevenlabs/demo-binding-resolver";
-import { getSharedDemoVoiceContext, portiveFaqText, portivePolicyText } from "@/lib/elevenlabs/shared-demo-context";
+import { getSharedDemoVoiceContext, portiveCategoryDetailsText, portiveFaqText, portivePolicyText } from "@/lib/elevenlabs/shared-demo-context";
 
 type JsonRecord = Record<string, unknown>;
 type DynamicVariableValue = string | number | boolean;
@@ -58,6 +58,7 @@ function emptyDynamicVariables(contextError: string, precallMatchType: ActiveDem
     clinic_name: "",
     service_categories_short: "",
     service_menu_short: "",
+    services_by_category_text: "",
     safe_service_names_text: "",
     facials_list_text: "",
     injectables_list_text: "",
@@ -102,12 +103,13 @@ function compactContextDynamicVariables(input: {
     active_context_resolved: true,
     clinic_name: truncate(input.context.clinic_name, 200),
     service_categories_short: truncate(input.context.service_categories_short, 300),
-    service_menu_short: truncate(input.context.service_menu_short, 600),
-    safe_service_names_text: truncate(input.context.safe_service_names_text || safeServiceNamesText(input.context), 800),
-    facials_list_text: truncate(input.context.facials_list_text, 700),
-    injectables_list_text: truncate(input.context.injectables_list_text, 700),
-    laser_list_text: truncate(input.context.laser_list_text, 700),
-    skin_list_text: truncate(input.context.skin_list_text, 700),
+    service_menu_short: truncate(input.context.service_menu_short, 1600),
+    services_by_category_text: truncate(portiveCategoryDetailsText(), 1800),
+    safe_service_names_text: truncate(input.context.safe_service_names_text || safeServiceNamesText(input.context), 1200),
+    facials_list_text: truncate(input.context.facials_list_text, 900),
+    injectables_list_text: truncate(input.context.injectables_list_text, 900),
+    laser_list_text: truncate(input.context.laser_list_text, 900),
+    skin_list_text: truncate(input.context.skin_list_text, 900),
     waxing_brows_list_text: truncate(input.context.waxing_brows_list_text, 700),
     lashes_list_text: truncate(input.context.lashes_list_text, 700),
     pricing_lookup_text: truncate(input.context.pricing_lookup_text, 700),
