@@ -756,7 +756,6 @@ export default function QueuePage() {
       setNotes("");
       setLastSavedNotes("");
       setDemoAgentStatus(null);
-      setDemoAgentMessage(null);
       return;
     }
 
@@ -777,7 +776,7 @@ export default function QueuePage() {
 
       setDemoAgentStatus(payload);
     } catch (statusError) {
-      setDemoAgentMessage(statusError instanceof Error ? statusError.message : "Failed to load demo agent status");
+      setSoftphoneMessage(statusError instanceof Error ? statusError.message : "Failed to load demo agent status");
     } finally {
       setLoadingDemoAgentStatus(false);
     }
