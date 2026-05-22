@@ -3,6 +3,7 @@ import { z } from "zod";
 import { extractedProfileSchema, type ExtractedProfile } from "@/lib/demo-agent/contracts";
 import { normalizePhoneNumber } from "@/lib/phone";
 import { prisma } from "@/lib/workstation-db";
+import { PORTIVE_SERVICES } from "@/lib/elevenlabs/shared-demo-context";
 
 type MatchDb = typeof prisma;
 type ExtractedService = ExtractedProfile["services"][number];
@@ -173,6 +174,32 @@ function buildCandidates(services: ExtractedService[], spokenService: string): C
     .sort((a, b) => b.score - a.score || b.confidence - a.confidence || a.name.localeCompare(b.name));
 }
 
+function portiveExtractedServices(): ExtractedService[] {
+  return PORTIVE_SERVICES.map((service) => ({
+    name: service.name,
+    aliases: service.aliases,
+    category: service.category,
+    subcategory: null,
+    voice_label: service.name,
+    voice_category: service.category,
+    description: service.summary,
+    duration_minutes: Number(service.duration.match(/\d+/)?.[0] ?? 30),
+    price_text: service.price,
+    price_min_cents: null,
+    price_summary: service.price,
+    price_available: true,
+    price_details: [],
+    bookable: true,
+    source_url: "portive-clinic://dummy-profile",
+    source_quote: service.summary,
+    extraction_method: "static_dummy_clinic",
+    service_kind: "service",
+    rejected: false,
+    rejection_reason: null,
+    confidence: 1,
+  }));
+}
+
 async function loadProfile(input: MatchServiceRequest, db: MatchDb) {
   if (input.lead_demo_profile_id) {
     const profile = await db.leadDemoProfile.findUnique({ where: { id: input.lead_demo_profile_id } });
@@ -225,9 +252,11 @@ async function loadProfile(input: MatchServiceRequest, db: MatchDb) {
 
 export async function matchElevenLabsService(input: MatchServiceRequest, deps: MatchServiceDeps = {}) {
   const db = deps.db ?? prisma;
-  const profile = await loadProfile(input, db);
-  const extractedProfile = extractedProfileSchema.parse(profile.extractedProfileJson);
-  const candidates = buildCandidates(extractedProfile.services, input.spoken_service).slice(0, 5);
+  const hasExplicitProfileLookup = Boolean(input.lead_demo_profile_id || input.lead_id || input.binding_id);
+  const services = hasExplicitProfileLookup
+    ? extractedProfileSchema.parse((await loadProfile(input, db)).extractedProfileJson).services
+    : portiveExtractedServices();
+  const candidates = buildCandidates(services, input.spoken_service).slice(0, 5);
   const best = candidates[0] ?? null;
 
   if (!best) {

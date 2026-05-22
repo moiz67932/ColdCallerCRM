@@ -232,8 +232,6 @@ export default function QueuePage() {
   const [savingScripts, setSavingScripts] = useState(false);
   const [demoAgentStatus, setDemoAgentStatus] = useState<DemoAgentStatusResponse | null>(null);
   const [loadingDemoAgentStatus, setLoadingDemoAgentStatus] = useState(false);
-  const [preparingDemoAgent, setPreparingDemoAgent] = useState(false);
-  const [demoAgentMessage, setDemoAgentMessage] = useState<string | null>(null);
   const syncedAgentLegAttemptIdsRef = useRef<Set<string>>(new Set());
   const syncingAgentLegAttemptIdsRef = useRef<Set<string>>(new Set());
   const locallyEndedAttemptIdsRef = useRef<Set<string>>(new Set());
@@ -1107,61 +1105,6 @@ export default function QueuePage() {
     }
   }
 
-  async function prepareDemoAgent() {
-    if (!selectedLead?.website) {
-      setDemoAgentMessage("This lead does not have a website yet.");
-      return;
-    }
-
-    setPreparingDemoAgent(true);
-    setDemoAgentMessage(null);
-
-    try {
-      const response = await fetch(`/api/leads/${selectedLead.id}/demo-agent/prepare`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          website_url: selectedLead.website,
-          force_rescrape: demoAgentStatus?.profile_status === "failed",
-        }),
-      });
-      const payload = (await response.json()) as { error?: string };
-
-      if (!response.ok) {
-        throw new Error(payload.error ?? "Failed to prepare demo agent");
-      }
-
-      setDemoAgentMessage("Preparing lead website data for the shared demo agent. This can take a minute on larger sites.");
-      await refreshDemoAgentStatus(selectedLead.id);
-    } catch (prepareError) {
-      setDemoAgentMessage(prepareError instanceof Error ? prepareError.message : "Failed to prepare demo agent");
-    } finally {
-      setPreparingDemoAgent(false);
-    }
-  }
-
-  function getDemoAgentActionLabel() {
-    if (preparingDemoAgent || demoAgentStatus?.profile_status === "scraping") {
-      return "Preparing...";
-    }
-
-    if (demoAgentStatus?.profile_status === "ready") {
-      return "Prepared";
-    }
-
-    if (demoAgentStatus?.profile_status === "active") {
-      return "Prepared";
-    }
-
-    if (demoAgentStatus?.profile_status === "failed") {
-      return "Retry Prepare";
-    }
-
-    return "Prepare Demo";
-  }
-
   function getDemoPreparationLabel() {
     if (loadingDemoAgentStatus) return "Loading status";
     if (!demoAgentStatus || demoAgentStatus.profile_status === "draft") return "Not prepared";
@@ -1171,14 +1114,6 @@ export default function QueuePage() {
     if (demoAgentStatus.profile_status === "active") return "Prepared";
     if (demoAgentStatus.profile_status === "failed") return "Failed";
     return demoAgentStatus.profile_status;
-  }
-
-  function handleDemoAgentAction() {
-    if (demoAgentStatus?.profile_status === "ready" || demoAgentStatus?.profile_status === "active" || demoAgentStatus?.profile_status === "scraping") {
-      return;
-    }
-
-    void prepareDemoAgent();
   }
 
   const scriptVariables = {
@@ -1294,14 +1229,6 @@ export default function QueuePage() {
                     <ExternalLink className="mr-2 h-4 w-4" />
                     Open website
                   </Button>
-                  <Button
-                    disabled={!selectedLead.website || demoAgentStatus?.profile_status === "active" || demoAgentStatus?.profile_status === "scraping"}
-                    loading={preparingDemoAgent}
-                    onClick={handleDemoAgentAction}
-                    variant="secondary"
-                  >
-                    {getDemoAgentActionLabel()}
-                  </Button>
                 </div>
 
                 <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
@@ -1349,7 +1276,6 @@ export default function QueuePage() {
                       Open Automations
                     </Link>
                   ) : null}
-                  {demoAgentMessage ? <p className="mt-2 text-slate-600">{demoAgentMessage}</p> : null}
                 </div>
 
                 <Card className="bg-slate-50">

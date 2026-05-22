@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { normalizePhoneDigits } from "@/lib/phone";
 import { voiceContextText } from "@/lib/elevenlabs/voice-context";
-import { getSharedDemoVoiceContext } from "@/lib/elevenlabs/shared-demo-context";
+import { getSharedDemoVoiceContext, portiveFaqText, portivePolicyText } from "@/lib/elevenlabs/shared-demo-context";
 
 export const resolveDemoContextRequestSchema = z.object({
   conversation_id: z.string().min(1),
@@ -54,7 +54,7 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
     binding_id: null,
     match_type: "shared_demo_context" as const,
     caller_matched: false,
-    context_text: voiceContextText(context),
+    context_text: `${voiceContextText(context)}\nFAQs: ${portiveFaqText()}\nPolicies: ${portivePolicyText()}`,
     context,
   };
 }

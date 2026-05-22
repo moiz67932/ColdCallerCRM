@@ -29,7 +29,7 @@ There are two different workflows:
 
 ## Current CRM Behavior
 
-The CRM no longer exposes per-lead demo activation. The inbound demo number remains connected to the same shared clinic agent, and Automations only prepares website-derived lead profile data for review and future use.
+The CRM no longer exposes per-lead demo activation. The inbound demo number remains connected to the same shared Portive Clinic agent, and Automations only prepares website-derived lead profile data for review and future use.
 
 ## Normal Command: Redeploy Shared Agent Code
 

@@ -1,7 +1,7 @@
 import { normalizePhoneDigits } from "@/lib/phone";
 import type { VoiceContextCompact } from "@/lib/elevenlabs/voice-context";
 import type { ActiveDemoBindingMatchType } from "@/lib/elevenlabs/demo-binding-resolver";
-import { getSharedDemoVoiceContext } from "@/lib/elevenlabs/shared-demo-context";
+import { getSharedDemoVoiceContext, portiveFaqText, portivePolicyText } from "@/lib/elevenlabs/shared-demo-context";
 
 type JsonRecord = Record<string, unknown>;
 type DynamicVariableValue = string | number | boolean;
@@ -71,6 +71,8 @@ function emptyDynamicVariables(contextError: string, precallMatchType: ActiveDem
     location_short: "",
     hours_short: "",
     booking_cta: "",
+    faqs_short: "",
+    policy_short: "",
     lead_id: "",
     binding_id: "",
     lead_demo_profile_id: "",
@@ -114,6 +116,8 @@ function compactContextDynamicVariables(input: {
     location_short: truncate(input.context.location_short, 300),
     hours_short: truncate(input.context.hours_short, 300),
     booking_cta: truncate(input.context.booking_cta, 300),
+    faqs_short: truncate(portiveFaqText(), 900),
+    policy_short: truncate(portivePolicyText(), 500),
     lead_id: String(input.leadId ?? ""),
     binding_id: String(input.bindingId ?? ""),
     lead_demo_profile_id: String(input.leadDemoProfileId ?? ""),

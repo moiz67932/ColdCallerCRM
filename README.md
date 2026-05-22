@@ -65,7 +65,7 @@ This matches the practical billing model of the Telnyx Web Dialer: one PSTN bill
 
 ## Automations Workflow (Demo Prep)
 
-The Automations page prepares website-derived demo profiles for review and future use while the inbound demo number stays connected to the shared clinic agent.
+The Automations page prepares website-derived demo profiles for review and future use while the inbound demo number stays connected to the shared Portive Clinic agent.
 
 1. Open Automations and review the summary metrics (total website leads, prepared, running, failed).
 2. Configure a batch:
