@@ -23,6 +23,7 @@ const envSchema = z
     SCRAPER_MAX_TEXT_CHARS: z.coerce.number().int().positive().optional(),
     SCRAPER_MAX_HTML_CHARS: z.coerce.number().int().positive().optional(),
     SCRAPER_RESPECT_ROBOTS_TXT: z.enum(["true", "false"]).optional(),
+    DEMO_PROFILE_EXTRACTION_MODE: z.enum(["strict", "legacy"]).default("strict"),
     EXTRACTION_MODE: z.enum(["free", "openai"]).optional(),
     OPENAI_API_KEY: z.string().optional(),
     EXTRACTION_MODEL: z.string().optional(),

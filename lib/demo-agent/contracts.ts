@@ -20,6 +20,9 @@ const dayHoursSchema = z.object({
 });
 
 export const extractedProfileSchema = z.object({
+  extraction_mode: z.enum(["strict", "legacy"]).optional().default("strict"),
+  pricing_status: z.enum(["not_listed", "partial", "listed"]).optional().default("not_listed"),
+  hours_status: z.enum(["not_listed", "listed"]).optional().default("not_listed"),
   clinic: z.object({
     name: z.string().default(""),
     industry: z.string().default("dental"),
@@ -184,12 +187,17 @@ export type LeadDemoSummary = {
   faqsCount: number;
   hasHours: boolean;
   hasPricing: boolean;
+  hoursStatus: "not_listed" | "listed";
+  pricingStatus: "not_listed" | "partial" | "listed";
 };
 
 export function createEmptyExtractedProfile(website: string): ExtractedProfile {
   const closedDay = { open: false, start: null, end: null };
 
   return extractedProfileSchema.parse({
+    extraction_mode: "strict",
+    pricing_status: "not_listed",
+    hours_status: "not_listed",
     clinic: {
       website,
       address: {

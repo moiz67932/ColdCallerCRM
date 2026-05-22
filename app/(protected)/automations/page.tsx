@@ -461,7 +461,7 @@ export default function AutomationsPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <p className="text-xs">Services: {profile.services_count ?? 0}</p>
+                      <p className="text-xs">Compact services: {profile.services_count ?? 0}</p>
                       <p className="text-xs">Prices: {profile.prices_count ?? 0}</p>
                       <p className="text-xs">Facts: {profile.facts_count ?? 0}</p>
                     </TableCell>

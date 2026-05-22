@@ -660,7 +660,7 @@ test("polluted extraction candidates populate rejection stats", () => {
 });
 
 test("over-extracted small local profiles are blocked", () => {
-  const services: NormalizedService[] = Array.from({ length: 81 }, (_, index) => ({
+  const services: NormalizedService[] = Array.from({ length: 36 }, (_, index) => ({
     id: `aaaaaaaa-aaaa-4aaa-8aaa-${String(index).padStart(12, "0")}`,
     canonical_name: `Service ${index}`,
     display_name: `Service ${index}`,
@@ -703,7 +703,97 @@ test("over-extracted small local profiles are blocked", () => {
   });
 
   assert.equal(quality.isDemoReady, false);
-  assert.equal(quality.blockers.some((blocker) => /More than 80 real services/i.test(blocker)), true);
+  assert.equal(quality.blockers.some((blocker) => /More than 35 services/i.test(blocker)), true);
+});
+
+test("Glowing Skin-style noisy extraction compresses to a compact demo profile", () => {
+  const noisyBlogQuestions = Array.from({ length: 90 }, (_, index) => `What is noisy article heading ${index}?`).join("\nHelpful education article.");
+  const noisyServiceHeadings = [
+    "What is HydraFacial?",
+    "How does IV Therapy work?",
+    "Benefits of Testosterone Therapy",
+    "Cost of GLP-1 Weight Loss",
+    "Who can benefit from Body Contouring",
+    "Aftercare",
+    "Side Effects",
+    "Ingredients",
+    "Symptoms",
+    "Conditions",
+    "MOTS-c",
+    "GHK-Cu",
+    "BPC-157",
+    "Epithalon",
+  ].join("\nInformational section.\n");
+  const result = extractNormalizedClinicProfile([
+    page({
+      url: "https://glowingskin.example",
+      title: "Glowing Skin Med Spa",
+      cleanedText:
+        "Glowing Skin Med Spa\nCall (555) 123-1212\n101 Glow Ave, Austin, TX 78701\nServices\nHydraFacial\nIV Therapy\nTestosterone Therapy\nGLP-1 Weight Loss\nBody Contouring\nPeptide Therapy\nMicroneedling\nChemical Peel\nFree Consultation\nBook Online",
+    }),
+    page({
+      url: "https://glowingskin.example/services",
+      title: "Services",
+      cleanedText:
+        "HydraFacial\nBook this facial treatment\nIV Therapy\nBook IV wellness therapy\nTestosterone Therapy\nOffered by the clinic\nGLP-1 Weight Loss\nBook a consultation\nBody Contouring\nOffered body service\nPeptide Therapy\nPeptide therapy options\nMicroneedling\nBook microneedling treatment\nChemical Peel\nBook chemical peel treatment\nFree Consultation\nFree consultation available\n" +
+        noisyServiceHeadings,
+    }),
+    page({
+      url: "https://glowingskin.example/blog/hydrafacial-faq",
+      title: "HydraFacial FAQ",
+      cleanedText: "Is HydraFacial right for me?\nThe office can discuss HydraFacial options during a consultation.",
+    }),
+    page({
+      url: "https://glowingskin.example/blog/noisy-encyclopedia",
+      title: "Noisy Blog",
+      cleanedText: `${noisyBlogQuestions}\nWhat is a random skincare trend?\nThis blog-only FAQ should not drive services.`,
+    }),
+  ], { websiteUrl: "https://glowingskin.example", businessNameHint: "Glowing Skin Med Spa" });
+
+  const serviceNames = result.services.map((service) => service.display_name);
+  assert.equal(result.services.length >= 8 && result.services.length <= 20, true);
+  assert.equal(serviceNames.some((name) => /What is|How does|Benefits of|Cost of|Aftercare|Side Effects/i.test(name)), false);
+  assert.equal(serviceNames.includes("MOTS-c"), false);
+  assert.equal(serviceNames.includes("GHK-Cu"), false);
+  assert.equal(serviceNames.includes("BPC-157"), false);
+  assert.equal(serviceNames.includes("Epithalon"), false);
+  assert.equal(serviceNames.includes("Peptide Therapy"), true);
+  assert.equal(result.faqs.every((faq) => !/random skincare trend/i.test(`${faq.question} ${faq.answer}`)), true);
+  assert.equal(result.faqs.length <= 20, true);
+  assert.equal(result.quality.blockers.some((blocker) => /More than 80/i.test(blocker)), false);
+});
+
+test("missing hours do not fail strict demo readiness", () => {
+  const result = extractNormalizedClinicProfile([
+    page({
+      url: "https://hours-missing.example",
+      title: "Hours Missing Med Spa",
+      cleanedText:
+        "Hours Missing Med Spa\nCall (555) 123-1212\n101 Glow Ave, Austin, TX 78701\nServices\nHydraFacial\nBook HydraFacial\nBotox\nBook Botox\nIV Therapy\nBook IV Therapy\nMicroneedling\nBook Microneedling\nChemical Peel\nBook Chemical Peel",
+    }),
+  ], { websiteUrl: "https://hours-missing.example", businessNameHint: "Hours Missing Med Spa" });
+
+  assert.equal(result.hours.length, 0);
+  assert.equal(result.snapshot.hours_status, "not_listed");
+  assert.equal(result.quality.blockers.some((blocker) => /hours/i.test(blocker)), false);
+  assert.equal(result.quality.isDemoReady, true);
+});
+
+test("strict demo pricing accepts exact free consultation and marks partial pricing", () => {
+  const result = extractNormalizedClinicProfile([
+    page({
+      url: "https://pricing.example/services",
+      title: "Services",
+      cleanedText:
+        "Pricing Med Spa\nCall (555) 123-1212\n101 Glow Ave, Austin, TX 78701\nServices\nFree Consultation\nFree consultation available. Book this consultation.\nHydraFacial\nBook HydraFacial\nBotox\nBook Botox",
+    }),
+  ], { websiteUrl: "https://pricing.example", businessNameHint: "Pricing Med Spa" });
+  const consultation = result.services.find((service) => service.display_name === "Free Consultation");
+
+  assert.ok(consultation);
+  assert.equal(consultation.price_available, true);
+  assert.equal(consultation.price_summary, "$0");
+  assert.equal(result.snapshot.pricing_status, "partial");
 });
 
 test("privacy, review, cart, and broken-page text do not become services or staff", () => {

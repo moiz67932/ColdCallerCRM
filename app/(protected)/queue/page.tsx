@@ -70,6 +70,8 @@ type DemoAgentSummary = {
   faqsCount: number;
   hasHours: boolean;
   hasPricing: boolean;
+  hoursStatus?: "not_listed" | "listed";
+  pricingStatus?: "not_listed" | "partial" | "listed";
 };
 
 type DemoAgentStatusResponse = {
@@ -1346,11 +1348,17 @@ export default function QueuePage() {
                   </div>
                   {demoAgentStatus?.summary ? (
                     <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                      <p className="font-medium text-emerald-700">Demo-ready compact profile</p>
                       <p>Business: {demoAgentStatus.summary.businessName ?? "-"}</p>
-                      <p>Services: {demoAgentStatus.summary.servicesCount}</p>
-                      <p>FAQs: {demoAgentStatus.summary.faqsCount}</p>
+                      <p>Services: {demoAgentStatus.summary.servicesCount} approved</p>
+                      <p>FAQs: {demoAgentStatus.summary.faqsCount} approved</p>
+                      <p>{demoAgentStatus.summary.hoursStatus === "listed" || demoAgentStatus.summary.hasHours ? "Hours found" : "Hours not found"}</p>
                       <p>
-                        Hours / Pricing: {demoAgentStatus.summary.hasHours ? "yes" : "no"} / {demoAgentStatus.summary.hasPricing ? "yes" : "no"}
+                        {demoAgentStatus.summary.pricingStatus === "partial"
+                          ? "Pricing partial"
+                          : demoAgentStatus.summary.pricingStatus === "listed" || demoAgentStatus.summary.hasPricing
+                            ? "Pricing found"
+                            : "Pricing not found"}
                       </p>
                     </div>
                   ) : (

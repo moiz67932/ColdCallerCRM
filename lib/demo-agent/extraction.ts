@@ -417,11 +417,17 @@ export function extractProfileFromPages(pages: ScrapedPage[], websiteUrl: string
 }
 
 export function summarizeExtractedProfile(profile: ExtractedProfile) {
+  const pricedServices = profile.services.filter((service) => Boolean(service.price_text || service.price_min_cents || service.price_available));
+  const pricingStatus = pricedServices.length === 0 ? "not_listed" : pricedServices.length < profile.services.length ? "partial" : "listed";
+  const hoursStatus = weekdayOrder.some((day) => profile.hours[day].open) ? "listed" : "not_listed";
+
   return {
     businessName: profile.clinic.name || null,
     servicesCount: profile.services.length,
     faqsCount: profile.faqs.length,
-    hasHours: weekdayOrder.some((day) => profile.hours[day].open),
-    hasPricing: profile.services.some((service) => Boolean(service.price_text)),
+    hasHours: hoursStatus === "listed",
+    hasPricing: pricingStatus !== "not_listed",
+    hoursStatus,
+    pricingStatus,
   };
 }

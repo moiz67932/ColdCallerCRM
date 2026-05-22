@@ -33,7 +33,24 @@ const preferredSegments = [
   "forms",
 ];
 
-const highValueSitemapPattern = /service|treatment|pricing|book|booking|appointment|menu|facial|injectable|botox|filler|laser|skin|wellness|membership|special|contact|hours|faq|about/i;
+const strictPositiveUrlSignals = [
+  "service",
+  "services",
+  "treatment",
+  "hydrafacial",
+  "iv",
+  "therapy",
+  "testosterone",
+  "glp",
+  "weight",
+  "body",
+  "membership",
+  "about",
+  "contact",
+  "booking",
+];
+const strictNegativeUrlSignals = ["blog", "article", "tag", "category", "author", "privacy", "terms"];
+const highValueSitemapPattern = /service|treatment|pricing|book|booking|appointment|menu|facial|injectable|botox|filler|laser|skin|wellness|membership|special|contact|hours|faq|about|hydrafacial|therapy|testosterone|glp|weight|body/i;
 
 type CrawlOptions = {
   maxPages: number;
@@ -62,8 +79,10 @@ function getCrawlOptions(): CrawlOptions {
     return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : fallback;
   };
 
+  const strictMode = (process.env.DEMO_PROFILE_EXTRACTION_MODE ?? "strict") === "strict";
+
   return {
-    maxPages: readPositiveInteger("SCRAPER_MAX_PAGES", 30),
+    maxPages: readPositiveInteger("SCRAPER_MAX_PAGES", strictMode ? 12 : 30),
     maxDepth: readNonNegativeInteger("SCRAPER_MAX_DEPTH", 2),
     concurrency: readPositiveInteger("SCRAPER_CONCURRENCY", 2),
     pageTimeoutMs: readPositiveInteger("SCRAPER_PAGE_TIMEOUT_MS", 20_000),
@@ -75,8 +94,22 @@ function getCrawlOptions(): CrawlOptions {
 
 function rankUrl(url: string, hint = "") {
   const lower = `${url} ${hint}`.toLowerCase();
+  const path = (() => {
+    try {
+      return new URL(url).pathname.replace(/\/$/, "") || "/";
+    } catch {
+      return "";
+    }
+  })();
+  let score = path === "/" ? -100 : 0;
+  strictPositiveUrlSignals.forEach((signal, index) => {
+    if (lower.includes(signal)) score -= 40 - index;
+  });
+  strictNegativeUrlSignals.forEach((signal, index) => {
+    if (new RegExp(`(?:/|\\b)${signal}(?:/|\\b)`, "i").test(lower)) score += 80 + index;
+  });
   const matchedIndex = preferredSegments.findIndex((segment) => lower.includes(segment));
-  return matchedIndex === -1 ? preferredSegments.length : matchedIndex;
+  return score + (matchedIndex === -1 ? preferredSegments.length : matchedIndex);
 }
 
 type RobotsRules = {
@@ -175,7 +208,8 @@ async function discoverSitemapUrls(rootUrl: string, options: CrawlOptions) {
       .filter((value) => {
         try {
           const url = new URL(value);
-          return url.hostname === root.hostname && highValueSitemapPattern.test(url.toString());
+          const text = url.toString().toLowerCase();
+          return url.hostname === root.hostname && highValueSitemapPattern.test(text) && !strictNegativeUrlSignals.some((signal) => text.includes(`/${signal}`));
         } catch {
           return false;
         }

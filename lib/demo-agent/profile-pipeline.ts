@@ -563,6 +563,16 @@ const medSpaSignals = [
   "hair restoration",
   "weight loss",
   "iv therapy",
+  "peptide",
+  "peptide therapy",
+  "testosterone",
+  "glp",
+  "glp-1",
+  "body contouring",
+  "mots-c",
+  "ghk-cu",
+  "bpc-157",
+  "epithalon",
 ];
 
 const dentalSignals = [
@@ -598,6 +608,40 @@ const junkPhrasePatterns = [
   /\b(privacy policy|terms and conditions|data deletion request|do not sell)\b/i,
   /\b(franchise book|personal data request|states? select|zipcode)\b/i,
 ];
+
+const strictDemoRejectHeadingPattern =
+  /^(what is|what are|how does|how do|how long|how much|cost of|who can benefit|is .* right for|benefits? of|side effects?|risks?|aftercare|before and after|ingredients?|symptoms?|conditions?|causes?|when should|why choose|frequently asked|faqs?)\b/i;
+
+const strictDemoGenericArticlePattern =
+  /\b(guide to|everything you need to know|ultimate guide|what to know|benefits of|side effects|aftercare|symptoms|conditions|ingredients|how it works|how does it work|cost of|who can benefit)\b/i;
+
+const blogPathPattern = /\/(?:blog|articles?)(?:\/|$)/i;
+
+function demoExtractionMode() {
+  return (process.env.DEMO_PROFILE_EXTRACTION_MODE ?? "strict") === "legacy" ? "legacy" : "strict";
+}
+
+function isStrictDemoMode() {
+  return demoExtractionMode() === "strict";
+}
+
+function isBlogPage(page: Pick<PipelinePage, "url" | "pageType" | "title">) {
+  return blogPathPattern.test(page.url) || /\b(blog|article)\b/i.test(`${page.pageType ?? ""} ${page.title ?? ""}`);
+}
+
+function strictDemoRejectReason(name: string, evidence = "") {
+  const text = normalizeText(name).replace(/[:|]+$/, "");
+  const lower = text.toLowerCase();
+  const combined = `${text} ${normalizeText(evidence)}`;
+  if (!text) return "empty_name";
+  if (text.endsWith("?")) return "faq_question";
+  if (strictDemoRejectHeadingPattern.test(text)) return "faq_or_article_heading";
+  if (strictDemoGenericArticlePattern.test(combined)) return "generic_article_heading";
+  if (/^(benefits?|ingredients?|symptoms?|conditions?|side effects?|aftercare|faqs?|frequently asked questions)$/i.test(text)) return "article_subheading";
+  if (/^(acne|wrinkles|fine lines|hair loss|weight gain|fatigue|aging|sun damage|melasma|rosacea)$/i.test(text)) return "condition_or_symptom";
+  if (/^(book|read|learn|discover|explore|understand)\b/i.test(lower)) return "generic_article_heading";
+  return null;
+}
 
 const staffRejectPatterns = [
   ...junkPhrasePatterns,
@@ -824,6 +868,10 @@ export function classifyCandidateKind(input: { name: string; pageType?: PageType
   const serviceSignal = [...medSpaSignals, ...dentalSignals].some((signal) => lower.includes(signal) || evidence.includes(signal));
 
   if (!name) return { service_kind: "unknown", rejected: true, reason: "empty_name" };
+  if (isStrictDemoMode()) {
+    const strictReason = strictDemoRejectReason(name, evidence);
+    if (strictReason) return { service_kind: "unknown", rejected: true, reason: strictReason };
+  }
   if (neverServiceLabels.has(lower)) return { service_kind: "navigation", rejected: true, reason: "banned_label" };
   if (/^(get in touch|contact( us)?|book now|schedule|appointment|address|hours|location|directions|home|about|our team|meet the team|staff|learn more|read more|blog|articles|reviews|testimonials|privacy|terms|call now|visit|top of page|page not found)$/i.test(name)) {
     return { service_kind: "navigation", rejected: true, reason: "navigation_or_contact_label" };
@@ -866,6 +914,19 @@ export function parseStructuredPrices(input: string): StructuredPrice[] {
       source_quote: shortQuote(text),
     });
   };
+
+  if (/\bfree\s+(?:initial\s+)?(?:consultation|consult|assessment)\b/i.test(text)) {
+    addRow({
+      price_label: "Free consultation",
+      price_type: "consultation",
+      amount_min_cents: null,
+      amount_max_cents: null,
+      amount_cents: 0,
+      unit: null,
+      package_quantity: null,
+      raw_price_text: "free consultation",
+    });
+  }
 
   for (const match of text.matchAll(/\$([0-9][0-9,]*(?:\.\d{2})?)\s*(?:-|to)\s*\$?([0-9][0-9,]*(?:\.\d{2})?)/gi)) {
     addRow({
@@ -926,6 +987,7 @@ function looksLikeServiceHeading(line: string, pageType: PageType) {
   const text = normalizeText(line).replace(/[:|]+$/, "");
   const lower = text.toLowerCase();
   if (!text || text.length < 3 || text.length > 90) return false;
+  if (isStrictDemoMode() && strictDemoRejectReason(text)) return false;
   if (isJunkText(text)) return false;
   if (neverServiceLabels.has(lower)) return false;
   if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(lower)) return false;
@@ -941,6 +1003,11 @@ function looksLikeServiceHeading(line: string, pageType: PageType) {
   const titleLike = /^[A-Z0-9][A-Za-z0-9+\-/&'®.™ ]+$/.test(text) && text.split(" ").length <= 7;
   const extractionPage = ["services_index", "service_detail", "pricing"].includes(pageType);
   return hasServiceSignal || (extractionPage && titleLike && !broadCategoryLabels.has(lower));
+}
+
+function looksLikeBookableNonServiceHeading(line: string, pageType: PageType, evidence: string) {
+  const classification = classifyCandidateKind({ name: line, pageType, evidence });
+  return !classification.rejected && ["consultation", "membership", "package"].includes(classification.service_kind);
 }
 
 function isProductLine(line: string) {
@@ -1125,7 +1192,7 @@ function serviceFromCandidate(input: {
   const rawName = normalizeText(input.rawName);
   const classification = classifyCandidateKind({ name: rawName, pageType: input.page.pageType, evidence: input.evidence, category: input.category });
   if (classification.rejected) return null;
-  if (classification.service_kind !== "service" && classification.reason !== "category_only") return null;
+  if (classification.service_kind !== "service" && !["consultation", "membership", "package"].includes(classification.service_kind) && classification.reason !== "category_only") return null;
   if (classification.service_kind === "service" && !looksLikeServiceHeading(rawName, "service_detail")) return null;
   const displayName = canonicalizeDisplayName(rawName);
   const canonicalName = normalizeServiceName(displayName);
@@ -1365,6 +1432,7 @@ function uniqueRejectedCandidates(candidates: RejectedServiceCandidate[]) {
 
 function extractServicesFromPage(page: PipelinePage, pageType: PageType): { services: NormalizedService[]; products: NormalizedProduct[]; offers: NormalizedOffer[] } {
   if (shouldIgnorePageForExtraction(page)) return { services: [], products: [], offers: [] };
+  if (isStrictDemoMode() && isBlogPage(page)) return { services: [], products: [], offers: [] };
   const text = page.normalizedText ?? normalizeExtractionPageText(page.cleanedText);
   const lines = text.split(/\n+/).map(normalizeText).filter(Boolean);
   const services: NormalizedService[] = [];
@@ -1380,7 +1448,7 @@ function extractServicesFromPage(page: PipelinePage, pageType: PageType): { serv
 
   const createService = (rawName: string, evidence: string, confidence: number) => {
     const classification = classifyCandidateKind({ name: rawName, pageType, evidence });
-    if (classification.rejected || classification.service_kind !== "service") return null;
+    if (classification.rejected || (classification.service_kind !== "service" && !["consultation", "membership", "package"].includes(classification.service_kind))) return null;
     const displayName = canonicalizeDisplayName(rawName);
     const canonicalName = normalizeServiceName(displayName);
     const slug = serviceSlug(canonicalName);
@@ -1467,7 +1535,7 @@ function extractServicesFromPage(page: PipelinePage, pageType: PageType): { serv
       continue;
     }
 
-    if (looksLikeServiceHeading(line, pageType)) {
+    if (looksLikeServiceHeading(line, pageType) || looksLikeBookableNonServiceHeading(line, pageType, joined)) {
       current = createService(line, joined, ["service_detail", "pricing"].includes(pageType) ? 0.88 : 0.76);
       continue;
     }
@@ -1508,7 +1576,7 @@ function inferServiceCategory(name: string) {
   if (/facial|hydra|dermaplan|acne/.test(lower)) return "Facials";
   if (/microchannel|microneedl|chemical peel|peel|resurfac|plasma/.test(lower)) return "Skin resurfacing";
   if (/laser|ipl|rf|radiofrequency|morpheus|energy/.test(lower)) return "Laser and energy";
-  if (/iv|weight|wellness|body|cellulite|qwo/.test(lower)) return "Body and wellness";
+  if (/iv|weight|wellness|body|cellulite|qwo|peptide|testosterone|glp/.test(lower)) return "Body and wellness";
   if (/prp|prf|hair/.test(lower)) return "Hair restoration";
   if (/consult/.test(lower)) return "Consultations";
   if (/cleaning|exam|x-ray|filling|root canal|emergency/.test(lower)) return "Dental general";
@@ -1520,8 +1588,8 @@ function inferServiceCategory(name: string) {
 function serviceFromLlm(entry: LlmService, sourceUrl: string | null): NormalizedService | null {
   const name = normalizeText(entry.name ?? "");
   const classification = classifyCandidateKind({ name, pageType: "service_detail", evidence: [entry.description, entry.evidence_quote].filter(Boolean).join(" "), category: entry.category });
-  if (classification.rejected || classification.service_kind !== "service") return null;
-  if (!looksLikeServiceHeading(name, "service_detail")) return null;
+  if (classification.rejected || (classification.service_kind !== "service" && !["consultation", "membership", "package"].includes(classification.service_kind))) return null;
+  if (classification.service_kind === "service" && !looksLikeServiceHeading(name, "service_detail")) return null;
   const description = cleanSentence(entry.description ?? name, 360);
   const priceText = normalizeText(entry.price_text ?? "");
   const durationText = normalizeText(entry.duration_text ?? "");
@@ -1568,7 +1636,7 @@ function serviceFromLlm(entry: LlmService, sourceUrl: string | null): Normalized
 function applyLlmExtraction(result: NormalizedExtractionResult, llm: LlmExtraction | null, context: ExtractionContext) {
   if (!llm) return result;
   const sourceUrl = result.pageUpdates[0]?.url ?? context.websiteUrl;
-  const services = mergeServices([
+  let services = mergeServices([
     ...result.services,
     ...(llm.services ?? []).map((entry) => serviceFromLlm(entry, sourceUrl)).filter((service): service is NormalizedService => Boolean(service)),
   ]);
@@ -1588,7 +1656,7 @@ function applyLlmExtraction(result: NormalizedExtractionResult, llm: LlmExtracti
     service.source_url ||= price.source_url ?? sourceUrl;
     service.source_quote ||= price.evidence_quote ?? priceText;
   }
-  const faqs = [
+  let faqs = [
     ...result.faqs,
     ...(llm.faqs ?? [])
       .filter((faq) => faq.question && faq.answer && !isJunkText(faq.question) && !isJunkText(faq.answer))
@@ -1604,6 +1672,14 @@ function applyLlmExtraction(result: NormalizedExtractionResult, llm: LlmExtracti
         is_medical_disclaimer_needed: /side effects|risks|medical|treatment/i.test(`${faq.question} ${faq.answer}`),
       })),
   ];
+
+  const strictCompact = compactStrictDemoExtraction({
+    services,
+    faqs,
+    rejectedCandidates: result.rejectedCandidates,
+  });
+  services = strictCompact.services;
+  faqs = strictCompact.faqs;
 
   const staff = [
     ...result.staff,
@@ -1673,7 +1749,7 @@ function applyLlmExtraction(result: NormalizedExtractionResult, llm: LlmExtracti
     faqs,
     offers,
     staff,
-    rejectedCandidates: result.rejectedCandidates,
+    rejectedCandidates: strictCompact.rejectedCandidates,
     voiceAnswers,
     knowledgeChunks,
     snapshot,
@@ -1693,6 +1769,193 @@ function mergeServices(services: NormalizedService[]) {
     else bySlug.set(service.service_slug, service);
   }
   return [...bySlug.values()].map((service, index) => ({ ...service, sort_order: index }));
+}
+
+function strictUrlScore(url: string | null | undefined) {
+  if (!url) return 0;
+  const lower = url.toLowerCase();
+  let score = 0;
+  for (const signal of ["booking", "book", "services", "service", "treatment", "hydrafacial", "iv", "therapy", "testosterone", "glp", "weight", "body", "membership", "about", "contact"]) {
+    if (lower.includes(signal)) score += 8;
+  }
+  for (const signal of ["blog", "article", "tag", "category", "author", "privacy", "terms"]) {
+    if (lower.includes(`/${signal}`)) score -= 20;
+  }
+  return score;
+}
+
+function isClearlyBookableService(service: NormalizedService) {
+  const evidence = `${service.source_url ?? ""} ${service.source_quote ?? ""} ${service.description_long ?? ""}`.toLowerCase();
+  return service.is_bookable && (
+    service.extraction_method === "pricing_table_row" ||
+    service.extraction_method === "jsonld_service" ||
+    /\b(book|booking|appointment|schedule|consultation|available|offered|treatments?|services?)\b/.test(evidence)
+  );
+}
+
+function strictServiceRank(service: NormalizedService) {
+  let score = service.confidence * 100 + strictUrlScore(service.source_url);
+  if (service.price_available || service.prices.length) score += 20;
+  if (isClearlyBookableService(service)) score += 20;
+  if (service.description_short || service.description_long) score += 6;
+  if (service.service_kind === "consultation") score += 8;
+  if (service.service_kind !== "service") score -= 12;
+  if (isBlogPage({ url: service.source_url ?? "", pageType: null, title: null })) score -= 50;
+  return score;
+}
+
+function isServicePageSource(service: NormalizedService) {
+  return /\/(?:services?|treatments?)(?:\/|$)|pricing|book|booking/i.test(service.source_url ?? "");
+}
+
+function serviceHasExactNearbyPricing(service: NormalizedService) {
+  if (!service.prices.length) return false;
+  const evidence = `${service.display_name} ${service.source_quote ?? ""} ${service.description_long ?? ""}`.toLowerCase();
+  const tokens = service.display_name.toLowerCase().split(/\s+/).filter((token) => token.length >= 3);
+  return tokens.some((token) => evidence.includes(token)) || /\bfree\s+(?:initial\s+)?(?:consultation|consult|assessment)\b/i.test(evidence);
+}
+
+function normalizeStrictServicePricing(service: NormalizedService): NormalizedService {
+  if (!service.prices.length) return { ...service, price_available: false, starting_price_cents: null, price_summary: null };
+  if (!serviceHasExactNearbyPricing(service)) {
+    return {
+      ...service,
+      prices: [],
+      price_available: false,
+      starting_price_cents: null,
+      price_summary: null,
+    };
+  }
+  return {
+    ...service,
+    price_available: true,
+    starting_price_cents: lowestPrice(service.prices),
+    price_summary: summarizePrices(service.prices),
+  };
+}
+
+function shouldGroupUnderPeptideTherapy(service: NormalizedService, hasPeptideParent: boolean) {
+  if (!/\b(mots-c|ghk-cu|bpc-157|epithalon)\b/i.test(service.display_name)) return false;
+  if (!hasPeptideParent) return true;
+  const bookingProof = /booking|book|appointment/i.test(service.source_url ?? "") || service.extraction_method === "booking_service_card" || (service.price_available && /booking|book|appointment/i.test(service.source_quote ?? ""));
+  return !bookingProof;
+}
+
+function compactStrictDemoServices(services: NormalizedService[]) {
+  const rejected: RejectedServiceCandidate[] = [];
+  const candidates = services
+    .map(normalizeStrictServicePricing)
+    .filter((service) => !service.rejected)
+    .filter((service) => {
+      const reason = strictDemoRejectReason(service.display_name, `${service.source_quote ?? ""} ${service.description_long ?? ""}`);
+      if (!reason) return true;
+      rejected.push({
+        raw_name: service.display_name,
+        normalized_name: service.canonical_name,
+        candidate_kind: service.service_kind,
+        rejection_reason: reason,
+        source_url: service.source_url,
+        source_page_id: service.source_page_id,
+        source_quote: service.source_quote,
+        extraction_method: service.extraction_method,
+        confidence: service.confidence,
+        metadata: { strict_demo_filter: true },
+      });
+      return false;
+    })
+    .filter((service) => {
+      if ((service.service_kind ?? "service") !== "service" && !["consultation", "membership", "package"].includes(service.service_kind)) return false;
+      if (broadCategoryLabels.has(service.display_name.toLowerCase())) return false;
+      if (isBlogPage({ url: service.source_url ?? "", pageType: null, title: null }) && !service.price_available && service.confidence < 0.92) return false;
+      return isClearlyBookableService(service) || service.confidence >= 0.84 || service.price_available || (isServicePageSource(service) && service.confidence >= 0.74);
+    });
+
+  const hasPeptideParent = candidates.some((service) => /peptide therapy|peptides/i.test(service.display_name));
+  const peptideChildren = candidates.filter((service) => shouldGroupUnderPeptideTherapy(service, hasPeptideParent));
+  let grouped = candidates.filter((service) => !shouldGroupUnderPeptideTherapy(service, hasPeptideParent));
+  if (peptideChildren.length) {
+    let parent = grouped.find((service) => /peptide therapy|peptides/i.test(service.display_name));
+    if (!parent) {
+      const source = peptideChildren.sort((left, right) => strictServiceRank(right) - strictServiceRank(left))[0];
+      parent = {
+        ...source,
+        id: randomUUID(),
+        canonical_name: "Peptide Therapy",
+        display_name: "Peptide Therapy",
+        service_slug: "peptide-therapy",
+        category: "Body and wellness",
+        subcategory: null,
+        description_short: "Peptide therapy options are listed on the clinic website.",
+        description_long: source.description_long,
+        prices: [],
+        price_available: false,
+        starting_price_cents: null,
+        price_summary: null,
+        aliases: [],
+        confidence: Math.max(0.82, source.confidence - 0.03),
+      };
+      grouped.push(parent);
+    }
+    const aliasKeys = new Set(parent.aliases.map((alias) => alias.alias.toLowerCase()));
+    for (const child of peptideChildren) {
+      if (!aliasKeys.has(child.display_name.toLowerCase())) {
+        parent.aliases.push({ alias: child.display_name, alias_type: "grouped_subtopic", confidence: Math.min(child.confidence, 0.84) });
+        aliasKeys.add(child.display_name.toLowerCase());
+      }
+    }
+  }
+
+  grouped = mergeServices(grouped)
+    .sort((left, right) => strictServiceRank(right) - strictServiceRank(left))
+    .slice(0, 20)
+    .map((service, index) => ({ ...service, sort_order: index }));
+
+  return { services: grouped, rejected };
+}
+
+function faqMatchesApprovedService(faq: NormalizedFaq, services: NormalizedService[]) {
+  const text = `${faq.question} ${faq.answer}`.toLowerCase();
+  return services.some((service) => {
+    const names = [service.display_name, ...service.aliases.map((alias) => alias.alias)].map((name) => name.toLowerCase());
+    return names.some((name) => name.split(/\s+/).filter((token) => token.length >= 4).some((token) => text.includes(token)));
+  });
+}
+
+function compactStrictDemoFaqs(faqs: NormalizedFaq[], services: NormalizedService[]) {
+  const seen = new Set<string>();
+  return faqs
+    .filter((faq) => {
+      if (isBlogPage({ url: faq.source_url ?? "", pageType: null, title: null }) && !faqMatchesApprovedService(faq, services)) return false;
+      if (isJunkText(faq.question) || isJunkText(faq.answer)) return false;
+      return true;
+    })
+    .sort((left, right) => {
+      const sourceDelta = strictUrlScore(right.source_url) - strictUrlScore(left.source_url);
+      if (sourceDelta) return sourceDelta;
+      return right.confidence - left.confidence;
+    })
+    .filter((faq) => {
+      const key = faq.question.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 20);
+}
+
+function compactStrictDemoExtraction(input: {
+  services: NormalizedService[];
+  faqs: NormalizedFaq[];
+  rejectedCandidates: RejectedServiceCandidate[];
+}) {
+  if (!isStrictDemoMode()) return input;
+  const compacted = compactStrictDemoServices(input.services);
+  const faqs = compactStrictDemoFaqs(input.faqs, compacted.services);
+  return {
+    services: compacted.services,
+    faqs,
+    rejectedCandidates: uniqueRejectedCandidates([...input.rejectedCandidates, ...compacted.rejected]),
+  };
 }
 
 function extractFaqs(pages: PipelinePage[]) {
@@ -2170,7 +2433,7 @@ export function evaluateProfileQuality(input: {
   if (!address) warn("address", 10, "No address was extracted for this local clinic.");
   else pass("address", "Address extracted.");
 
-  if (realServices.length > 80) fail("over_extraction_services_count", "More than 80 real services were approved for a small local site.", { services: realServices.length });
+  if (realServices.length > 35) fail("over_extraction_services_count", "More than 35 services remained after strict demo filtering.", { services: realServices.length });
   if (hasServicePages && realServices.length < 5) warn("services_count", 30, "Website appears service-rich but fewer than 5 real voice-approved services were extracted.", { services: realServices.length });
   else if (realServices.length < 3 && childCategoryCount < 2) warn("non_generic_services_count", 25, "Fewer than 3 real voice-approved services were extracted.", { services: realServices.length, categories: childCategoryCount });
   else pass("services_count", "Service count is sufficient for the scraped pages.", { services: realServices.length });
@@ -2205,7 +2468,7 @@ export function evaluateProfileQuality(input: {
   else if (!input.services.some((service) => service.price_available)) warn("prices_missing", 5, "No structured prices were extracted.");
   else pass("prices", "Structured prices extracted.");
 
-  if (!input.hours.length) warn("hours", 8, "No hours were extracted.");
+  if (!input.hours.length) warn("hours", 2, "Hours not found.");
   else pass("hours", "Hours extracted.");
 
   if (!input.faqs.length) warn("faqs", 4, "No FAQs were extracted.");
@@ -2224,7 +2487,7 @@ export function evaluateProfileQuality(input: {
 
   if (input.services.length && nonGenericServices.length === input.services.length) pass("safe_service_names_full", "Safe service names can preserve the full service list.", { services: input.services.length });
 
-  const requiredAnswers = new Set<VoiceAnswerType>(["services_list", "hours", "address"]);
+  const requiredAnswers = new Set<VoiceAnswerType>(["services_list", "address"]);
   const presentAnswers = new Set(input.voiceAnswers.map((answer) => answer.answer_type));
   const missingAnswers = [...requiredAnswers].filter((answer) => !presentAnswers.has(answer));
   if (missingAnswers.length) warn("voice_answers", 20, "Voice-ready answers are missing required entries.", { missing: missingAnswers });
@@ -2266,7 +2529,11 @@ function buildSnapshot(input: {
 }) {
   const profile = createEmptyExtractedProfile(input.websiteUrl);
   const location = input.locations[0];
+  const pricedServices = input.services.filter((service) => service.price_available || service.prices.length || Boolean(service.price_summary));
   profile.clinic.name = input.businessName;
+  profile.extraction_mode = demoExtractionMode();
+  profile.hours_status = input.hours.some((hour) => !hour.is_closed && hour.opens_at && hour.closes_at) ? "listed" : "not_listed";
+  profile.pricing_status = pricedServices.length === 0 ? "not_listed" : pricedServices.length < input.services.length ? "partial" : "listed";
   profile.clinic.industry = input.services.some((service) => service.category && service.category !== "Dental") ? "med_spa" : "dental";
   profile.clinic.website = input.websiteUrl;
   profile.clinic.phone = location?.phone_e164 ?? location?.phone_display ?? "";
@@ -2493,14 +2760,15 @@ export function extractNormalizedClinicProfile(pages: PipelinePage[], context: E
   const { facts, locations, businessName } = makeFactsAndLocation(normalizedPages, context);
   const hours = extractHours(normalizedPages, context);
   const extracted = normalizedPages.map((page) => extractServicesFromPage(page, page.classification.pageType));
-  const services = mergeServices(extracted.flatMap((entry) => entry.services));
+  let services = mergeServices(extracted.flatMap((entry) => entry.services));
   const products = extracted.flatMap((entry) => entry.products);
   const offers = extracted.flatMap((entry) => entry.offers);
-  const rejectedCandidates = uniqueRejectedCandidates(normalizedPages.flatMap((page) => collectRejectedCandidatesFromPage(page, page.classification.pageType)));
-  const faqs = extractFaqs(normalizedPages);
+  let rejectedCandidates = uniqueRejectedCandidates(normalizedPages.flatMap((page) => collectRejectedCandidatesFromPage(page, page.classification.pageType)));
+  let faqs = extractFaqs(normalizedPages);
+  ({ services, faqs, rejectedCandidates } = compactStrictDemoExtraction({ services, faqs, rejectedCandidates }));
   const staff = extractStaff(normalizedPages);
   const voiceAnswers = buildVoiceAnswers({ businessName, facts, locations, hours, services, faqs, offers });
-  if (!voiceAnswers.some((answer) => answer.answer_type === "pricing_summary") && normalizedPages.some((page) => /\$[0-9]/.test(page.cleanedText))) {
+  if (!isStrictDemoMode() && !voiceAnswers.some((answer) => answer.answer_type === "pricing_summary") && normalizedPages.some((page) => /\$[0-9]/.test(page.cleanedText))) {
     voiceAnswers.push({
       id: randomUUID(),
       answer_type: "pricing_summary",
