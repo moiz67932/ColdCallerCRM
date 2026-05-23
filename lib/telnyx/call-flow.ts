@@ -146,6 +146,12 @@ async function getBrowserWebRtcSipUri() {
     throw new Error("Telnyx telephony credential does not include a SIP username");
   }
 
+  logInfo("Verified Telnyx WebRTC telephony credential target", {
+    credentialId,
+    sipUsername,
+    sipUri: `sip:${sipUsername}@sip.telnyx.com`,
+  });
+
   return {
     credentialId,
     sipUsername,
