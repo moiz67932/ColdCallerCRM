@@ -1368,9 +1368,16 @@ export default function QueuePage() {
 
   const displayedCallStatus = manualDialState ?? latestAttempt?.rawSummaryJson?.progressState ?? latestAttempt?.status ?? "idle";
   const latestAttemptDismissed = latestAttempt ? locallyEndedAttemptIdsRef.current.has(latestAttempt.id) : false;
+  const activeManualCallStates: ManualDialUiState[] = [
+    "dialing_lead",
+    "lead_ringing",
+    "lead_answered",
+    "browser_answered",
+    "bridged",
+  ];
   const callInProgress = Boolean(
     (latestAttempt && !latestAttemptDismissed && ["dialing", "connected"].includes(latestAttempt.status)) ||
-      (manualDialState && !["busy", "failed", "no_answer", "ended"].includes(manualDialState)),
+      (manualDialState && activeManualCallStates.includes(manualDialState)),
   );
   const softphoneReady = isBrowserReadyForOutboundDial();
   const browserFirstFlow = getManualDialFlow() === "browser_first";
