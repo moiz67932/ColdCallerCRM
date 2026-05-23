@@ -10,6 +10,48 @@ import { processVoiceWebhookEvent } from "@/lib/telnyx/webhook-processor";
 
 export const runtime = "nodejs";
 
+function getStringPayloadValue(payload: Record<string, unknown> | undefined, key: string) {
+  const value = payload?.[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function getVoiceWebhookReceiptContext(parsedEvent: ReturnType<typeof parseTelnyxEvent>, eventId: string) {
+  const payload = parsedEvent.data.payload;
+
+  return {
+    eventId,
+    event_type: parsedEvent.data.event_type,
+    occurred_at: parsedEvent.data.occurred_at,
+    payload: {
+      call_control_id: getStringPayloadValue(payload, "call_control_id"),
+      call_leg_id: getStringPayloadValue(payload, "call_leg_id"),
+      call_session_id: getStringPayloadValue(payload, "call_session_id"),
+      connection_id: getStringPayloadValue(payload, "connection_id"),
+      client_state: getStringPayloadValue(payload, "client_state"),
+      from: getStringPayloadValue(payload, "from"),
+      to: getStringPayloadValue(payload, "to"),
+      sip_address: getStringPayloadValue(payload, "sip_address"),
+      stream_url: getStringPayloadValue(payload, "stream_url"),
+      stream_id: getStringPayloadValue(payload, "stream_id"),
+      stream_track: getStringPayloadValue(payload, "stream_track"),
+    },
+    sip_transfer_targets: {
+      to: getStringPayloadValue(payload, "to"),
+      sip_address: getStringPayloadValue(payload, "sip_address"),
+      target_sip_uri: getStringPayloadValue(payload, "target_sip_uri"),
+      transfer_to: getStringPayloadValue(payload, "transfer_to"),
+      refer_to: getStringPayloadValue(payload, "refer_to"),
+    },
+    media_streaming_state: {
+      eventIsStreaming: parsedEvent.data.event_type.startsWith("streaming."),
+      streamId: getStringPayloadValue(payload, "stream_id"),
+      streamUrl: getStringPayloadValue(payload, "stream_url"),
+      streamTrack: getStringPayloadValue(payload, "stream_track"),
+      streamCodec: getStringPayloadValue(payload, "stream_codec"),
+    },
+  };
+}
+
 export async function POST(request: NextRequest) {
   const rawBody = await request.text();
   const signatureHeader = request.headers.get("telnyx-signature-ed25519");
@@ -57,6 +99,12 @@ export async function POST(request: NextRequest) {
       : undefined;
 
   try {
+    logInfo("Telnyx voice webhook received", {
+      ...getVoiceWebhookReceiptContext(parsedEvent, eventId),
+      signatureVerified: signatureResult.verified,
+      signatureError: signatureResult.verified ? undefined : signatureResult.reason,
+    });
+
     const stored = await prisma.telnyxWebhookEvent.create({
       data: {
         eventId,

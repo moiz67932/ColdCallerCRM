@@ -14,6 +14,16 @@ import { getPayloadValue, type TelnyxWebhookPayload } from "@/lib/telnyx/events"
 
 type ExistingCallAttempt = NonNullable<Awaited<ReturnType<typeof prisma.callAttempt.findUnique>>>;
 
+const TELNYX_LIFECYCLE_EVENTS = new Set([
+  "call.initiated",
+  "call.ringing",
+  "call.answered",
+  "call.hangup",
+  "streaming.started",
+  "streaming.stopped",
+  "streaming.failed",
+]);
+
 const statusProgression: Record<CallStatus, number> = {
   dialing: 0,
   connected: 1,
@@ -58,6 +68,108 @@ function getPayloadNumber(payload: Record<string, unknown>, key: string) {
 
 function getEventTimestamp(event: TelnyxWebhookPayload) {
   return event.data.occurred_at ? new Date(event.data.occurred_at) : new Date();
+}
+
+function getStructuredPayloadValue(payload: Record<string, unknown>, key: string) {
+  const value = payload[key];
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? value : undefined;
+}
+
+function getSipTransferTargets(payload: Record<string, unknown>) {
+  const targetKeys = [
+    "to",
+    "sip_address",
+    "target",
+    "target_sip_uri",
+    "transfer_to",
+    "refer_to",
+    "call_control_id_to_bridge_with",
+  ];
+
+  return Object.fromEntries(
+    targetKeys
+      .map((key) => [key, getStructuredPayloadValue(payload, key)])
+      .filter((entry): entry is [string, string | number | boolean] => entry[1] !== undefined),
+  );
+}
+
+function getMediaStreamingState(eventType: string, payload: Record<string, unknown>) {
+  return {
+    eventIsStreaming: eventType.startsWith("streaming."),
+    status:
+      eventType === "streaming.started"
+        ? "started"
+        : eventType === "streaming.stopped"
+          ? "stopped"
+          : eventType === "streaming.failed"
+            ? "failed"
+            : undefined,
+    streamId: getStructuredPayloadValue(payload, "stream_id"),
+    streamUrl: getStructuredPayloadValue(payload, "stream_url"),
+    streamTrack: getStructuredPayloadValue(payload, "stream_track"),
+    streamCodec: getStructuredPayloadValue(payload, "stream_codec"),
+    failureReason: getStructuredPayloadValue(payload, "failure_reason") ?? getStructuredPayloadValue(payload, "error"),
+  };
+}
+
+function getWebhookLifecycleLogContext(event: TelnyxWebhookPayload, webhookRowId: string, attempt?: ExistingCallAttempt | null) {
+  const eventType = event.data.event_type;
+  const payload = (event.data.payload ?? {}) as Record<string, unknown>;
+  const rawClientState = getPayloadValue(payload, "client_state");
+  const decodedClientState = decodeClientState(rawClientState);
+
+  return {
+    webhookRowId,
+    eventId: event.data.id,
+    event_type: eventType,
+    occurred_at: event.data.occurred_at,
+    payload: {
+      call_control_id: getPayloadValue(payload, "call_control_id"),
+      call_leg_id: getPayloadValue(payload, "call_leg_id"),
+      call_session_id: getPayloadValue(payload, "call_session_id"),
+      connection_id: getPayloadValue(payload, "connection_id"),
+      client_state: rawClientState,
+      client_state_decoded: decodedClientState,
+      from: getStructuredPayloadValue(payload, "from"),
+      to: getStructuredPayloadValue(payload, "to"),
+      hangup_cause: getStructuredPayloadValue(payload, "hangup_cause"),
+      hangup_source: getStructuredPayloadValue(payload, "hangup_source"),
+      result: getStructuredPayloadValue(payload, "result"),
+      machine_detection_result: getStructuredPayloadValue(payload, "machine_detection_result"),
+    },
+    sip_transfer_targets: getSipTransferTargets(payload),
+    media_streaming_state: getMediaStreamingState(eventType, payload),
+    attempt: attempt
+      ? {
+          id: attempt.id,
+          status: attempt.status,
+          leadId: attempt.leadId,
+          answeredAt: attempt.answeredAt,
+          endedAt: attempt.endedAt,
+          telnyxConnectionId: attempt.telnyxConnectionId,
+          telnyxCallControlId: attempt.telnyxCallControlId,
+          telnyxCallLegId: attempt.telnyxCallLegId,
+          telnyxAgentCallControlId: attempt.telnyxAgentCallControlId,
+          telnyxAgentCallLegId: attempt.telnyxAgentCallLegId,
+          amdResult: attempt.amdResult,
+        }
+      : null,
+  };
+}
+
+function logTelnyxLifecycleEvent(
+  message: string,
+  webhookRowId: string,
+  event: TelnyxWebhookPayload,
+  attempt?: ExistingCallAttempt | null,
+  extra: Record<string, unknown> = {},
+) {
+  const context = getWebhookLifecycleLogContext(event, webhookRowId, attempt);
+
+  logInfo(message, {
+    ...context,
+    ...extra,
+  });
 }
 
 function getCallRole(
@@ -220,6 +332,12 @@ async function handleInitiatedEvent(attempt: ExistingCallAttempt, event: TelnyxW
   await updateAttemptStatus(syncedAttempt, "dialing");
 }
 
+async function handleRingingEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
+  const syncedAttempt = await syncAttemptFromEvent(attempt, event);
+
+  await updateAttemptStatus(syncedAttempt, "dialing");
+}
+
 async function handleAnsweredEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
   const syncedAttempt = await syncAttemptFromEvent(attempt, event);
   const payload = (event.data.payload ?? {}) as Record<string, unknown>;
@@ -233,6 +351,10 @@ async function handleAnsweredEvent(attempt: ExistingCallAttempt, event: TelnyxWe
 
     await startAttemptRecording(connectedAttempt.id);
   }
+}
+
+async function handleStreamingEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
+  await syncAttemptFromEvent(attempt, event);
 }
 
 async function handleMachineDetection(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
@@ -468,9 +590,17 @@ export async function processVoiceWebhookEvent(webhookRowId: string, event: Teln
   const payloadObj = event as unknown as JsonObject;
 
   try {
+    logTelnyxLifecycleEvent("Telnyx voice webhook event received by processor", webhookRowId, event, null, {
+      lifecycleEvent: TELNYX_LIFECYCLE_EVENTS.has(eventType),
+    });
+
     const attempt = await findAttemptFromEvent(event);
 
     if (!attempt) {
+      logTelnyxLifecycleEvent("Telnyx voice webhook event had no matching call attempt", webhookRowId, event, null, {
+        attemptResolution: "not_found",
+      });
+
       await updateWebhookProcessing(webhookRowId, payloadObj, {
         processedAt: new Date(),
         processingError: null,
@@ -478,13 +608,38 @@ export async function processVoiceWebhookEvent(webhookRowId: string, event: Teln
       return;
     }
 
+    logTelnyxLifecycleEvent("Telnyx voice webhook event matched call attempt", webhookRowId, event, attempt, {
+      attemptResolution: "matched",
+    });
+
     switch (eventType) {
       case "call.initiated": {
         await handleInitiatedEvent(attempt, event);
+        logTelnyxLifecycleEvent("Handled Telnyx call.initiated", webhookRowId, event, attempt, {
+          action: "synced_call_ids_and_kept_dialing",
+        });
+        break;
+      }
+      case "call.ringing": {
+        await handleRingingEvent(attempt, event);
+        logTelnyxLifecycleEvent("Handled Telnyx call.ringing", webhookRowId, event, attempt, {
+          action: "synced_call_ids_and_kept_dialing",
+        });
         break;
       }
       case "call.answered": {
         await handleAnsweredEvent(attempt, event);
+        logTelnyxLifecycleEvent("Handled Telnyx call.answered", webhookRowId, event, attempt, {
+          action: "marked_lead_connected_and_started_recording_when_enabled",
+          downstreamCommands: {
+            answerCommandIssuedAfterOutboundAnswer: false,
+            sipTransferRequested: false,
+            mediaStreamingStartRequested: false,
+            bridgeDialRequested: false,
+          },
+          flowStopObservation:
+            "Current application logic does not issue a SIP transfer, bridge dial, or media streaming start command after call.answered.",
+        });
         break;
       }
       case "call.machine.detection.ended":
@@ -515,6 +670,18 @@ export async function processVoiceWebhookEvent(webhookRowId: string, event: Teln
       }
       case "call.hangup": {
         await handleHangupEvent(attempt, event);
+        logTelnyxLifecycleEvent("Handled Telnyx call.hangup", webhookRowId, event, attempt, {
+          action: "finalized_attempt_status_and_summary",
+        });
+        break;
+      }
+      case "streaming.started":
+      case "streaming.stopped":
+      case "streaming.failed": {
+        await handleStreamingEvent(attempt, event);
+        logTelnyxLifecycleEvent("Handled Telnyx media streaming event", webhookRowId, event, attempt, {
+          action: "synced_call_ids_only",
+        });
         break;
       }
       default: {
