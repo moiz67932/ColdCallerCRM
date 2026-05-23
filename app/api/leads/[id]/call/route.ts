@@ -108,8 +108,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       });
     }
 
-    const attempt = await createOutboundCallAttempt(id);
-    const lead = await prisma.lead.findUnique({ where: { id } });
+    const { attempt, lead } = await createOutboundCallAttempt(id);
 
     logInfo("Created outbound call attempt awaiting browser WebRTC readiness", {
       requestId,
