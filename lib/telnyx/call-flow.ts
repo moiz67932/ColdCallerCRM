@@ -3,7 +3,6 @@ import type { CallStatus } from "@/lib/db-types";
 import { env } from "@/lib/env";
 import { logError, logInfo } from "@/lib/logger";
 import { prisma } from "@/lib/workstation-db";
-import { getAppSettings } from "@/lib/settings";
 import { encodeClientState } from "@/lib/telnyx/client-state";
 import {
   getOutboundCallerId,
@@ -306,14 +305,11 @@ export async function hangupCallControlIds(attemptId: string, callControlIds: Ar
 }
 
 export async function startAttemptRecording(callAttemptId: string) {
-  const [attempt, settings] = await Promise.all([
-    prisma.callAttempt.findUnique({
-      where: { id: callAttemptId },
-    }),
-    getAppSettings(),
-  ]);
+  const attempt = await prisma.callAttempt.findUnique({
+    where: { id: callAttemptId },
+  });
 
-  if (!attempt || !settings.enableRecording) {
+  if (!attempt) {
     return;
   }
 

@@ -3,7 +3,6 @@
 
 import { addDays, format } from "date-fns";
 import { ExternalLink, PhoneCall, PhoneOff, RefreshCcw } from "lucide-react";
-import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -67,37 +66,6 @@ type LeadItem = {
   tags: string[];
   callAttempts: CallAttempt[];
   followUps: FollowUp[];
-};
-
-type DemoAgentSummary = {
-  businessName: string | null;
-  servicesCount: number;
-  faqsCount: number;
-  hasHours: boolean;
-  hasPricing: boolean;
-  hoursStatus?: "not_listed" | "listed";
-  pricingStatus?: "not_listed" | "partial" | "listed";
-};
-
-type DemoAgentStatusResponse = {
-  lead_id: string;
-  lead_demo_profile_id?: string | null;
-  profile_status: "draft" | "scraping" | "ready" | "active" | "failed";
-  scrape_status: "pending" | "processing" | "completed" | "failed" | "cancelled";
-  scrape_error?: string | null;
-  scrape_job_id?: string | null;
-  pages_discovered?: number;
-  pages_scraped?: number;
-  pages_failed?: number;
-  last_scraped_at?: string | null;
-  last_prepared_at?: string | null;
-  is_demo_ready?: boolean;
-  demo_ready_blockers?: string[];
-  can_prepare?: boolean;
-  can_retry?: boolean;
-  clinic_id: string | null;
-  agent_id: string;
-  summary: DemoAgentSummary | null;
 };
 
 type SettingsResponse = {
@@ -259,8 +227,6 @@ export default function QueuePage() {
   const [savingOutcome, setSavingOutcome] = useState(false);
   const [savingNote, setSavingNote] = useState(false);
   const [savingScripts, setSavingScripts] = useState(false);
-  const [demoAgentStatus, setDemoAgentStatus] = useState<DemoAgentStatusResponse | null>(null);
-  const [loadingDemoAgentStatus, setLoadingDemoAgentStatus] = useState(false);
   const locallyEndedAttemptIdsRef = useRef<Set<string>>(new Set());
   const promptedVoicemailAttemptIdsRef = useRef<Set<string>>(new Set());
   const telnyxClientRef = useRef<TelnyxWebRtcClient | null>(null);
@@ -893,52 +859,12 @@ export default function QueuePage() {
     if (!selectedLead) {
       setNotes("");
       setLastSavedNotes("");
-      setDemoAgentStatus(null);
       return;
     }
 
     setNotes(selectedLead.notes ?? "");
     setLastSavedNotes(selectedLead.notes ?? "");
   }, [selectedLead]);
-
-  const refreshDemoAgentStatus = useCallback(async (leadId: string) => {
-    setLoadingDemoAgentStatus(true);
-
-    try {
-      const response = await fetch(`/api/leads/${leadId}/demo-agent/status`, { cache: "no-store" });
-      const payload = (await response.json()) as DemoAgentStatusResponse & { error?: string };
-
-      if (!response.ok) {
-        throw new Error(payload.error ?? "Failed to load demo agent status");
-      }
-
-      setDemoAgentStatus(payload);
-    } catch (statusError) {
-      setCallMessage(statusError instanceof Error ? statusError.message : "Failed to load demo agent status");
-    } finally {
-      setLoadingDemoAgentStatus(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!selectedLead) {
-      return;
-    }
-
-    void refreshDemoAgentStatus(selectedLead.id);
-  }, [refreshDemoAgentStatus, selectedLead]);
-
-  useEffect(() => {
-    if (!selectedLead || demoAgentStatus?.profile_status !== "scraping") {
-      return;
-    }
-
-    const interval = window.setInterval(() => {
-      void refreshDemoAgentStatus(selectedLead.id);
-    }, 2500);
-
-    return () => window.clearInterval(interval);
-  }, [demoAgentStatus?.profile_status, refreshDemoAgentStatus, selectedLead]);
 
   useEffect(() => {
     if (
@@ -1347,17 +1273,6 @@ export default function QueuePage() {
     }
   }
 
-  function getDemoPreparationLabel() {
-    if (loadingDemoAgentStatus) return "Loading status";
-    if (!demoAgentStatus || demoAgentStatus.profile_status === "draft") return "Not prepared";
-    if (demoAgentStatus.profile_status === "scraping") return "Preparing";
-    if (demoAgentStatus.profile_status === "ready" && demoAgentStatus.is_demo_ready) return "Prepared";
-    if (demoAgentStatus.profile_status === "ready") return "Prepared";
-    if (demoAgentStatus.profile_status === "active") return "Prepared";
-    if (demoAgentStatus.profile_status === "failed") return "Failed";
-    return demoAgentStatus.profile_status;
-  }
-
   const scriptVariables = {
     businessName: selectedLead?.businessName ?? "",
     contactName: selectedLead?.contactName ?? "",
@@ -1379,12 +1294,19 @@ export default function QueuePage() {
     (latestAttempt && !latestAttemptDismissed && ["dialing", "connected"].includes(latestAttempt.status)) ||
       (manualDialState && activeManualCallStates.includes(manualDialState)),
   );
+  const activeCallLeadId =
+    leads.find((lead) => {
+      const attempt = lead.callAttempts[0];
+      return attempt && ["dialing", "connected"].includes(attempt.status) && !locallyEndedAttemptIdsRef.current.has(attempt.id);
+    })?.id ?? (callInProgress ? selectedLead?.id ?? null : null);
+  const selectedLeadOwnsActiveCall = !activeCallLeadId || selectedLead?.id === activeCallLeadId;
   const softphoneReady = isBrowserReadyForOutboundDial();
   const browserFirstFlow = getManualDialFlow() === "browser_first";
   const callButtonDisabled =
     calling ||
     callInProgress ||
     !selectedLead ||
+    !selectedLeadOwnsActiveCall ||
     (browserFirstFlow && (!softphoneReady || !runtimeConfig?.telnyxWebrtcCredentialConfigured));
 
   return (
@@ -1432,7 +1354,10 @@ export default function QueuePage() {
             {leads.length === 0 ? <p className="text-sm text-slate-500">No leads yet. Import a CSV first.</p> : null}
             {leads.map((lead) => (
               <button
-                className={`w-full rounded-md border px-3 py-2 text-left ${selectedLeadId === lead.id ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white hover:bg-slate-50"}`}
+                className={`w-full rounded-md border px-3 py-2 text-left ${
+                  selectedLeadId === lead.id ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white hover:bg-slate-50"
+                } ${activeCallLeadId && activeCallLeadId !== lead.id ? "cursor-not-allowed opacity-50" : ""}`}
+                disabled={Boolean(activeCallLeadId && activeCallLeadId !== lead.id)}
                 key={lead.id}
                 onClick={() => setSelectedLeadId(lead.id)}
                 type="button"
@@ -1487,7 +1412,7 @@ export default function QueuePage() {
                     <PhoneCall className="mr-2 h-4 w-4" />
                     {calling ? "Starting..." : callInProgress ? "Call Live" : "Call"}
                   </Button>
-                  <Button disabled={!callInProgress} onClick={() => void hangupOutboundCall()} variant="destructive">
+                  <Button disabled={!callInProgress || !selectedLeadOwnsActiveCall} onClick={() => void hangupOutboundCall()} variant="destructive">
                     <PhoneOff className="mr-2 h-4 w-4" />
                     Hang up
                   </Button>
@@ -1510,53 +1435,6 @@ export default function QueuePage() {
                     <ExternalLink className="mr-2 h-4 w-4" />
                     Open website
                   </Button>
-                </div>
-
-                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-medium">Demo agent:</span>
-                    <Badge variant="secondary">{demoAgentStatus?.agent_id ?? "agent-87112821-4661-4dd9-a22e-ba57b48feb17"}</Badge>
-                    <Badge variant="outline">{getDemoPreparationLabel()}</Badge>
-                  </div>
-                  {demoAgentStatus?.summary ? (
-                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                      <p className="font-medium text-emerald-700">Demo-ready compact profile</p>
-                      <p>Business: {demoAgentStatus.summary.businessName ?? "-"}</p>
-                      <p>Services: {demoAgentStatus.summary.servicesCount} approved</p>
-                      <p>FAQs: {demoAgentStatus.summary.faqsCount} approved</p>
-                      <p>{demoAgentStatus.summary.hoursStatus === "listed" || demoAgentStatus.summary.hasHours ? "Hours found" : "Hours not found"}</p>
-                      <p>
-                        {demoAgentStatus.summary.pricingStatus === "partial"
-                          ? "Pricing partial"
-                          : demoAgentStatus.summary.pricingStatus === "listed" || demoAgentStatus.summary.hasPricing
-                            ? "Pricing found"
-                            : "Pricing not found"}
-                      </p>
-                    </div>
-                  ) : (
-                    <p className="mt-2 text-slate-600">Prepare a website scrape to build the clinic profile used by the shared inbound demo agent.</p>
-                  )}
-                  {demoAgentStatus?.last_prepared_at ? (
-                    <p className="mt-2 text-xs text-slate-500">Last prepared: {format(new Date(demoAgentStatus.last_prepared_at), "PPp")}</p>
-                  ) : null}
-                  {demoAgentStatus && demoAgentStatus.profile_status !== "draft" ? (
-                    <p className="mt-2 text-xs text-slate-500">
-                      Scrape: {demoAgentStatus.scrape_status}
-                      {typeof demoAgentStatus.pages_scraped === "number" ? ` • ${demoAgentStatus.pages_scraped} pages saved` : ""}
-                      {typeof demoAgentStatus.pages_failed === "number" && demoAgentStatus.pages_failed > 0
-                        ? ` • ${demoAgentStatus.pages_failed} pages failed`
-                        : ""}
-                    </p>
-                  ) : null}
-                  {demoAgentStatus?.demo_ready_blockers?.length ? (
-                    <p className="mt-2 text-red-700">{demoAgentStatus.demo_ready_blockers.join("; ")}</p>
-                  ) : null}
-                  {demoAgentStatus?.scrape_error ? <p className="mt-2 text-red-700">{demoAgentStatus.scrape_error}</p> : null}
-                  {demoAgentStatus?.profile_status === "draft" || !demoAgentStatus ? (
-                    <Link className="mt-2 inline-flex text-sm font-medium text-cyan-700 hover:text-cyan-900" href="/automations">
-                      Open Automations
-                    </Link>
-                  ) : null}
                 </div>
 
                 <Card className="bg-slate-50">
