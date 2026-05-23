@@ -576,7 +576,6 @@ export default function QueuePage() {
       const client = new TelnyxRTC({
         login_token: tokenPayload.loginToken,
         debug: true,
-        remoteElement: remoteAudioRef.current ?? "telnyx-remote-audio",
         mediaPermissionsRecovery: {
           enabled: true,
           timeout: 10_000,
