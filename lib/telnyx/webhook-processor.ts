@@ -1,17 +1,17 @@
 import type { CallStatus, JsonObject, TranscriptStatus } from "@/lib/db-types";
 
-
 import { logError, logInfo } from "@/lib/logger";
 import { prisma } from "@/lib/workstation-db";
 import {
   computeAttemptSummary,
-  decodeClientState,
   bridgeAttemptLegs,
   dialBrowserWebRtcLeg,
   hangupCallControlIds,
   isCallTerminalStatus,
+  isBrowserFirstManualDialFlow,
   startAttemptRecording,
 } from "@/lib/telnyx/call-flow";
+import { decodeClientState } from "@/lib/telnyx/client-state";
 import { getPayloadValue, type TelnyxWebhookPayload } from "@/lib/telnyx/events";
 
 type ExistingCallAttempt = NonNullable<Awaited<ReturnType<typeof prisma.callAttempt.findUnique>>>;
@@ -119,22 +119,37 @@ function getWebhookLifecycleLogContext(event: TelnyxWebhookPayload, webhookRowId
   const payload = (event.data.payload ?? {}) as Record<string, unknown>;
   const rawClientState = getPayloadValue(payload, "client_state");
   const decodedClientState = decodeClientState(rawClientState);
+  const callControlId = getPayloadValue(payload, "call_control_id");
+  const callSessionId = getPayloadValue(payload, "call_session_id");
+  const from = getStructuredPayloadValue(payload, "from");
+  const to = getStructuredPayloadValue(payload, "to");
+  const hangupCause = getStructuredPayloadValue(payload, "hangup_cause");
+  const role = attempt ? getCallRole(attempt, callControlId, decodedClientState?.role ?? null) : decodedClientState?.role ?? null;
+  const legType = role === "agent" ? "browser" : "lead";
 
   return {
+    attemptId: attempt?.id ?? decodedClientState?.attemptId ?? null,
+    legType,
+    call_control_id: callControlId ?? null,
+    call_session_id: callSessionId ?? null,
+    from: from ?? null,
+    to: to ?? null,
+    hangup_cause: hangupCause ?? null,
+    timestamp: event.data.occurred_at ?? getEventTimestamp(event).toISOString(),
     webhookRowId,
     eventId: event.data.id,
     event_type: eventType,
     occurred_at: event.data.occurred_at,
     payload: {
-      call_control_id: getPayloadValue(payload, "call_control_id"),
+      call_control_id: callControlId,
       call_leg_id: getPayloadValue(payload, "call_leg_id"),
-      call_session_id: getPayloadValue(payload, "call_session_id"),
+      call_session_id: callSessionId,
       connection_id: getPayloadValue(payload, "connection_id"),
       client_state: rawClientState,
       client_state_decoded: decodedClientState,
-      from: getStructuredPayloadValue(payload, "from"),
-      to: getStructuredPayloadValue(payload, "to"),
-      hangup_cause: getStructuredPayloadValue(payload, "hangup_cause"),
+      from,
+      to,
+      hangup_cause: hangupCause,
       hangup_source: getStructuredPayloadValue(payload, "hangup_source"),
       result: getStructuredPayloadValue(payload, "result"),
       machine_detection_result: getStructuredPayloadValue(payload, "machine_detection_result"),
@@ -196,6 +211,37 @@ function getCallRole(
 
 function shouldPromoteStatus(currentStatus: CallStatus, nextStatus: CallStatus) {
   return statusProgression[nextStatus] >= statusProgression[currentStatus];
+}
+
+function getExistingSummary(attempt: ExistingCallAttempt) {
+  return attempt.rawSummaryJson && typeof attempt.rawSummaryJson === "object" && !Array.isArray(attempt.rawSummaryJson)
+    ? (attempt.rawSummaryJson as JsonObject)
+    : {};
+}
+
+async function updateAttemptSummary(attemptId: string, summary: JsonObject) {
+  return prisma.callAttempt.update({
+    where: { id: attemptId },
+    data: {
+      rawSummaryJson: summary,
+    },
+  });
+}
+
+async function updateAttemptProgressState(attempt: ExistingCallAttempt, progressState: string, extra: JsonObject = {}) {
+  const existingSummary = getExistingSummary(attempt);
+
+  return prisma.callAttempt.update({
+    where: { id: attempt.id },
+    data: {
+      rawSummaryJson: {
+        ...existingSummary,
+        progressState,
+        progressUpdatedAt: new Date().toISOString(),
+        ...extra,
+      },
+    },
+  });
 }
 
 function isHumanDetectionResult(result?: string | null) {
@@ -332,12 +378,14 @@ async function handleInitiatedEvent(attempt: ExistingCallAttempt, event: TelnyxW
   const syncedAttempt = await syncAttemptFromEvent(attempt, event);
 
   await updateAttemptStatus(syncedAttempt, "dialing");
+  await updateAttemptProgressState(syncedAttempt, "dialing_lead");
 }
 
 async function handleRingingEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
   const syncedAttempt = await syncAttemptFromEvent(attempt, event);
 
   await updateAttemptStatus(syncedAttempt, "dialing");
+  await updateAttemptProgressState(syncedAttempt, "lead_ringing");
 }
 
 async function handleAnsweredEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
@@ -351,7 +399,19 @@ async function handleAnsweredEvent(attempt: ExistingCallAttempt, event: TelnyxWe
       answeredAt: syncedAttempt.answeredAt ?? getEventTimestamp(event),
     });
 
+    await updateAttemptProgressState(connectedAttempt, "lead_answered");
     await startAttemptRecording(connectedAttempt.id);
+
+    if (isBrowserFirstManualDialFlow()) {
+      await updateAttemptProgressState(connectedAttempt, "browser_answered", {
+        bridgeMode: "direct_browser_originated_pstn",
+        bridgeSupported: false,
+        bridgeReason: "Direct browser-originated PSTN mode does not create a second browser leg.",
+        bridgeTimeoutCheck: "not_applicable",
+      });
+      return;
+    }
+
     await dialBrowserWebRtcLeg(connectedAttempt.id);
     return;
   }
@@ -362,6 +422,7 @@ async function handleAnsweredEvent(attempt: ExistingCallAttempt, event: TelnyxWe
       leadCallControlId: syncedAttempt.telnyxCallControlId,
       browserCallControlId: syncedAttempt.telnyxAgentCallControlId,
     });
+    await updateAttemptProgressState(syncedAttempt, "browser_answered");
     await bridgeAttemptLegs(syncedAttempt.id);
   }
 }
@@ -426,6 +487,7 @@ async function handleBridgedEvent(attempt: ExistingCallAttempt, event: TelnyxWeb
   await updateAttemptStatus(syncedAttempt, "connected", {
     answeredAt: syncedAttempt.answeredAt ?? getEventTimestamp(event),
   });
+  await updateAttemptProgressState(syncedAttempt, "bridged");
 
   await startAttemptRecording(syncedAttempt.id);
 }
@@ -591,24 +653,26 @@ async function handleHangupEvent(attempt: ExistingCallAttempt, event: TelnyxWebh
   const clientState = decodeClientState(getPayloadValue(payload, "client_state"));
   const role = getCallRole(syncedAttempt, getPayloadValue(payload, "call_control_id"), clientState?.role ?? null);
   const hangupCause = getPayloadValue(payload, "hangup_cause");
+  const progressState =
+    hangupCause === "user_busy"
+      ? "busy"
+      : hangupCause === "timeout" || hangupCause === "no_answer"
+        ? "no_answer"
+        : syncedAttempt.answeredAt || syncedAttempt.status === "connected"
+          ? "ended"
+          : "failed";
 
-  if (role === "agent" && syncedAttempt.telnyxCallControlId && !syncedAttempt.endedAt) {
-    const existingSummary =
-      syncedAttempt.rawSummaryJson && typeof syncedAttempt.rawSummaryJson === "object" && !Array.isArray(syncedAttempt.rawSummaryJson)
-        ? (syncedAttempt.rawSummaryJson as JsonObject)
-        : {};
+  if (!isBrowserFirstManualDialFlow() && role === "agent" && syncedAttempt.telnyxCallControlId && !syncedAttempt.endedAt) {
+    const existingSummary = getExistingSummary(syncedAttempt);
 
-    await prisma.callAttempt.update({
-      where: { id: syncedAttempt.id },
-      data: {
-        rawSummaryJson: {
-          ...existingSummary,
-          browserLegFailed: true,
-          browserLegFailureReason: hangupCause ?? "unknown",
-          browserLegFailureAt: getEventTimestamp(event).toISOString(),
-          browserLegFailureMessage: hangupCause === "user_busy" ? "Browser softphone was not ready." : "Browser softphone leg ended.",
-        },
-      },
+    await updateAttemptSummary(syncedAttempt.id, {
+      ...existingSummary,
+      browserLegFailed: true,
+      browserLegFailureReason: hangupCause ?? "unknown",
+      browserLegFailureAt: getEventTimestamp(event).toISOString(),
+      browserLegFailureMessage: hangupCause === "user_busy" ? "Browser softphone was not ready." : "Browser softphone leg ended.",
+      progressState,
+      progressUpdatedAt: new Date().toISOString(),
     });
 
     logInfo("browser_leg_failed", {
@@ -631,17 +695,23 @@ async function handleHangupEvent(attempt: ExistingCallAttempt, event: TelnyxWebh
       outcome: deriveOutcome(syncedAttempt, payload),
     },
   });
-
-  await hangupCallControlIds(syncedAttempt.id, [
-    role === "agent" ? syncedAttempt.telnyxCallControlId : syncedAttempt.telnyxAgentCallControlId,
-  ]);
-
-  logInfo("Requested opposite Telnyx leg hangup after call.hangup", {
-    callAttemptId: syncedAttempt.id,
-    endedRole: role,
-    leadCallControlId: syncedAttempt.telnyxCallControlId,
-    browserCallControlId: syncedAttempt.telnyxAgentCallControlId,
+  await updateAttemptProgressState(syncedAttempt, progressState, {
+    hangupCause: hangupCause ?? null,
+    hangupObservedAt: getEventTimestamp(event).toISOString(),
   });
+
+  if (!isBrowserFirstManualDialFlow()) {
+    await hangupCallControlIds(syncedAttempt.id, [
+      role === "agent" ? syncedAttempt.telnyxCallControlId : syncedAttempt.telnyxAgentCallControlId,
+    ]);
+
+    logInfo("Requested opposite Telnyx leg hangup after call.hangup", {
+      callAttemptId: syncedAttempt.id,
+      endedRole: role,
+      leadCallControlId: syncedAttempt.telnyxCallControlId,
+      browserCallControlId: syncedAttempt.telnyxAgentCallControlId,
+    });
+  }
 
   await computeAttemptSummary(syncedAttempt.id);
 }
@@ -691,15 +761,19 @@ export async function processVoiceWebhookEvent(webhookRowId: string, event: Teln
       case "call.answered": {
         await handleAnsweredEvent(attempt, event);
         logTelnyxLifecycleEvent("Handled Telnyx call.answered", webhookRowId, event, attempt, {
-          action: "marked_lead_connected_started_recording_and_dialed_or_bridged_browser_leg",
+          action: isBrowserFirstManualDialFlow()
+            ? "marked_connected_and_started_recording_for_direct_browser_originated_call"
+            : "marked_lead_connected_started_recording_and_dialed_or_bridged_browser_leg",
           downstreamCommands: {
             answerCommandIssuedAfterOutboundAnswer: false,
-            sipTransferRequested: true,
+            sipTransferRequested: !isBrowserFirstManualDialFlow(),
             mediaStreamingStartRequested: false,
-            bridgeDialRequested: true,
+            bridgeDialRequested: !isBrowserFirstManualDialFlow(),
+            directBrowserOriginatedCall: isBrowserFirstManualDialFlow(),
           },
-          flowStopObservation:
-            "Application logic now dials the browser WebRTC credential on lead answer and bridges once the browser leg answers.",
+          flowStopObservation: isBrowserFirstManualDialFlow()
+            ? "The browser originated the PSTN call directly, so no secondary browser leg or bridge event is expected."
+            : "Application logic now dials the browser WebRTC credential on lead answer and bridges once the browser leg answers.",
         });
         break;
       }

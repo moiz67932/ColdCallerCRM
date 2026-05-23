@@ -41,6 +41,7 @@ type CallAttempt = {
   rawSummaryJson?: {
     browserLegFailed?: boolean;
     browserLegFailureReason?: string | null;
+    progressState?: string | null;
     clientDebug?: Record<string, string | number | boolean | null>;
   } | null;
   recording?: {
@@ -109,13 +110,40 @@ type SettingsResponse = {
       close: string;
     };
   };
+  runtimeConfig?: {
+    telnyxManualDialFlow?: "browser_first" | "pstn_first";
+    telnyxWebrtcCredentialConfigured?: boolean;
+  };
 };
 
 type ScriptKey = keyof SettingsResponse["settings"]["scripts"];
 
 type CallBootstrapResponse = {
   attempt?: CallAttempt;
+  lead?: LeadItem | null;
+  manualDialFlow?: "browser_first" | "pstn_first";
+  callerNumber?: string;
   error?: string;
+};
+
+type ManualDialUiState =
+  | "browser_connecting"
+  | "browser_ready"
+  | "dialing_lead"
+  | "lead_ringing"
+  | "lead_answered"
+  | "browser_answered"
+  | "bridged"
+  | "busy"
+  | "failed"
+  | "no_answer"
+  | "ended";
+
+type DebugEventEntry = {
+  id: string;
+  at: string;
+  event: string;
+  details: Record<string, string | number | boolean | null>;
 };
 
 type WebRtcTokenResponse = {
@@ -128,6 +156,7 @@ type WebRtcTokenResponse = {
 type WebRtcCall = {
   id?: string;
   state?: string;
+  prevState?: string;
   cause?: string;
   causeCode?: number;
   sipCode?: number;
@@ -153,6 +182,12 @@ type TelnyxWebRtcClient = {
   remoteElement?: HTMLMediaElement | string;
   connect: () => void;
   disconnect: () => void;
+  newCall: (params: {
+    destinationNumber: string;
+    callerNumber: string;
+    clientState?: string;
+    debug?: boolean;
+  }) => WebRtcCall;
   on: (eventName: string, callback: (event?: WebRtcNotification) => void) => TelnyxWebRtcClient;
   off?: (eventName: string) => TelnyxWebRtcClient;
 };
@@ -209,6 +244,7 @@ export default function QueuePage() {
   const [notes, setNotes] = useState("");
   const [lastSavedNotes, setLastSavedNotes] = useState("");
   const [settings, setSettings] = useState<SettingsResponse["settings"] | null>(null);
+  const [runtimeConfig, setRuntimeConfig] = useState<SettingsResponse["runtimeConfig"] | null>(null);
   const [scriptDrafts, setScriptDrafts] = useState<SettingsResponse["settings"]["scripts"] | null>(null);
   const [customCallbackAt, setCustomCallbackAt] = useState("");
   const [showScripts, setShowScripts] = useState(true);
@@ -216,6 +252,8 @@ export default function QueuePage() {
   const [callMessage, setCallMessage] = useState<string | null>(null);
   const [webrtcStatus, setWebrtcStatus] = useState("offline");
   const [micPermission, setMicPermission] = useState("unknown");
+  const [manualDialState, setManualDialState] = useState<ManualDialUiState | null>(null);
+  const [debugEvents, setDebugEvents] = useState<DebugEventEntry[]>([]);
   const [activeWebRtcCallControlId, setActiveWebRtcCallControlId] = useState<string | null>(null);
   const [pendingAttemptId, setPendingAttemptId] = useState<string | null>(null);
   const [savingOutcome, setSavingOutcome] = useState(false);
@@ -231,6 +269,7 @@ export default function QueuePage() {
   const webRtcConnectPromiseRef = useRef<Promise<void> | null>(null);
   const webRtcClientGenerationRef = useRef(0);
   const answeredWebRtcCallIdsRef = useRef<Set<string>>(new Set());
+  const callStartAttemptedRef = useRef(false);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const didInitialLeadLoadRef = useRef(false);
   const didLoadSettingsRef = useRef(false);
@@ -313,6 +352,7 @@ export default function QueuePage() {
 
       if (response.ok) {
         setSettings(payload.settings);
+        setRuntimeConfig(payload.runtimeConfig ?? null);
         setScriptDrafts(payload.settings.scripts);
       }
     }
@@ -324,6 +364,41 @@ export default function QueuePage() {
     didLoadSettingsRef.current = true;
     void loadSettings();
   }, []);
+
+  function appendDebugEvent(event: string, details: Record<string, string | number | boolean | null> = {}) {
+    setDebugEvents((current) => [
+      {
+        id: `${Date.now()}-${event}-${current.length}`,
+        at: new Date().toISOString(),
+        event,
+        details,
+      },
+      ...current,
+    ].slice(0, 20));
+  }
+
+  function setUiCallState(state: ManualDialUiState, message?: string | null) {
+    setManualDialState(state);
+    if (message !== undefined) {
+      setCallMessage(message);
+    }
+  }
+
+  function encodeAttemptClientState(attemptId: string) {
+    if (typeof window !== "undefined" && typeof window.btoa === "function") {
+      return window.btoa(JSON.stringify({ attemptId, role: "lead" }));
+    }
+
+    return "";
+  }
+
+  function getManualDialFlow() {
+    return runtimeConfig?.telnyxManualDialFlow ?? "browser_first";
+  }
+
+  function isBrowserReadyForOutboundDial() {
+    return webRtcReadyRef.current && micPermission === "granted" && webrtcStatus !== "error" && !webRtcCallRef.current;
+  }
 
 
   function promptVoicemailDetected(leadName: string, phoneNumber: string) {
@@ -349,6 +424,7 @@ export default function QueuePage() {
       ...data,
     };
 
+    appendDebugEvent(event, payload);
     console.info(JSON.stringify({ source: "browser_webrtc", ...payload }));
 
     if (!attemptId) {
@@ -366,6 +442,44 @@ export default function QueuePage() {
     }).catch(() => undefined);
   }
 
+  async function reportAttemptProgress(
+    progressState: string,
+    options?: {
+      telnyxIds?: WebRtcCall["telnyxIDs"];
+      status?: "connected" | "failed" | "canceled";
+      clientError?: string;
+      answeredAt?: string;
+      debug?: Record<string, string | number | boolean | null>;
+    },
+  ) {
+    const attemptId = pendingAttemptIdRef.current ?? latestAttempt?.id;
+
+    if (!attemptId) {
+      return;
+    }
+
+    await fetch(`/api/calls/${attemptId}`, {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        progressState,
+        status: options?.status,
+        clientError: options?.clientError,
+        answeredAt: options?.answeredAt,
+        debug: options?.debug,
+        telnyxIds: options?.telnyxIds
+          ? {
+              callControlId: options.telnyxIds.telnyxCallControlId ?? null,
+              callSessionId: options.telnyxIds.telnyxSessionId ?? null,
+              callLegId: options.telnyxIds.telnyxLegId ?? null,
+            }
+          : undefined,
+      }),
+    }).catch(() => undefined);
+  }
+
   function getWebRtcCallControlId(call?: WebRtcCall) {
     return call?.telnyxIDs?.telnyxCallControlId ?? null;
   }
@@ -375,6 +489,7 @@ export default function QueuePage() {
     webRtcConnectPromiseRef.current = null;
     webRtcReadyRef.current = false;
     answeredWebRtcCallIdsRef.current.clear();
+    callStartAttemptedRef.current = false;
 
     const call = webRtcCallRef.current;
     const client = telnyxClientRef.current;
@@ -403,6 +518,7 @@ export default function QueuePage() {
     }
 
     void logBrowserWebRtcEvent("webrtc_client_disconnected", { reason });
+    setManualDialState(null);
   }
 
   async function updateRemoteAudioState(call: WebRtcCall) {
@@ -457,12 +573,15 @@ export default function QueuePage() {
       notificationType: notification.type ?? null,
       hasCall: Boolean(notification.call),
       state: notification.call?.state ?? null,
+      previousState: notification.call?.prevState ?? null,
+      direction: notification.call?.direction ?? null,
+      browserCallId: notification.call?.id ?? null,
     });
 
     if (notification.error) {
       const message = notification.error.message;
       setWebrtcStatus("error");
-      setCallMessage(message);
+      setUiCallState("failed", message);
       await logBrowserWebRtcEvent("webrtc_error", { error: message });
       return;
     }
@@ -485,6 +604,20 @@ export default function QueuePage() {
       browserSessionId: call.telnyxIDs?.telnyxSessionId ?? null,
       direction: call.direction ?? null,
       state: call.state ?? null,
+      previousState: call.prevState ?? null,
+    });
+    await reportAttemptProgress(manualDialState ?? "browser_ready", {
+      telnyxIds: call.telnyxIDs,
+      debug: {
+        notificationType: notification.type ?? null,
+        browserCallId: call.id ?? null,
+        browserCallControlId,
+        browserSessionId: call.telnyxIDs?.telnyxSessionId ?? null,
+        browserLegId: call.telnyxIDs?.telnyxLegId ?? null,
+        callState: call.state ?? null,
+        previousState: call.prevState ?? null,
+        direction: call.direction ?? null,
+      },
     });
 
     await logBrowserWebRtcEvent("incoming_browser_call_state", {
@@ -494,7 +627,7 @@ export default function QueuePage() {
       state: call.state ?? null,
     });
 
-    if (call.state === "ringing") {
+    if (call.state === "ringing" && call.direction === "inbound") {
       await logBrowserWebRtcEvent("incoming_webrtc_call_received", {
         browserCallId: call.id ?? null,
         browserCallControlId,
@@ -507,6 +640,7 @@ export default function QueuePage() {
 
       answeredWebRtcCallIdsRef.current.add(browserCallKey);
       setWebrtcStatus("answering");
+      setUiCallState("browser_answered", "Answering incoming browser leg...");
       await logBrowserWebRtcEvent("answering_incoming_browser_leg", {
         browserCallId: call.id ?? null,
         browserCallControlId,
@@ -521,14 +655,22 @@ export default function QueuePage() {
           browserCallId: call.id ?? null,
           browserCallControlId,
         });
+        await reportAttemptProgress("browser_answered", {
+          telnyxIds: call.telnyxIDs,
+        });
       } catch (answerError) {
         const message = answerError instanceof Error ? answerError.message : "Failed to answer browser leg";
         setWebrtcStatus("error");
-        setCallMessage(message);
+        setUiCallState("failed", message);
         await logBrowserWebRtcEvent("browser_leg_answer_failed", {
           browserCallId: call.id ?? null,
           browserCallControlId,
           error: message,
+        });
+        await reportAttemptProgress("failed", {
+          telnyxIds: call.telnyxIDs,
+          clientError: message,
+          status: "failed",
         });
       }
       return;
@@ -541,6 +683,20 @@ export default function QueuePage() {
         browserCallControlId,
         state: call.state ?? null,
       });
+      if (call.direction === "outbound" && call.state === "early") {
+        setUiCallState("lead_ringing", "Lead is ringing...");
+        await reportAttemptProgress("lead_ringing", {
+          telnyxIds: call.telnyxIDs,
+        });
+      }
+      if (call.direction === "outbound" && ["active", "answered"].includes(call.state ?? "")) {
+        setUiCallState("bridged", "Lead answered. Two-way audio should be live.");
+        await reportAttemptProgress("bridged", {
+          telnyxIds: call.telnyxIDs,
+          status: "connected",
+          answeredAt: new Date().toISOString(),
+        });
+      }
       await updateRemoteAudioState(call);
     }
 
@@ -553,9 +709,32 @@ export default function QueuePage() {
         sipCode: call.sipCode ?? null,
         sipReason: call.sipReason ?? null,
       });
+      const finalState =
+        call.cause === "user_busy"
+          ? "busy"
+          : call.cause === "timeout" || call.cause === "no_answer"
+            ? "no_answer"
+            : manualDialState === "bridged" || manualDialState === "lead_answered"
+              ? "ended"
+              : "failed";
+      const finalMessage =
+        finalState === "busy"
+          ? "Lead was busy."
+          : finalState === "no_answer"
+            ? "Lead did not answer."
+            : finalState === "ended"
+              ? "Call ended."
+              : "Call failed before audio was established.";
+      setUiCallState(finalState, finalMessage);
+      await reportAttemptProgress(finalState, {
+        telnyxIds: call.telnyxIDs,
+        status: finalState === "ended" ? "canceled" : "failed",
+        clientError: finalState === "failed" ? (call.sipReason ?? call.cause ?? "Call failed") : undefined,
+      });
       setWebrtcStatus(webRtcReadyRef.current ? "ready" : "offline");
       setActiveWebRtcCallControlId(null);
       webRtcCallRef.current = null;
+      callStartAttemptedRef.current = false;
     }
   }
 
@@ -573,6 +752,7 @@ export default function QueuePage() {
         throw new Error("This browser does not expose microphone access for WebRTC.");
       }
 
+      setUiCallState("browser_connecting", "Connecting browser softphone...");
       setWebrtcStatus("checking microphone");
       const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       micStream.getTracks().forEach((track) => track.stop());
@@ -624,6 +804,7 @@ export default function QueuePage() {
             window.clearTimeout(timeout);
             webRtcReadyRef.current = true;
             setWebrtcStatus("ready");
+            setUiCallState("browser_ready", "Browser softphone connected.");
             void logBrowserWebRtcEvent("telnyx_ready", {
               credentialId: tokenPayload.credentialId ?? null,
               sipUsername: tokenPayload.sipUsername ?? null,
@@ -642,6 +823,7 @@ export default function QueuePage() {
             const message = event?.error?.message ?? "Telnyx WebRTC error";
             window.clearTimeout(timeout);
             setWebrtcStatus("error");
+            setUiCallState("failed", message);
             void logBrowserWebRtcEvent("webrtc_registration_error", { error: message });
             reject(new Error(message));
           })
@@ -661,7 +843,23 @@ export default function QueuePage() {
       if (webRtcConnectPromiseRef.current === connectPromise) {
         webRtcConnectPromiseRef.current = null;
       }
+      if (connectError instanceof Error && connectError.message.toLowerCase().includes("microphone")) {
+        setMicPermission("denied");
+      }
       throw connectError;
+    }
+  }
+
+  async function connectBrowserSoftphone() {
+    setError(null);
+
+    try {
+      await ensureTelnyxWebRtcReady();
+      setUiCallState("browser_ready", "Browser softphone connected.");
+    } catch (connectError) {
+      const message = connectError instanceof Error ? connectError.message : "Could not connect browser softphone";
+      setError(message);
+      setUiCallState("failed", message);
     }
   }
 
@@ -759,15 +957,26 @@ export default function QueuePage() {
   }, [latestAttempt, latestAttempt?.id, latestAttempt?.status]);
 
   useEffect(() => {
+    const progressState = latestAttempt?.rawSummaryJson?.progressState;
+
+    if (!progressState) {
+      return;
+    }
+
+    setManualDialState(progressState as ManualDialUiState);
+  }, [latestAttempt?.id, latestAttempt?.rawSummaryJson?.progressState]);
+
+  useEffect(() => {
     if (!latestAttempt || !["voicemail_detected", "completed", "failed", "canceled"].includes(latestAttempt.status)) {
       return;
     }
 
     setPendingAttemptId(null);
     locallyEndedAttemptIdsRef.current.delete(latestAttempt.id);
+    callStartAttemptedRef.current = false;
 
     if (latestAttempt.status === "voicemail_detected") {
-      setCallMessage("Voicemail detected. Call ended automatically.");
+      setUiCallState("ended", "Voicemail detected. Call ended automatically.");
       if (!promptedVoicemailAttemptIdsRef.current.has(latestAttempt.id) && selectedLead) {
         promptedVoicemailAttemptIdsRef.current.add(latestAttempt.id);
         promptVoicemailDetected(selectedLead.businessName ?? "This lead", selectedLead.phoneNumber);
@@ -776,16 +985,16 @@ export default function QueuePage() {
     }
 
     if (latestAttempt.status === "completed") {
-      setCallMessage("Call completed.");
+      setUiCallState("ended", "Call completed.");
       return;
     }
 
     if (latestAttempt.status === "canceled") {
-      setCallMessage("Call canceled.");
+      setUiCallState("ended", "Call canceled.");
       return;
     }
 
-    setCallMessage("Call ended.");
+    setUiCallState("failed", "Call ended.");
   }, [latestAttempt, selectedLead]);
 
   useEffect(() => {
@@ -799,7 +1008,7 @@ export default function QueuePage() {
         : "Browser softphone leg failed.";
 
     setError(message);
-    setCallMessage(message);
+    setUiCallState("failed", message);
   }, [latestAttempt?.id, latestAttempt?.rawSummaryJson?.browserLegFailed, latestAttempt?.rawSummaryJson?.browserLegFailureReason]);
 
   useEffect(() => {
@@ -876,9 +1085,21 @@ export default function QueuePage() {
       return;
     }
 
+    if (callStartAttemptedRef.current) {
+      return;
+    }
+
+    if (!isBrowserReadyForOutboundDial()) {
+      const message = "Browser softphone is not ready. Connect it before dialing.";
+      setError(message);
+      setUiCallState("failed", message);
+      return;
+    }
+
     setError(null);
-    setCallMessage("Starting outbound call...");
+    setUiCallState("dialing_lead", "Starting outbound call...");
     setCalling(true);
+    callStartAttemptedRef.current = true;
 
     try {
       const createResponse = await fetch(`/api/leads/${selectedLead.id}/call`, {
@@ -895,51 +1116,84 @@ export default function QueuePage() {
 
       if (!createResponse.ok || !createPayload.attempt) {
         setError(createPayload.error ?? "Call initiation failed");
-        setCallMessage(createPayload.error ?? "Call initiation failed");
+        setUiCallState("failed", createPayload.error ?? "Call initiation failed");
+        callStartAttemptedRef.current = false;
         return;
       }
 
       pendingAttemptIdRef.current = createPayload.attempt.id;
       setPendingAttemptId(createPayload.attempt.id);
-      setCallMessage("Preparing browser softphone...");
-
-      await ensureTelnyxWebRtcReady();
-      await logBrowserWebRtcEvent("telnyx_ready_for_attempt", {
+      await logBrowserWebRtcEvent("browser_ready_before_outbound_call", {
         callAttemptId: createPayload.attempt.id,
+        manualDialFlow: createPayload.manualDialFlow ?? getManualDialFlow(),
       });
+      await reportAttemptProgress("browser_ready");
 
-      setCallMessage("Browser softphone ready. Starting outbound call...");
+      if ((createPayload.manualDialFlow ?? getManualDialFlow()) === "browser_first") {
+        const client = telnyxClientRef.current;
 
-      const response = await fetch(`/api/leads/${selectedLead.id}/call`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          action: "start_pstn",
-          attemptId: createPayload.attempt.id,
-          webrtcReady: true,
-        }),
-      });
+        if (!client) {
+          throw new Error("Telnyx WebRTC client is not connected.");
+        }
 
-      const payload = (await response.json()) as CallBootstrapResponse;
+        if (!createPayload.callerNumber) {
+          throw new Error("Outbound caller ID is missing from runtime configuration.");
+        }
 
-      if (!response.ok || !payload.attempt) {
-        setError(payload.error ?? "Call initiation failed");
-        setCallMessage(payload.error ?? "Call initiation failed");
-        return;
+        const clientState = encodeAttemptClientState(createPayload.attempt.id);
+        setUiCallState("dialing_lead", "Dialing lead from the browser softphone...");
+        await reportAttemptProgress("dialing_lead");
+        await logBrowserWebRtcEvent("placing_browser_originated_outbound_call", {
+          callAttemptId: createPayload.attempt.id,
+          destinationNumber: selectedLead.phoneNumber,
+          callerNumber: createPayload.callerNumber ?? null,
+        });
+
+        const call = client.newCall({
+          destinationNumber: selectedLead.phoneNumber,
+          callerNumber: createPayload.callerNumber,
+          clientState,
+          debug: true,
+        });
+
+        webRtcCallRef.current = call;
+        await logBrowserWebRtcEvent("browser_originated_outbound_call_created", {
+          browserCallId: call.id ?? null,
+          direction: call.direction ?? null,
+          state: call.state ?? null,
+        });
+      } else {
+        const response = await fetch(`/api/leads/${selectedLead.id}/call`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            action: "start_pstn",
+            attemptId: createPayload.attempt.id,
+            webrtcReady: true,
+          }),
+        });
+
+        const payload = (await response.json()) as CallBootstrapResponse;
+
+        if (!response.ok || !payload.attempt) {
+          setError(payload.error ?? "Call initiation failed");
+          setUiCallState("failed", payload.error ?? "Call initiation failed");
+          callStartAttemptedRef.current = false;
+          return;
+        }
+
+        setCallMessage("Outbound call started. Browser softphone is waiting for bridge...");
       }
 
-      await logBrowserWebRtcEvent("browser_ready_before_pstn_call", {
-        callAttemptId: payload.attempt.id,
-      });
-      setCallMessage("Outbound call started. Browser softphone is waiting for bridge...");
       await refreshLeads();
     } catch (callError) {
       const message = callError instanceof Error ? callError.message : "Call initiation failed";
 
       setError(message);
-      setCallMessage(message);
+      setUiCallState("failed", message);
+      callStartAttemptedRef.current = false;
       if (message.toLowerCase().includes("microphone")) {
         setMicPermission("denied");
       }
@@ -957,7 +1211,7 @@ export default function QueuePage() {
 
     locallyEndedAttemptIdsRef.current.add(attemptId);
     setPendingAttemptId(null);
-    setCallMessage("Ending call...");
+    setUiCallState("ended", "Ending call...");
 
     try {
       if (webRtcCallRef.current) {
@@ -966,6 +1220,9 @@ export default function QueuePage() {
           browserCallControlId: getWebRtcCallControlId(webRtcCallRef.current),
         });
       }
+      await reportAttemptProgress("ended", {
+        status: "canceled",
+      });
 
       const response = await fetch(`/api/calls/${attemptId}`, {
         method: "PATCH",
@@ -983,10 +1240,11 @@ export default function QueuePage() {
       }
 
       await refreshLeads();
+      callStartAttemptedRef.current = false;
     } catch (hangupError) {
       const message = hangupError instanceof Error ? hangupError.message : "Could not end call";
       setError(message);
-      setCallMessage(message);
+      setUiCallState("failed", message);
     }
   }
 
@@ -1108,9 +1366,19 @@ export default function QueuePage() {
     niche: selectedLead?.niche ?? "",
   };
 
-  const displayedCallStatus = latestAttempt?.status ?? "idle";
+  const displayedCallStatus = manualDialState ?? latestAttempt?.rawSummaryJson?.progressState ?? latestAttempt?.status ?? "idle";
   const latestAttemptDismissed = latestAttempt ? locallyEndedAttemptIdsRef.current.has(latestAttempt.id) : false;
-  const callInProgress = Boolean(latestAttempt && !latestAttemptDismissed && ["dialing", "connected"].includes(latestAttempt.status));
+  const callInProgress = Boolean(
+    (latestAttempt && !latestAttemptDismissed && ["dialing", "connected"].includes(latestAttempt.status)) ||
+      (manualDialState && !["busy", "failed", "no_answer", "ended"].includes(manualDialState)),
+  );
+  const softphoneReady = isBrowserReadyForOutboundDial();
+  const browserFirstFlow = getManualDialFlow() === "browser_first";
+  const callButtonDisabled =
+    calling ||
+    callInProgress ||
+    !selectedLead ||
+    (browserFirstFlow && (!softphoneReady || !runtimeConfig?.telnyxWebrtcCredentialConfigured));
 
   return (
     <div className="space-y-4">
@@ -1126,6 +1394,26 @@ export default function QueuePage() {
       </div>
 
       {error ? <p className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
+      {browserFirstFlow && !runtimeConfig?.telnyxWebrtcCredentialConfigured ? (
+        <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          WebRTC not connected: Telnyx WebRTC credential is not configured for browser-first dialing.
+        </p>
+      ) : null}
+      {browserFirstFlow && runtimeConfig?.telnyxWebrtcCredentialConfigured && !softphoneReady ? (
+        <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          WebRTC not connected: connect the browser softphone before dialing. Current mic permission: {micPermission}.
+        </p>
+      ) : null}
+      {micPermission === "denied" ? (
+        <p className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
+          Microphone blocked: browser softphone cannot answer or place calls until microphone access is granted.
+        </p>
+      ) : null}
+      {manualDialState === "failed" && latestAttempt?.answeredAt ? (
+        <p className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
+          Lead answered but browser audio was not established cleanly.
+        </p>
+      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-12">
         <Card className="xl:col-span-3">
@@ -1180,7 +1468,15 @@ export default function QueuePage() {
                 </div>
 
                 <div className="flex flex-wrap gap-2">
-                  <Button disabled={callInProgress} loading={calling} onClick={() => void startCall()}>
+                  <Button
+                    disabled={callInProgress || calling || (browserFirstFlow ? softphoneReady || webrtcStatus === "registering" : false)}
+                    loading={webrtcStatus === "checking microphone" || webrtcStatus === "requesting token" || webrtcStatus === "registering"}
+                    onClick={() => void connectBrowserSoftphone()}
+                    variant="outline"
+                  >
+                    Connect softphone
+                  </Button>
+                  <Button disabled={callButtonDisabled} loading={calling} onClick={() => void startCall()}>
                     <PhoneCall className="mr-2 h-4 w-4" />
                     {calling ? "Starting..." : callInProgress ? "Call Live" : "Call"}
                   </Button>
@@ -1262,10 +1558,14 @@ export default function QueuePage() {
                   </CardHeader>
                   <CardContent className="space-y-2 text-sm">
                     <p>
-                      <span className="font-medium">Outbound path:</span> Telnyx Call Control
+                      <span className="font-medium">Outbound path:</span>{" "}
+                      {browserFirstFlow ? "Browser-originated Telnyx WebRTC -> PSTN" : "Telnyx Call Control PSTN-first fallback"}
                     </p>
                     <p>
                       <span className="font-medium">Browser WebRTC:</span> {webrtcStatus}
+                    </p>
+                    <p>
+                      <span className="font-medium">Manual dial flow:</span> {getManualDialFlow()}
                     </p>
                     <p>
                       <span className="font-medium">Microphone:</span> {micPermission}
@@ -1344,6 +1644,23 @@ export default function QueuePage() {
                             <p>Agent Call Control ID: {latestAttempt?.telnyxAgentCallControlId ?? "-"}</p>
                             <p>Agent Leg ID: {latestAttempt?.telnyxAgentCallLegId ?? "-"}</p>
                             <p>Session ID: {latestAttempt?.telnyxCallSessionId ?? "-"}</p>
+                          </div>
+                        </AccordionContent>
+                      </AccordionItem>
+                      <AccordionItem value="events">
+                        <AccordionTrigger>Last 20 browser call events</AccordionTrigger>
+                        <AccordionContent>
+                          <div className="space-y-2 text-xs">
+                            {debugEvents.length === 0 ? <p>No browser events captured yet.</p> : null}
+                            {debugEvents.map((entry) => (
+                              <div className="rounded-md border border-slate-200 bg-white p-2" key={entry.id}>
+                                <p className="font-medium">{entry.event}</p>
+                                <p className="text-slate-500">{format(new Date(entry.at), "HH:mm:ss")}</p>
+                                <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-[11px] text-slate-600">
+                                  {JSON.stringify(entry.details, null, 2)}
+                                </pre>
+                              </div>
+                            ))}
                           </div>
                         </AccordionContent>
                       </AccordionItem>

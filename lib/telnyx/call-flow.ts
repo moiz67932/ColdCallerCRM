@@ -4,9 +4,11 @@ import { env } from "@/lib/env";
 import { logError, logInfo } from "@/lib/logger";
 import { prisma } from "@/lib/workstation-db";
 import { getAppSettings } from "@/lib/settings";
+import { encodeClientState } from "@/lib/telnyx/client-state";
 import {
   getOutboundCallerId,
   getTelnyxConnectionId,
+  getTelnyxManualDialFlow,
   getTelnyxTelephonyCredentialId,
   getVoiceWebhookUrl,
   isPublicWebhookBaseUrlConfigured,
@@ -15,36 +17,8 @@ import { getTelnyxClient } from "@/lib/telnyx/client";
 
 const ACTIVE_CALL_STATUSES: CallStatus[] = ["dialing", "connected"];
 
-type CallClientState = {
-  attemptId: string;
-  role: "agent" | "lead";
-};
-
 function uniqueCallControlIds(values: Array<string | null | undefined>) {
   return [...new Set(values.filter((value): value is string => Boolean(value)))];
-}
-
-export function encodeClientState(state: CallClientState) {
-  return Buffer.from(JSON.stringify(state), "utf8").toString("base64");
-}
-
-export function decodeClientState(value?: string | null): CallClientState | null {
-  if (!value) {
-    return null;
-  }
-
-  try {
-    const decoded = Buffer.from(value, "base64").toString("utf8");
-    const parsed = JSON.parse(decoded) as CallClientState;
-
-    if (!parsed.attemptId || (parsed.role !== "agent" && parsed.role !== "lead")) {
-      return null;
-    }
-
-    return parsed;
-  } catch {
-    return null;
-  }
 }
 
 export async function ensureNoActiveCallAttempt(leadId: string) {
@@ -76,6 +50,15 @@ export async function createOutboundCallAttempt(leadId: string) {
       status: "dialing",
       startedAt: new Date(),
       telnyxConnectionId: getTelnyxConnectionId(),
+      rawSummaryJson: {
+        manualDialFlow: getTelnyxManualDialFlow(),
+        progressState: getTelnyxManualDialFlow() === "browser_first" ? "browser_connecting" : "dialing_lead",
+        progressUpdatedAt: new Date().toISOString(),
+        browserAnsweredTimeoutCheck:
+          getTelnyxManualDialFlow() === "browser_first" ? "not_applicable_direct_browser_originated_call" : "pending",
+        bridgeTimeoutCheck:
+          getTelnyxManualDialFlow() === "browser_first" ? "not_applicable_direct_browser_originated_call" : "pending",
+      },
     },
   });
 
@@ -419,4 +402,8 @@ export function ensureTelnyxConfigured() {
 
 export function canReceiveTelnyxVoiceWebhooks() {
   return isPublicWebhookBaseUrlConfigured();
+}
+
+export function isBrowserFirstManualDialFlow() {
+  return getTelnyxManualDialFlow() === "browser_first";
 }

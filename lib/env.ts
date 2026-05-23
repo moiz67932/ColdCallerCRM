@@ -32,6 +32,7 @@ const envSchema = z
     TELNYX_TELEPHONY_CREDENTIAL_ID: z.string().optional(),
     TELNYX_FROM_NUMBER: z.string().optional(),
     TELNYX_MESSAGING_FROM_NUMBER: z.string().optional(),
+    TELNYX_MANUAL_DIAL_FLOW: z.enum(["browser_first", "pstn_first"]).default("browser_first"),
     TELNYX_PUBLIC_KEY: z.string().optional(),
     NEXT_PUBLIC_APP_NAME: z.string().default("ColdCaller CRM"),
     APP_BASE_URL: z.string().url().optional(),

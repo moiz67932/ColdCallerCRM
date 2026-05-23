@@ -222,3 +222,7 @@ export function getWebhookBaseUrlIssue() {
 export function getOutboundCallerId() {
   return requireEnv("TELNYX_FROM_NUMBER");
 }
+
+export function getTelnyxManualDialFlow() {
+  return env.TELNYX_MANUAL_DIAL_FLOW === "pstn_first" ? "pstn_first" : "browser_first";
+}

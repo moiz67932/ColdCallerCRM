@@ -38,6 +38,7 @@ export async function GET(request: NextRequest) {
       telnyxWebrtcCredentialConfigured: Boolean(env.TELNYX_TELEPHONY_CREDENTIAL_ID),
       telnyxFromNumber: env.TELNYX_FROM_NUMBER ? `${env.TELNYX_FROM_NUMBER.slice(0, 5)}...` : null,
       telnyxMessagingFromConfigured: Boolean(env.TELNYX_MESSAGING_FROM_NUMBER),
+      telnyxManualDialFlow: env.TELNYX_MANUAL_DIAL_FLOW,
       signatureVerificationConfigured:
         Boolean(env.TELNYX_PUBLIC_KEY) || env.TELNYX_SKIP_SIGNATURE_VERIFICATION === "true",
       telnyxExpectedVoiceWebhookUrl: expectedVoiceWebhookUrl,

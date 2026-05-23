@@ -10,10 +10,12 @@ import {
   createOutboundCallAttempt,
   ensureTelnyxConfigured,
   initiateOutboundCall,
+  isBrowserFirstManualDialFlow,
 } from "@/lib/telnyx/call-flow";
 import {
   checkVoiceWebhookReachability,
   getTelnyxErrorDiagnostics,
+  getOutboundCallerId,
   getWebhookBaseUrlIssue,
 } from "@/lib/telnyx/helpers";
 import { prisma } from "@/lib/workstation-db";
@@ -60,6 +62,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     attemptId?: string;
     webrtcReady?: boolean;
   };
+  const manualDialFlow = isBrowserFirstManualDialFlow() ? "browser_first" : "pstn_first";
 
   try {
     logInfo("Handling lead call bootstrap request", {
@@ -68,9 +71,14 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       leadId: id,
       action: payload.action ?? "create_attempt",
       activeAttemptId: payload.attemptId ?? null,
+      manualDialFlow,
     });
 
     if (payload.action === "start_pstn") {
+      if (manualDialFlow === "browser_first") {
+        return jsonError("PSTN-first start is disabled while TELNYX_MANUAL_DIAL_FLOW=browser_first.", 409);
+      }
+
       if (!payload.attemptId || !payload.webrtcReady) {
         return jsonError("Browser softphone was not ready.", 400);
       }
@@ -105,6 +113,8 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       return NextResponse.json({
         attempt,
         lead: existingAttempt.lead,
+        manualDialFlow,
+        callerNumber: getOutboundCallerId(),
       });
     }
 
@@ -116,11 +126,14 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       leadId: id,
       attemptId: attempt.id,
       activeAttemptId: attempt.id,
+      manualDialFlow,
     });
 
     return NextResponse.json({
       attempt,
       lead,
+      manualDialFlow,
+      callerNumber: getOutboundCallerId(),
     });
   } catch (error) {
     const message = formatUnknownError(error);

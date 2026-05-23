@@ -98,9 +98,17 @@ const updateCallAttemptSchema = z
     clientError: z.string().optional(),
     answeredAt: z.string().datetime().optional(),
     debug: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
+    progressState: z.string().optional(),
+    telnyxIds: z
+      .object({
+        callControlId: z.string().nullish(),
+        callSessionId: z.string().nullish(),
+        callLegId: z.string().nullish(),
+      })
+      .optional(),
   })
-  .refine((value) => Boolean(value.status || value.clientError || value.debug), {
-    message: "A status update, client error, or debug payload is required",
+  .refine((value) => Boolean(value.status || value.clientError || value.debug || value.progressState || value.telnyxIds), {
+    message: "A status update, client error, progress update, Telnyx ID update, or debug payload is required",
   });
 
 export async function PATCH(request: NextRequest, context: { params: Promise<{ id: string }> }) {
@@ -132,6 +140,22 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
           ...(payload.debug ? { clientDebug: payload.debug } : {}),
         })
       : undefined;
+    const summaryWithProgress =
+      payload.progressState || payload.telnyxIds
+        ? ({
+            ...(summaryWithClientError ?? existingSummary ?? {}),
+            ...(payload.progressState ? { progressState: payload.progressState, progressUpdatedAt: new Date().toISOString() } : {}),
+            ...(payload.telnyxIds
+              ? {
+                  browserLegTelnyxIds: {
+                    callControlId: payload.telnyxIds.callControlId ?? null,
+                    callSessionId: payload.telnyxIds.callSessionId ?? null,
+                    callLegId: payload.telnyxIds.callLegId ?? null,
+                  },
+                }
+              : {}),
+          } as JsonObject)
+        : summaryWithClientError;
 
     let updated = attempt;
 
@@ -141,6 +165,16 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
         leadCallControlId: attempt.telnyxCallControlId,
         browserCallControlId: attempt.telnyxAgentCallControlId,
         ...payload.debug,
+      });
+    }
+
+    if (payload.progressState || payload.telnyxIds) {
+      logInfo("Browser WebRTC progress update", {
+        callAttemptId: id,
+        progressState: payload.progressState,
+        browserCallControlId: payload.telnyxIds?.callControlId ?? attempt.telnyxAgentCallControlId ?? attempt.telnyxCallControlId,
+        browserCallSessionId: payload.telnyxIds?.callSessionId ?? attempt.telnyxCallSessionId,
+        browserCallLegId: payload.telnyxIds?.callLegId ?? attempt.telnyxAgentCallLegId ?? attempt.telnyxCallLegId,
       });
     }
 
@@ -170,18 +204,24 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
             payload.status === "connected"
               ? updated.endedAt
               : updated.endedAt ?? new Date(),
-          rawSummaryJson: summaryWithClientError,
+          telnyxCallControlId: payload.telnyxIds?.callControlId ?? updated.telnyxCallControlId,
+          telnyxCallSessionId: payload.telnyxIds?.callSessionId ?? updated.telnyxCallSessionId,
+          telnyxCallLegId: payload.telnyxIds?.callLegId ?? updated.telnyxCallLegId,
+          rawSummaryJson: summaryWithProgress,
         },
       });
 
       if (payload.status === "connected") {
         await startAttemptRecording(updated.id);
       }
-    } else if (summaryWithClientError) {
+    } else if (summaryWithProgress || payload.telnyxIds) {
       updated = await prisma.callAttempt.update({
         where: { id },
         data: {
-          rawSummaryJson: summaryWithClientError,
+          telnyxCallControlId: payload.telnyxIds?.callControlId ?? updated.telnyxCallControlId,
+          telnyxCallSessionId: payload.telnyxIds?.callSessionId ?? updated.telnyxCallSessionId,
+          telnyxCallLegId: payload.telnyxIds?.callLegId ?? updated.telnyxCallLegId,
+          rawSummaryJson: summaryWithProgress,
         },
       });
     }
