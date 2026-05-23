@@ -357,6 +357,11 @@ async function handleAnsweredEvent(attempt: ExistingCallAttempt, event: TelnyxWe
   }
 
   if (role === "agent") {
+    logInfo("browser_call_answered_webhook_received", {
+      callAttemptId: syncedAttempt.id,
+      leadCallControlId: syncedAttempt.telnyxCallControlId,
+      browserCallControlId: syncedAttempt.telnyxAgentCallControlId,
+    });
     await bridgeAttemptLegs(syncedAttempt.id);
   }
 }
@@ -411,6 +416,12 @@ async function handleGreetingEnded(attempt: ExistingCallAttempt, event: TelnyxWe
 
 async function handleBridgedEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
   const syncedAttempt = await syncAttemptFromEvent(attempt, event);
+
+  logInfo("call.bridged_received", {
+    callAttemptId: syncedAttempt.id,
+    leadCallControlId: syncedAttempt.telnyxCallControlId,
+    browserCallControlId: syncedAttempt.telnyxAgentCallControlId,
+  });
 
   await updateAttemptStatus(syncedAttempt, "connected", {
     answeredAt: syncedAttempt.answeredAt ?? getEventTimestamp(event),
@@ -579,6 +590,37 @@ async function handleHangupEvent(attempt: ExistingCallAttempt, event: TelnyxWebh
   const payload = (event.data.payload ?? {}) as Record<string, unknown>;
   const clientState = decodeClientState(getPayloadValue(payload, "client_state"));
   const role = getCallRole(syncedAttempt, getPayloadValue(payload, "call_control_id"), clientState?.role ?? null);
+  const hangupCause = getPayloadValue(payload, "hangup_cause");
+
+  if (role === "agent" && syncedAttempt.telnyxCallControlId && !syncedAttempt.endedAt) {
+    const existingSummary =
+      syncedAttempt.rawSummaryJson && typeof syncedAttempt.rawSummaryJson === "object" && !Array.isArray(syncedAttempt.rawSummaryJson)
+        ? (syncedAttempt.rawSummaryJson as JsonObject)
+        : {};
+
+    await prisma.callAttempt.update({
+      where: { id: syncedAttempt.id },
+      data: {
+        rawSummaryJson: {
+          ...existingSummary,
+          browserLegFailed: true,
+          browserLegFailureReason: hangupCause ?? "unknown",
+          browserLegFailureAt: getEventTimestamp(event).toISOString(),
+          browserLegFailureMessage: hangupCause === "user_busy" ? "Browser softphone was not ready." : "Browser softphone leg ended.",
+        },
+      },
+    });
+
+    logInfo("browser_leg_failed", {
+      callAttemptId: syncedAttempt.id,
+      leadCallControlId: syncedAttempt.telnyxCallControlId,
+      browserCallControlId: syncedAttempt.telnyxAgentCallControlId,
+      hangupCause,
+      message: hangupCause === "user_busy" ? "Browser softphone was not ready." : "Browser softphone leg ended.",
+    });
+
+    return;
+  }
 
   await prisma.callAttempt.update({
     where: { id: syncedAttempt.id },

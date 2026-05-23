@@ -250,7 +250,7 @@ export async function bridgeAttemptLegs(callAttemptId: string) {
     return false;
   }
 
-  logInfo("Requesting browser WebRTC to PSTN bridge", {
+  logInfo("bridge_request_sent", {
     callAttemptId,
     leadCallControlId: attempt.telnyxCallControlId,
     browserCallControlId: attempt.telnyxAgentCallControlId,

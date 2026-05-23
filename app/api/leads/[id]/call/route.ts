@@ -5,12 +5,18 @@ import { requireApiAuth } from "@/lib/api-auth";
 import { formatUnknownError, getClientIp, jsonError } from "@/lib/http";
 import { consumeRateLimit } from "@/lib/rate-limit";
 import { logError, logInfo } from "@/lib/logger";
-import { canReceiveTelnyxVoiceWebhooks, createAndInitiateOutboundCall, ensureTelnyxConfigured } from "@/lib/telnyx/call-flow";
+import {
+  canReceiveTelnyxVoiceWebhooks,
+  createOutboundCallAttempt,
+  ensureTelnyxConfigured,
+  initiateOutboundCall,
+} from "@/lib/telnyx/call-flow";
 import {
   checkVoiceWebhookReachability,
   getTelnyxErrorDiagnostics,
   getWebhookBaseUrlIssue,
 } from "@/lib/telnyx/helpers";
+import { prisma } from "@/lib/workstation-db";
 
 export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const requestId = request.headers.get("x-vercel-id") ?? randomUUID();
@@ -49,22 +55,68 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   }
 
   const { id } = await context.params;
+  const payload = (await request.json().catch(() => ({}))) as {
+    action?: "create_attempt" | "start_pstn";
+    attemptId?: string;
+    webrtcReady?: boolean;
+  };
 
   try {
     logInfo("Handling lead call bootstrap request", {
       requestId,
       ip,
       leadId: id,
+      action: payload.action ?? "create_attempt",
+      activeAttemptId: payload.attemptId ?? null,
     });
 
-    const { attempt, lead } = await createAndInitiateOutboundCall(id);
+    if (payload.action === "start_pstn") {
+      if (!payload.attemptId || !payload.webrtcReady) {
+        return jsonError("Browser softphone was not ready.", 400);
+      }
 
-    logInfo("Created and initiated outbound Telnyx call", {
+      const existingAttempt = await prisma.callAttempt.findUnique({
+        where: { id: payload.attemptId },
+        include: { lead: true },
+      });
+
+      if (!existingAttempt || existingAttempt.leadId !== id) {
+        return jsonError("Call attempt not found for this lead.", 404);
+      }
+
+      logInfo("Browser WebRTC ready confirmed; starting PSTN dial", {
+        requestId,
+        ip,
+        leadId: id,
+        activeAttemptId: existingAttempt.id,
+        telnyxReadyForAttempt: true,
+      });
+
+      const attempt = await initiateOutboundCall(existingAttempt.id);
+
+      logInfo("Created and initiated outbound Telnyx call", {
+        requestId,
+        ip,
+        leadId: id,
+        attemptId: attempt.id,
+        callControlId: attempt.telnyxCallControlId,
+      });
+
+      return NextResponse.json({
+        attempt,
+        lead: existingAttempt.lead,
+      });
+    }
+
+    const attempt = await createOutboundCallAttempt(id);
+    const lead = await prisma.lead.findUnique({ where: { id } });
+
+    logInfo("Created outbound call attempt awaiting browser WebRTC readiness", {
       requestId,
       ip,
       leadId: id,
       attemptId: attempt.id,
-      callControlId: attempt.telnyxCallControlId,
+      activeAttemptId: attempt.id,
     });
 
     return NextResponse.json({

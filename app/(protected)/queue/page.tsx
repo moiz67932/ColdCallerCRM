@@ -38,6 +38,11 @@ type CallAttempt = {
   telnyxAgentCallLegId?: string | null;
   telnyxCallSessionId?: string | null;
   amdResult?: string | null;
+  rawSummaryJson?: {
+    browserLegFailed?: boolean;
+    browserLegFailureReason?: string | null;
+    clientDebug?: Record<string, string | number | boolean | null>;
+  } | null;
   recording?: {
     telnyxRecordingId?: string;
     downloadUrl?: string | null;
@@ -340,6 +345,7 @@ export default function QueuePage() {
     const attemptId = pendingAttemptIdRef.current ?? latestAttempt?.id;
     const payload = {
       event,
+      activeAttemptId: attemptId ?? null,
       ...data,
     };
 
@@ -406,7 +412,7 @@ export default function QueuePage() {
 
     if (remoteAudio && call.remoteStream && remoteAudio.srcObject !== call.remoteStream) {
       remoteAudio.srcObject = call.remoteStream;
-      await logBrowserWebRtcEvent("remote_stream_attached", {
+      await logBrowserWebRtcEvent("audio_remote_stream_attached", {
         browserCallControlId,
         remoteTrackCount,
       });
@@ -419,12 +425,14 @@ export default function QueuePage() {
           logBrowserWebRtcEvent("remote_audio_play_success", {
             browserCallControlId,
             remoteTrackCount,
+            audio_play_success_or_failure: "success",
           }),
         )
         .catch((playError) => {
           void logBrowserWebRtcEvent("remote_audio_play_failed", {
             browserCallControlId,
             remoteTrackCount,
+            audio_play_success_or_failure: "failure",
             error: playError instanceof Error ? playError.message : "unknown",
           });
         });
@@ -487,6 +495,12 @@ export default function QueuePage() {
     });
 
     if (call.state === "ringing") {
+      await logBrowserWebRtcEvent("incoming_webrtc_call_received", {
+        browserCallId: call.id ?? null,
+        browserCallControlId,
+        direction: call.direction ?? null,
+      });
+
       if (answeredWebRtcCallIdsRef.current.has(browserCallKey)) {
         return;
       }
@@ -494,6 +508,10 @@ export default function QueuePage() {
       answeredWebRtcCallIdsRef.current.add(browserCallKey);
       setWebrtcStatus("answering");
       await logBrowserWebRtcEvent("answering_incoming_browser_leg", {
+        browserCallId: call.id ?? null,
+        browserCallControlId,
+      });
+      await logBrowserWebRtcEvent("incoming_webrtc_call_answer_called", {
         browserCallId: call.id ?? null,
         browserCallControlId,
       });
@@ -518,6 +536,11 @@ export default function QueuePage() {
 
     if (["active", "answered", "early", "held"].includes(call.state ?? "")) {
       setWebrtcStatus("in-call");
+      await logBrowserWebRtcEvent("incoming_webrtc_call_active", {
+        browserCallId: call.id ?? null,
+        browserCallControlId,
+        state: call.state ?? null,
+      });
       await updateRemoteAudioState(call);
     }
 
@@ -536,12 +559,8 @@ export default function QueuePage() {
     }
   }
 
-  async function ensureTelnyxWebRtcReady(options: { fresh?: boolean } = {}) {
-    if (options.fresh && telnyxClientRef.current) {
-      disconnectTelnyxWebRtcClient("fresh_call_requested");
-    }
-
-    if (webRtcReadyRef.current && telnyxClientRef.current && !options.fresh) {
+  async function ensureTelnyxWebRtcReady() {
+    if (webRtcReadyRef.current && telnyxClientRef.current) {
       return webRtcConnectPromiseRef.current ?? Promise.resolve();
     }
 
@@ -606,6 +625,10 @@ export default function QueuePage() {
             webRtcReadyRef.current = true;
             setWebrtcStatus("ready");
             void logBrowserWebRtcEvent("telnyx_ready", {
+              credentialId: tokenPayload.credentialId ?? null,
+              sipUsername: tokenPayload.sipUsername ?? null,
+            });
+            void logBrowserWebRtcEvent("telnyx_ready_for_attempt", {
               credentialId: tokenPayload.credentialId ?? null,
               sipUsername: tokenPayload.sipUsername ?? null,
             });
@@ -766,6 +789,20 @@ export default function QueuePage() {
   }, [latestAttempt, selectedLead]);
 
   useEffect(() => {
+    if (!latestAttempt?.rawSummaryJson?.browserLegFailed) {
+      return;
+    }
+
+    const message =
+      latestAttempt.rawSummaryJson.browserLegFailureReason === "user_busy"
+        ? "Browser softphone was not ready."
+        : "Browser softphone leg failed.";
+
+    setError(message);
+    setCallMessage(message);
+  }, [latestAttempt?.id, latestAttempt?.rawSummaryJson?.browserLegFailed, latestAttempt?.rawSummaryJson?.browserLegFailureReason]);
+
+  useEffect(() => {
     if (!selectedLead || notes === lastSavedNotes) {
       return;
     }
@@ -844,11 +881,45 @@ export default function QueuePage() {
     setCalling(true);
 
     try {
-      await ensureTelnyxWebRtcReady({ fresh: true });
+      const createResponse = await fetch(`/api/leads/${selectedLead.id}/call`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "create_attempt",
+        }),
+      });
+
+      const createPayload = (await createResponse.json()) as CallBootstrapResponse;
+
+      if (!createResponse.ok || !createPayload.attempt) {
+        setError(createPayload.error ?? "Call initiation failed");
+        setCallMessage(createPayload.error ?? "Call initiation failed");
+        return;
+      }
+
+      pendingAttemptIdRef.current = createPayload.attempt.id;
+      setPendingAttemptId(createPayload.attempt.id);
+      setCallMessage("Preparing browser softphone...");
+
+      await ensureTelnyxWebRtcReady();
+      await logBrowserWebRtcEvent("telnyx_ready_for_attempt", {
+        callAttemptId: createPayload.attempt.id,
+      });
+
       setCallMessage("Browser softphone ready. Starting outbound call...");
 
       const response = await fetch(`/api/leads/${selectedLead.id}/call`, {
         method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "start_pstn",
+          attemptId: createPayload.attempt.id,
+          webrtcReady: true,
+        }),
       });
 
       const payload = (await response.json()) as CallBootstrapResponse;
@@ -859,8 +930,6 @@ export default function QueuePage() {
         return;
       }
 
-      pendingAttemptIdRef.current = payload.attempt.id;
-      setPendingAttemptId(payload.attempt.id);
       await logBrowserWebRtcEvent("browser_ready_before_pstn_call", {
         callAttemptId: payload.attempt.id,
       });
