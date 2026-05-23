@@ -172,6 +172,10 @@ export function getTelnyxConnectionId() {
   return requireEnv("TELNYX_CONNECTION_ID");
 }
 
+export function getTelnyxTelephonyCredentialId() {
+  return requireEnv("TELNYX_TELEPHONY_CREDENTIAL_ID");
+}
+
 export function isPublicWebhookBaseUrlConfigured() {
   const baseUrl = normalizeOptionalValue(env.APP_BASE_URL);
 

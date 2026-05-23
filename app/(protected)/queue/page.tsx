@@ -113,6 +113,40 @@ type CallBootstrapResponse = {
   error?: string;
 };
 
+type WebRtcTokenResponse = {
+  loginToken?: string;
+  credentialId?: string;
+  sipUsername?: string;
+  error?: string;
+};
+
+type WebRtcCall = {
+  id?: string;
+  state?: string;
+  direction?: string;
+  telnyxIDs?: {
+    telnyxCallControlId?: string;
+    telnyxSessionId?: string;
+    telnyxLegId?: string;
+  };
+  remoteStream?: MediaStream;
+  answer: () => Promise<void> | void;
+  hangup: () => Promise<void> | void;
+};
+
+type WebRtcNotification = {
+  type: string;
+  call?: WebRtcCall;
+  error?: Error;
+};
+
+type TelnyxWebRtcClient = {
+  remoteElement?: HTMLMediaElement | string;
+  connect: () => void;
+  disconnect: () => void;
+  on: (eventName: string, callback: (event?: WebRtcNotification) => void) => TelnyxWebRtcClient;
+};
+
 const outcomeButtons: Array<{ outcome: string; label: string }> = [
   { outcome: "answered", label: "Answered" },
   { outcome: "voicemail", label: "Voicemail" },
@@ -170,6 +204,9 @@ export default function QueuePage() {
   const [showScripts, setShowScripts] = useState(true);
   const [calling, setCalling] = useState(false);
   const [callMessage, setCallMessage] = useState<string | null>(null);
+  const [webrtcStatus, setWebrtcStatus] = useState("offline");
+  const [micPermission, setMicPermission] = useState("unknown");
+  const [activeWebRtcCallControlId, setActiveWebRtcCallControlId] = useState<string | null>(null);
   const [pendingAttemptId, setPendingAttemptId] = useState<string | null>(null);
   const [savingOutcome, setSavingOutcome] = useState(false);
   const [savingNote, setSavingNote] = useState(false);
@@ -178,6 +215,10 @@ export default function QueuePage() {
   const [loadingDemoAgentStatus, setLoadingDemoAgentStatus] = useState(false);
   const locallyEndedAttemptIdsRef = useRef<Set<string>>(new Set());
   const promptedVoicemailAttemptIdsRef = useRef<Set<string>>(new Set());
+  const telnyxClientRef = useRef<TelnyxWebRtcClient | null>(null);
+  const webRtcCallRef = useRef<WebRtcCall | null>(null);
+  const webRtcReadyRef = useRef(false);
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const didInitialLeadLoadRef = useRef(false);
   const didLoadSettingsRef = useRef(false);
   const notesRef = useRef<HTMLTextAreaElement | null>(null);
@@ -223,6 +264,21 @@ export default function QueuePage() {
   useEffect(() => {
     pendingAttemptIdRef.current = pendingAttemptId;
   }, [pendingAttemptId]);
+
+  useEffect(() => {
+    return () => {
+      try {
+        void webRtcCallRef.current?.hangup();
+      } catch {
+        // The SDK may already have finalized the call during page teardown.
+      }
+
+      telnyxClientRef.current?.disconnect();
+      telnyxClientRef.current = null;
+      webRtcCallRef.current = null;
+      webRtcReadyRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (requestedLeadId && leads.some((lead) => lead.id === requestedLeadId)) {
@@ -272,6 +328,184 @@ export default function QueuePage() {
     }
 
     window.alert(message);
+  }
+
+  async function logBrowserWebRtcEvent(event: string, data: Record<string, string | number | boolean | null> = {}) {
+    const attemptId = pendingAttemptIdRef.current ?? latestAttempt?.id;
+    const payload = {
+      event,
+      ...data,
+    };
+
+    console.info(JSON.stringify({ source: "browser_webrtc", ...payload }));
+
+    if (!attemptId) {
+      return;
+    }
+
+    await fetch(`/api/calls/${attemptId}`, {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        debug: payload,
+      }),
+    }).catch(() => undefined);
+  }
+
+  function getWebRtcCallControlId(call?: WebRtcCall) {
+    return call?.telnyxIDs?.telnyxCallControlId ?? null;
+  }
+
+  function updateRemoteAudioState(call: WebRtcCall) {
+    const remoteAudio = remoteAudioRef.current;
+    const remoteTrackCount = call.remoteStream?.getAudioTracks().length ?? 0;
+
+    if (remoteAudio && call.remoteStream && remoteAudio.srcObject !== call.remoteStream) {
+      remoteAudio.srcObject = call.remoteStream;
+    }
+
+    if (remoteAudio) {
+      void remoteAudio.play().catch((playError) => {
+        void logBrowserWebRtcEvent("remote_audio_play_failed", {
+          error: playError instanceof Error ? playError.message : "unknown",
+        });
+      });
+    }
+
+    void logBrowserWebRtcEvent("remote_audio_track_check", {
+      browserCallControlId: getWebRtcCallControlId(call),
+      remoteTrackCount,
+    });
+  }
+
+  async function handleWebRtcNotification(notification?: WebRtcNotification) {
+    if (!notification) {
+      return;
+    }
+
+    if (notification.error) {
+      const message = notification.error.message;
+      setWebrtcStatus("error");
+      setCallMessage(message);
+      await logBrowserWebRtcEvent("webrtc_error", { error: message });
+      return;
+    }
+
+    if (notification.type !== "callUpdate" || !notification.call) {
+      return;
+    }
+
+    const call = notification.call;
+    webRtcCallRef.current = call;
+
+    const browserCallControlId = getWebRtcCallControlId(call);
+    setActiveWebRtcCallControlId(browserCallControlId);
+
+    await logBrowserWebRtcEvent("webrtc_call_update", {
+      browserCallId: call.id ?? null,
+      browserCallControlId,
+      browserLegId: call.telnyxIDs?.telnyxLegId ?? null,
+      browserSessionId: call.telnyxIDs?.telnyxSessionId ?? null,
+      direction: call.direction ?? null,
+      state: call.state ?? null,
+    });
+
+    if (call.state === "ringing") {
+      setWebrtcStatus("answering");
+      await logBrowserWebRtcEvent("browser_leg_auto_answer_requested", {
+        browserCallControlId,
+      });
+      await call.answer();
+      return;
+    }
+
+    if (["active", "answered", "early", "held"].includes(call.state ?? "")) {
+      setWebrtcStatus("in-call");
+      updateRemoteAudioState(call);
+    }
+
+    if (["hangup", "destroy", "purge", "done"].includes(call.state ?? "")) {
+      setWebrtcStatus(webRtcReadyRef.current ? "ready" : "offline");
+      setActiveWebRtcCallControlId(null);
+      webRtcCallRef.current = null;
+    }
+  }
+
+  async function ensureTelnyxWebRtcReady() {
+    if (webRtcReadyRef.current && telnyxClientRef.current) {
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("This browser does not expose microphone access for WebRTC.");
+    }
+
+    setWebrtcStatus("checking microphone");
+    const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micStream.getTracks().forEach((track) => track.stop());
+    setMicPermission("granted");
+    await logBrowserWebRtcEvent("microphone_permission_granted");
+
+    setWebrtcStatus("requesting token");
+    const tokenResponse = await fetch("/api/telnyx/webrtc-token", {
+      method: "POST",
+    });
+    const tokenPayload = (await tokenResponse.json()) as WebRtcTokenResponse;
+
+    if (!tokenResponse.ok || !tokenPayload.loginToken) {
+      throw new Error(tokenPayload.error ?? "Could not create Telnyx WebRTC token");
+    }
+
+    const { TelnyxRTC } = await import("@telnyx/webrtc");
+    const client = new TelnyxRTC({
+      login_token: tokenPayload.loginToken,
+      debug: true,
+      mediaPermissionsRecovery: {
+        enabled: true,
+        timeout: 10_000,
+      },
+    }) as TelnyxWebRtcClient;
+
+    client.remoteElement = remoteAudioRef.current ?? "telnyx-remote-audio";
+    telnyxClientRef.current = client;
+
+    setWebrtcStatus("registering");
+    await logBrowserWebRtcEvent("webrtc_registration_started", {
+      credentialId: tokenPayload.credentialId ?? null,
+      sipUsername: tokenPayload.sipUsername ?? null,
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        reject(new Error("Timed out waiting for Telnyx WebRTC registration"));
+      }, 15_000);
+
+      client
+        .on("telnyx.ready", () => {
+          window.clearTimeout(timeout);
+          webRtcReadyRef.current = true;
+          setWebrtcStatus("ready");
+          void logBrowserWebRtcEvent("webrtc_connected", {
+            credentialId: tokenPayload.credentialId ?? null,
+            sipUsername: tokenPayload.sipUsername ?? null,
+          });
+          resolve();
+        })
+        .on("telnyx.error", (event) => {
+          const message = event?.error?.message ?? "Telnyx WebRTC error";
+          window.clearTimeout(timeout);
+          setWebrtcStatus("error");
+          void logBrowserWebRtcEvent("webrtc_registration_error", { error: message });
+          reject(new Error(message));
+        })
+        .on("telnyx.notification", (event) => {
+          void handleWebRtcNotification(event);
+        });
+
+      client.connect();
+    });
   }
 
   async function saveScriptTemplates() {
@@ -476,6 +710,9 @@ export default function QueuePage() {
     setCalling(true);
 
     try {
+      await ensureTelnyxWebRtcReady();
+      setCallMessage("Browser softphone ready. Starting outbound call...");
+
       const response = await fetch(`/api/leads/${selectedLead.id}/call`, {
         method: "POST",
       });
@@ -488,14 +725,21 @@ export default function QueuePage() {
         return;
       }
 
+      pendingAttemptIdRef.current = payload.attempt.id;
       setPendingAttemptId(payload.attempt.id);
-      setCallMessage("Outbound call started. Waiting for Telnyx updates...");
+      await logBrowserWebRtcEvent("browser_ready_before_pstn_call", {
+        callAttemptId: payload.attempt.id,
+      });
+      setCallMessage("Outbound call started. Browser softphone is waiting for bridge...");
       await refreshLeads();
     } catch (callError) {
       const message = callError instanceof Error ? callError.message : "Call initiation failed";
 
       setError(message);
       setCallMessage(message);
+      if (message.toLowerCase().includes("microphone")) {
+        setMicPermission("denied");
+      }
     } finally {
       setCalling(false);
     }
@@ -513,6 +757,13 @@ export default function QueuePage() {
     setCallMessage("Ending call...");
 
     try {
+      if (webRtcCallRef.current) {
+        await webRtcCallRef.current.hangup();
+        await logBrowserWebRtcEvent("browser_leg_hangup_requested", {
+          browserCallControlId: getWebRtcCallControlId(webRtcCallRef.current),
+        });
+      }
+
       const response = await fetch(`/api/calls/${attemptId}`, {
         method: "PATCH",
         headers: {
@@ -810,6 +1061,31 @@ export default function QueuePage() {
                     <p>
                       <span className="font-medium">Outbound path:</span> Telnyx Call Control
                     </p>
+                    <p>
+                      <span className="font-medium">Browser WebRTC:</span> {webrtcStatus}
+                    </p>
+                    <p>
+                      <span className="font-medium">Microphone:</span> {micPermission}
+                    </p>
+                    <p>
+                      <span className="font-medium">Browser Call Control ID:</span> {activeWebRtcCallControlId ?? latestAttempt?.telnyxAgentCallControlId ?? "-"}
+                    </p>
+                    <audio
+                      autoPlay
+                      className="hidden"
+                      id="telnyx-remote-audio"
+                      onLoadedMetadata={() => {
+                        void logBrowserWebRtcEvent("remote_audio_metadata_loaded", {
+                          hasSrcObject: Boolean(remoteAudioRef.current?.srcObject),
+                        });
+                      }}
+                      onPlaying={() => {
+                        void logBrowserWebRtcEvent("remote_audio_playing", {
+                          hasSrcObject: Boolean(remoteAudioRef.current?.srcObject),
+                        });
+                      }}
+                      ref={remoteAudioRef}
+                    />
                     {callMessage ? <p className="text-xs text-slate-500">{callMessage}</p> : null}
                     <p>
                       <span className="font-medium">State:</span> {displayedCallStatus}

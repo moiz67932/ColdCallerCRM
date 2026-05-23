@@ -4,6 +4,7 @@ import { z } from "zod";
 import { requireApiAuth } from "@/lib/api-auth";
 import type { JsonObject, JsonValue } from "@/lib/db-types";
 import { formatUnknownError, jsonError } from "@/lib/http";
+import { logInfo } from "@/lib/logger";
 import { prisma } from "@/lib/workstation-db";
 import { hangupAttemptLegs, startAttemptRecording } from "@/lib/telnyx/call-flow";
 
@@ -98,8 +99,8 @@ const updateCallAttemptSchema = z
     answeredAt: z.string().datetime().optional(),
     debug: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
   })
-  .refine((value) => Boolean(value.status), {
-    message: "A status update is required",
+  .refine((value) => Boolean(value.status || value.clientError || value.debug), {
+    message: "A status update, client error, or debug payload is required",
   });
 
 export async function PATCH(request: NextRequest, context: { params: Promise<{ id: string }> }) {
@@ -133,6 +134,15 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       : undefined;
 
     let updated = attempt;
+
+    if (payload.debug) {
+      logInfo("Browser WebRTC client debug event", {
+        callAttemptId: id,
+        leadCallControlId: attempt.telnyxCallControlId,
+        browserCallControlId: attempt.telnyxAgentCallControlId,
+        ...payload.debug,
+      });
+    }
 
     if (payload.status) {
       if (payload.status === "canceled" && !updated.endedAt) {

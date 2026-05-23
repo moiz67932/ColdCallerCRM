@@ -6,6 +6,8 @@ import { prisma } from "@/lib/workstation-db";
 import {
   computeAttemptSummary,
   decodeClientState,
+  bridgeAttemptLegs,
+  dialBrowserWebRtcLeg,
   hangupCallControlIds,
   isCallTerminalStatus,
   startAttemptRecording,
@@ -350,6 +352,12 @@ async function handleAnsweredEvent(attempt: ExistingCallAttempt, event: TelnyxWe
     });
 
     await startAttemptRecording(connectedAttempt.id);
+    await dialBrowserWebRtcLeg(connectedAttempt.id);
+    return;
+  }
+
+  if (role === "agent") {
+    await bridgeAttemptLegs(syncedAttempt.id);
   }
 }
 
@@ -582,6 +590,17 @@ async function handleHangupEvent(attempt: ExistingCallAttempt, event: TelnyxWebh
     },
   });
 
+  await hangupCallControlIds(syncedAttempt.id, [
+    role === "agent" ? syncedAttempt.telnyxCallControlId : syncedAttempt.telnyxAgentCallControlId,
+  ]);
+
+  logInfo("Requested opposite Telnyx leg hangup after call.hangup", {
+    callAttemptId: syncedAttempt.id,
+    endedRole: role,
+    leadCallControlId: syncedAttempt.telnyxCallControlId,
+    browserCallControlId: syncedAttempt.telnyxAgentCallControlId,
+  });
+
   await computeAttemptSummary(syncedAttempt.id);
 }
 
@@ -630,15 +649,15 @@ export async function processVoiceWebhookEvent(webhookRowId: string, event: Teln
       case "call.answered": {
         await handleAnsweredEvent(attempt, event);
         logTelnyxLifecycleEvent("Handled Telnyx call.answered", webhookRowId, event, attempt, {
-          action: "marked_lead_connected_and_started_recording_when_enabled",
+          action: "marked_lead_connected_started_recording_and_dialed_or_bridged_browser_leg",
           downstreamCommands: {
             answerCommandIssuedAfterOutboundAnswer: false,
-            sipTransferRequested: false,
+            sipTransferRequested: true,
             mediaStreamingStartRequested: false,
-            bridgeDialRequested: false,
+            bridgeDialRequested: true,
           },
           flowStopObservation:
-            "Current application logic does not issue a SIP transfer, bridge dial, or media streaming start command after call.answered.",
+            "Application logic now dials the browser WebRTC credential on lead answer and bridges once the browser leg answers.",
         });
         break;
       }
@@ -654,6 +673,11 @@ export async function processVoiceWebhookEvent(webhookRowId: string, event: Teln
       }
       case "call.bridged": {
         await handleBridgedEvent(attempt, event);
+        logTelnyxLifecycleEvent("Handled Telnyx call.bridged", webhookRowId, event, attempt, {
+          action: "bridge_confirmed_by_telnyx",
+          leadCallControlId: attempt.telnyxCallControlId,
+          browserCallControlId: attempt.telnyxAgentCallControlId,
+        });
         break;
       }
       case "call.recording.saved": {

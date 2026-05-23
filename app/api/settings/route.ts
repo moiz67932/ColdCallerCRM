@@ -35,6 +35,7 @@ export async function GET(request: NextRequest) {
     settings,
     runtimeConfig: {
       telnyxConnectionConfigured: Boolean(env.TELNYX_CONNECTION_ID),
+      telnyxWebrtcCredentialConfigured: Boolean(env.TELNYX_TELEPHONY_CREDENTIAL_ID),
       telnyxFromNumber: env.TELNYX_FROM_NUMBER ? `${env.TELNYX_FROM_NUMBER.slice(0, 5)}...` : null,
       telnyxMessagingFromConfigured: Boolean(env.TELNYX_MESSAGING_FROM_NUMBER),
       signatureVerificationConfigured:

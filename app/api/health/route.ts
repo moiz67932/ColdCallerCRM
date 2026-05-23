@@ -25,6 +25,7 @@ export async function GET() {
       telnyxCredentialsConfigured:
         Boolean(env.TELNYX_API_KEY) &&
         Boolean(env.TELNYX_CONNECTION_ID) &&
+        Boolean(env.TELNYX_TELEPHONY_CREDENTIAL_ID) &&
         Boolean(env.TELNYX_FROM_NUMBER),
       outboundCallerConfigured: Boolean(env.TELNYX_FROM_NUMBER),
       messagingConfigured: Boolean(env.TELNYX_MESSAGING_FROM_NUMBER),
