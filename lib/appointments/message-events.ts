@@ -148,13 +148,13 @@ function toSafeProviderError(error: unknown) {
   }
 
   if (error instanceof Error) {
-    const record = isRecord(error) ? error : {};
+    const record: SupabaseRow = isRecord(error) ? error : {};
 
     return compact({
       name: error.name,
       message: error.message,
       status: getNumber(record, "status"),
-      error_body: sanitizeForWorkflowLog(record.errorBody ?? record.error_body),
+      error_body: sanitizeForWorkflowLog(record["errorBody"] ?? record["error_body"]),
     });
   }
 
