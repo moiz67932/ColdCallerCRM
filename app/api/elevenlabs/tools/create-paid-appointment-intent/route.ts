@@ -8,16 +8,16 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { hasValidElevenLabsToolBearerAuth } from "@/lib/elevenlabs/tool-auth";
 import { logError, logInfo, logWarn } from "@/lib/logger";
 import { buildPaymentLinkIdempotencyKey } from "@/lib/appointments/idempotency";
+import { insertAppointmentWorkflowEvent } from "@/lib/appointments/workflow-events";
 import { failJson, okJson, squareFailJson, validationFailJson } from "@/lib/api/paid-appointment-response";
 import {
   createDebugId,
-  logSupabaseWorkflowEvent,
   logWorkflowError,
   logWorkflowInfo,
 } from "@/lib/logging/workflow-logger";
 import { markPaymentLinkCreated, markPaymentLinkSent } from "@/lib/appointments/status-machine";
 import { normalizePhoneNumber } from "@/lib/phone";
-import { requireEnv } from "@/lib/env";
+import { getMissingPaidAppointmentEnvNames, requireEnv } from "@/lib/env";
 import { sendPaymentLinkWhatsApp } from "@/lib/messaging/send-whatsapp";
 import { createPayToken } from "@/lib/payments/pay-token";
 import {
@@ -26,7 +26,6 @@ import {
 } from "@/lib/validation/paid-appointment";
 import {
   normalizeMessageEventRow,
-  normalizeWorkflowEventRow,
   type SupabaseRow,
 } from "@/lib/category7-db";
 
@@ -40,12 +39,38 @@ export async function POST(request: NextRequest) {
   const debugId = createDebugId("create_paid_intent");
   let supabaseForFailure: ReturnType<typeof getSupabaseAdmin> | null = null;
   let createdAppointmentIntentId: string | null = null;
+  let resolvedOrganizationIdForFailure: string | null = null;
 
   logWorkflowInfo("paid_appointment_intent.request_start", {
     debug_id: debugId,
     operation: "create_paid_appointment_intent",
     step: "request_start",
   });
+
+  const missingEnvNames = getMissingPaidAppointmentEnvNames();
+
+  if (missingEnvNames.length > 0) {
+    logWorkflowError("paid_appointment_intent.env_not_configured", {
+      debug_id: debugId,
+      operation: "create_paid_appointment_intent",
+      step: "validate_runtime_env",
+      status: 503,
+      error_code: "PAID_APPOINTMENT_ENV_NOT_CONFIGURED",
+      missing_env: missingEnvNames,
+      safe_message: "Paid appointment workflow environment is not fully configured.",
+    });
+    return failJson(
+      {
+        errorCode: "PAID_APPOINTMENT_ENV_NOT_CONFIGURED",
+        step: "validate_runtime_env",
+        message: "Paid appointment workflow is not fully configured.",
+        debugId,
+        safeDetails: { missing_env: missingEnvNames },
+        say: "I'm having trouble creating the secure deposit link right now. A team member can help review this.",
+      },
+      { status: 503 },
+    );
+  }
 
   if (!hasValidElevenLabsToolBearerAuth(request.headers, requireEnv("ELEVENLABS_TOOL_SECRET"))) {
     logWorkflowError("paid_appointment_intent.unauthorized", {
@@ -68,6 +93,7 @@ export async function POST(request: NextRequest) {
     const supabase = getSupabaseAdmin();
     supabaseForFailure = supabase;
     const resolvedContext = await resolveOrganizationContext(input, supabase);
+    resolvedOrganizationIdForFailure = resolvedContext.organizationId;
     const callerPhoneE164 = resolveCallerPhoneE164(input.caller_phone);
 
     if (!callerPhoneE164) {
@@ -272,6 +298,7 @@ export async function POST(request: NextRequest) {
       if (supabaseForFailure && createdAppointmentIntentId) {
         await safeUpdateLastError(supabaseForFailure, createdAppointmentIntentId, error.say);
         await insertWorkflowEvent(supabaseForFailure, {
+          organization_id: resolvedOrganizationIdForFailure,
           appointment_intent_id: createdAppointmentIntentId,
           event_type: "failed",
           status: "failed",
@@ -309,6 +336,7 @@ export async function POST(request: NextRequest) {
       if (supabaseForFailure && createdAppointmentIntentId) {
         await safeUpdateLastError(supabaseForFailure, createdAppointmentIntentId, "Square request failed.");
         await insertWorkflowEvent(supabaseForFailure, {
+          organization_id: resolvedOrganizationIdForFailure,
           appointment_intent_id: createdAppointmentIntentId,
           event_type: "failed",
           status: "failed",
@@ -332,6 +360,7 @@ export async function POST(request: NextRequest) {
       const message = error instanceof Error ? error.message : "Unexpected paid appointment intent error.";
       await safeUpdateLastError(supabaseForFailure, createdAppointmentIntentId, message);
       await insertWorkflowEvent(supabaseForFailure, {
+        organization_id: resolvedOrganizationIdForFailure,
         appointment_intent_id: createdAppointmentIntentId,
         event_type: "failed",
         status: "failed",
@@ -510,27 +539,9 @@ async function safeUpdateLastError(
 }
 
 async function insertWorkflowEvent(supabase: ReturnType<typeof getSupabaseAdmin>, row: SupabaseRow) {
-  const normalizedRow = normalizeWorkflowEventRow(row);
-  const { error } = await supabase.from("appointment_workflow_events").insert(normalizedRow);
-
-  if (error) {
-    logWarn("paid_appointment_intent.workflow_event_insert_failed", { message: error.message });
-    logWorkflowError("paid_appointment_intent.workflow_event_insert_failed", {
-      operation: "create_paid_appointment_intent",
-      step: "insert_workflow_event",
-      appointment_intent_id: getString(row, "appointment_intent_id"),
-      error_code: "WORKFLOW_EVENT_INSERT_FAILED",
-      safe_message: error.message,
-    });
-    return;
-  }
-
-  logSupabaseWorkflowEvent({
+  await insertAppointmentWorkflowEvent(supabase, row, {
     operation: "create_paid_appointment_intent",
-    appointment_intent_id: getString(row, "appointment_intent_id"),
-    step: getString(row, "event_type"),
-    status: getString(normalizedRow, "event_status"),
-    payload: row.payload,
+    failureEventName: "paid_appointment_intent.workflow_event_insert_failed",
   });
 }
 

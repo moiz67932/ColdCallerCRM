@@ -6,6 +6,8 @@ import { requireEnv } from "@/lib/env";
 
 const PAY_TOKEN_PURPOSE = "square_payment_link";
 
+// PAY_LINK_SECRET signs the base64url JSON payload with HMAC-SHA256.
+// The token is not encrypted; keep payload contents non-sensitive.
 type PayTokenPayload = {
   appointment_intent_id: string;
   exp: number;
@@ -43,7 +45,13 @@ export function verifyPayToken(token: string): PayTokenPayload | null {
     return null;
   }
 
-  const expectedSignature = sign(encodedPayload);
+  let expectedSignature: string;
+
+  try {
+    expectedSignature = sign(encodedPayload);
+  } catch {
+    return null;
+  }
 
   if (!safeEqual(expectedSignature, signature)) {
     return null;

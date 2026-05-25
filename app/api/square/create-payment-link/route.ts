@@ -5,10 +5,10 @@ import { createAppointmentPaymentLink } from "@/lib/square/payments";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { logError, logInfo, logWarn } from "@/lib/logger";
 import { buildPaymentLinkIdempotencyKey } from "@/lib/appointments/idempotency";
+import { insertAppointmentWorkflowEvent } from "@/lib/appointments/workflow-events";
 import { failJson, okJson, validationFailJson } from "@/lib/api/paid-appointment-response";
 import {
   createDebugId,
-  logSupabaseWorkflowEvent,
   logWorkflowError,
   logWorkflowInfo,
 } from "@/lib/logging/workflow-logger";
@@ -23,7 +23,6 @@ import {
 import {
   normalizeAppointmentPaymentRow,
   normalizeMessageEventRow,
-  normalizeWorkflowEventRow,
   type SupabaseRow,
 } from "@/lib/category7-db";
 
@@ -219,6 +218,7 @@ export async function POST(request: NextRequest) {
       error instanceof Error ? error.message : "Unable to create Square payment link.",
     );
     await insertWorkflowEvent(supabase, {
+      organization_id: appointmentIntent ? getString(appointmentIntent, "organization_id") : undefined,
       appointment_intent_id: appointmentIntentId,
       event_type: "failed",
       status: "failed",
@@ -475,27 +475,9 @@ async function upsertAppointmentPayment(supabase: ReturnType<typeof getSupabaseA
 }
 
 async function insertWorkflowEvent(supabase: ReturnType<typeof getSupabaseAdmin>, row: SupabaseRow) {
-  const normalizedRow = normalizeWorkflowEventRow(row);
-  const { error } = await supabase.from("appointment_workflow_events").insert(normalizedRow);
-
-  if (error) {
-    logWarn("square.manual_payment_link.workflow_event_insert_failed", { message: error.message });
-    logWorkflowError("square.manual_payment_link.workflow_event_insert_failed", {
-      operation: "create_payment_link",
-      step: "insert_workflow_event",
-      appointment_intent_id: getString(row, "appointment_intent_id"),
-      error_code: "WORKFLOW_EVENT_INSERT_FAILED",
-      safe_message: error.message,
-    });
-    return;
-  }
-
-  logSupabaseWorkflowEvent({
+  await insertAppointmentWorkflowEvent(supabase, row, {
     operation: "create_payment_link",
-    appointment_intent_id: getString(row, "appointment_intent_id"),
-    step: getString(row, "event_type"),
-    status: getString(normalizedRow, "event_status"),
-    payload: row.payload,
+    failureEventName: "square.manual_payment_link.workflow_event_insert_failed",
   });
 }
 

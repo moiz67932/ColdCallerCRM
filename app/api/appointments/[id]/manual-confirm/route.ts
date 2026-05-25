@@ -6,10 +6,10 @@ import { getOrCreateSquareCustomer } from "@/lib/square/customers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { logError, logWarn } from "@/lib/logger";
 import { buildSquareBookingIdempotencyKey } from "@/lib/appointments/idempotency";
+import { insertAppointmentWorkflowEvent } from "@/lib/appointments/workflow-events";
 import { failJson, okJson, validationFailJson, manualReviewJson } from "@/lib/api/paid-appointment-response";
 import {
   createDebugId,
-  logSupabaseWorkflowEvent,
   logWorkflowError,
   logWorkflowInfo,
 } from "@/lib/logging/workflow-logger";
@@ -23,7 +23,6 @@ import {
 } from "@/lib/validation/paid-appointment";
 import {
   normalizeMessageEventRow,
-  normalizeWorkflowEventRow,
   type SupabaseRow,
 } from "@/lib/category7-db";
 
@@ -245,6 +244,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       error instanceof Error ? error.message : "Unable to manually confirm appointment.",
     );
     await insertWorkflowEvent(supabase, {
+      organization_id: appointmentIntent ? getString(appointmentIntent, "organization_id") : undefined,
       appointment_intent_id: appointmentIntentId,
       event_type: "failed",
       status: "failed",
@@ -443,27 +443,9 @@ async function safeUpdateLastError(
 }
 
 async function insertWorkflowEvent(supabase: ReturnType<typeof getSupabaseAdmin>, row: SupabaseRow) {
-  const normalizedRow = normalizeWorkflowEventRow(row);
-  const { error } = await supabase.from("appointment_workflow_events").insert(normalizedRow);
-
-  if (error) {
-    logWarn("appointments.manual_confirm.workflow_event_insert_failed", { message: error.message });
-    logWorkflowError("appointments.manual_confirm.workflow_event_insert_failed", {
-      operation: "manual_confirm",
-      step: "insert_workflow_event",
-      appointment_intent_id: getString(row, "appointment_intent_id"),
-      error_code: "WORKFLOW_EVENT_INSERT_FAILED",
-      safe_message: error.message,
-    });
-    return;
-  }
-
-  logSupabaseWorkflowEvent({
+  await insertAppointmentWorkflowEvent(supabase, row, {
     operation: "manual_confirm",
-    appointment_intent_id: getString(row, "appointment_intent_id"),
-    step: getString(row, "event_type"),
-    status: getString(normalizedRow, "event_status"),
-    payload: row.payload,
+    failureEventName: "appointments.manual_confirm.workflow_event_insert_failed",
   });
 }
 

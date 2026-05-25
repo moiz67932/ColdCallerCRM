@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { env, getRequiredEnvStatus } from "@/lib/env";
+import { env, getPaidAppointmentRequiredEnvStatus, getRequiredEnvStatus } from "@/lib/env";
 import { prisma } from "@/lib/workstation-db";
 import { isPublicWebhookBaseUrlConfigured } from "@/lib/telnyx/helpers";
 
@@ -15,13 +15,22 @@ export async function GET() {
   }
 
   const envStatus = getRequiredEnvStatus();
+  const paidAppointmentEnvStatus = getPaidAppointmentRequiredEnvStatus();
+  const paidAppointmentConfigured = Object.values(paidAppointmentEnvStatus).every(Boolean);
 
   const payload = {
-    ok: dbConnected && envStatus.ADMIN_PASSWORD && envStatus.SUPABASE_URL && envStatus.SUPABASE_SERVICE_ROLE_KEY,
+    ok:
+      dbConnected &&
+      envStatus.ADMIN_PASSWORD &&
+      envStatus.SUPABASE_URL &&
+      envStatus.SUPABASE_SERVICE_ROLE_KEY &&
+      paidAppointmentConfigured,
     timestamp: new Date().toISOString(),
     checks: {
       dbConnected,
       requiredEnv: envStatus,
+      paidAppointmentConfigured,
+      paidAppointmentRequiredEnv: paidAppointmentEnvStatus,
       telnyxCredentialsConfigured:
         Boolean(env.TELNYX_API_KEY) &&
         Boolean(env.TELNYX_CONNECTION_ID) &&

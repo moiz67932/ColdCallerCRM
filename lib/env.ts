@@ -78,6 +78,51 @@ export function requireEnv(name: keyof typeof env): string {
   return value;
 }
 
+const PAID_APPOINTMENT_REQUIRED_ENV_NAMES = [
+  "ELEVENLABS_TOOL_SECRET",
+  "SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "SQUARE_ACCESS_TOKEN",
+  "PAY_LINK_SECRET",
+  "TELNYX_API_KEY",
+  "TELNYX_WHATSAPP_FROM_NUMBER",
+] as const;
+
+export function getMissingRequiredEnvNames(names: readonly (keyof typeof env)[]) {
+  return names.filter((name) => !hasEnvValue(name)).map(String);
+}
+
+export function getPaidAppointmentRequiredEnvStatus() {
+  return {
+    ELEVENLABS_TOOL_SECRET: hasEnvValue("ELEVENLABS_TOOL_SECRET"),
+    SUPABASE_URL: hasEnvValue("SUPABASE_URL"),
+    SUPABASE_SERVICE_ROLE_KEY: hasEnvValue("SUPABASE_SERVICE_ROLE_KEY"),
+    SQUARE_ACCESS_TOKEN: hasEnvValue("SQUARE_ACCESS_TOKEN"),
+    PAY_LINK_SECRET: hasEnvValue("PAY_LINK_SECRET"),
+    TELNYX_API_KEY: hasEnvValue("TELNYX_API_KEY"),
+    TELNYX_WHATSAPP_FROM_NUMBER: hasEnvValue("TELNYX_WHATSAPP_FROM_NUMBER"),
+    TELNYX_WHATSAPP_PAYMENT_LINK_TEMPLATE_OR_ID:
+      hasEnvValue("TELNYX_WHATSAPP_PAYMENT_LINK_TEMPLATE") ||
+      hasEnvValue("TELNYX_WHATSAPP_PAYMENT_LINK_TEMPLATE_ID"),
+    PUBLIC_APP_URL_OR_APP_BASE_URL: hasEnvValue("PUBLIC_APP_URL") || hasEnvValue("APP_BASE_URL"),
+  };
+}
+
+export function getMissingPaidAppointmentEnvNames() {
+  const missing = getMissingRequiredEnvNames(PAID_APPOINTMENT_REQUIRED_ENV_NAMES);
+  const status = getPaidAppointmentRequiredEnvStatus();
+
+  if (!status.TELNYX_WHATSAPP_PAYMENT_LINK_TEMPLATE_OR_ID) {
+    missing.push("TELNYX_WHATSAPP_PAYMENT_LINK_TEMPLATE or TELNYX_WHATSAPP_PAYMENT_LINK_TEMPLATE_ID");
+  }
+
+  if (!status.PUBLIC_APP_URL_OR_APP_BASE_URL) {
+    missing.push("PUBLIC_APP_URL or APP_BASE_URL");
+  }
+
+  return missing;
+}
+
 export function getRequiredEnvStatus() {
   return {
     ADMIN_PASSWORD: Boolean(env.ADMIN_PASSWORD),
@@ -89,4 +134,10 @@ export function getRequiredEnvStatus() {
     TELNYX_FROM_NUMBER: Boolean(env.TELNYX_FROM_NUMBER),
     NEXT_PUBLIC_APP_NAME: Boolean(env.NEXT_PUBLIC_APP_NAME),
   };
+}
+
+function hasEnvValue(name: keyof typeof env) {
+  const value = env[name];
+
+  return typeof value === "string" && value.trim().length > 0;
 }
