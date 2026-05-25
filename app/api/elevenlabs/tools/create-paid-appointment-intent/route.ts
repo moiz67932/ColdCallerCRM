@@ -1,7 +1,6 @@
 import { NextRequest } from "next/server";
 import { ZodError } from "zod";
 
-import { findExactAvailableSlot, searchSquareAvailability } from "@/lib/square/bookings";
 import { createAppointmentPaymentLink } from "@/lib/square/payments";
 import { resolveServiceForBooking } from "@/lib/square/catalog";
 import { SquareApiError } from "@/lib/square/client";
@@ -85,27 +84,18 @@ export async function POST(request: NextRequest) {
       organizationId: resolvedContext.organizationId,
       serviceName: input.service_name,
     });
-    const availability = await searchSquareAvailability({
-      locationId: service.locationId,
-      teamMemberId: service.teamMemberId,
-      serviceVariationId: service.serviceVariationId,
-      startAt: input.selected_start_at,
-      endAt: addMinutes(input.selected_start_at, service.durationMinutes),
+    logWorkflowInfo("paid_appointment_intent.availability_search_skipped", {
+      debug_id: debugId,
+      operation: "create_paid_appointment_intent",
+      step: "check_square_availability",
+      selected_start_at: input.selected_start_at,
+      selected_timezone: input.selected_timezone,
+      duration_minutes: service.durationMinutes,
+      square_location_id: service.locationId,
+      square_team_member_id: service.teamMemberId,
+      square_service_variation_id: service.serviceVariationId,
+      safe_message: "Skipping Square availability search because selected_start_at is already provided for payment intent creation.",
     });
-    const slot = findExactAvailableSlot({
-      desiredStartAt: input.selected_start_at,
-      availability,
-    });
-
-    if (!slot) {
-      return toolError(
-        "SQUARE_SLOT_NOT_AVAILABLE",
-        "check_square_availability",
-        "That time is no longer available. I can help you choose another time.",
-        400,
-        debugId,
-      );
-    }
 
     const appointmentIntent = await insertAppointmentIntent({
       input,
@@ -560,10 +550,6 @@ function resolveCallerPhoneE164(callerPhone: string) {
   }
 
   return callerPhone.trim().startsWith("+") ? callerPhone.trim() : null;
-}
-
-function addMinutes(isoDate: string, minutes: number) {
-  return new Date(new Date(isoDate).getTime() + minutes * 60_000).toISOString();
 }
 
 function requireRowId(row: SupabaseRow, tableName: string) {

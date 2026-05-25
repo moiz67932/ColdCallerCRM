@@ -420,6 +420,9 @@ async function confirmPaidAppointment(
     serviceVariationId: requireString(appointmentIntent, "square_service_variation_id"),
     startAt: selectedStartAt,
     endAt: addMinutes(selectedStartAt, durationMinutes + 15),
+    selectedStartAt,
+    timezone: getString(appointmentIntent, "selected_timezone"),
+    appointmentIntentId,
   });
   const slot = findExactAvailableSlot({ desiredStartAt: selectedStartAt, availability });
 

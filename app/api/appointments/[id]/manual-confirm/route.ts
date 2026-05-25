@@ -285,6 +285,9 @@ async function createManualSquareBookingIfNeeded(
       serviceVariationId: bookingServiceVariationId,
       startAt: selectedStartAt,
       endAt: addMinutes(selectedStartAt, durationMinutes + 15),
+      selectedStartAt,
+      timezone: getString(appointmentIntent, "selected_timezone"),
+      appointmentIntentId,
     });
     const slot = findExactAvailableSlot({ desiredStartAt: selectedStartAt, availability });
 
@@ -304,7 +307,7 @@ async function createManualSquareBookingIfNeeded(
       return { ...appointmentIntent, appointment_status: "manual_review_needed" };
     }
 
-    bookingStartAt = slot.startAt;
+    bookingStartAt = selectedStartAt;
     bookingTeamMemberId = slot.teamMemberId;
     bookingServiceVariationId = slot.serviceVariationId;
     bookingServiceVariationVersion = slot.serviceVariationVersion;

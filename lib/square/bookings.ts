@@ -1,7 +1,10 @@
 import "server-only";
 
 import { buildSquareBookingIdempotencyKey } from "@/lib/appointments/idempotency";
+import { logWorkflowInfo } from "@/lib/logging/workflow-logger";
 import { squareRequest } from "@/lib/square/client";
+
+export const MIN_SQUARE_AVAILABILITY_SEARCH_RANGE_MS = 24 * 60 * 60 * 1000;
 
 export type SearchSquareAvailabilityInput = {
   locationId: string;
@@ -9,6 +12,9 @@ export type SearchSquareAvailabilityInput = {
   serviceVariationId: string;
   startAt: string;
   endAt: string;
+  selectedStartAt?: string | null;
+  timezone?: string | null;
+  appointmentIntentId?: string | null;
 };
 
 export type SquareAvailabilitySlot = {
@@ -81,33 +87,62 @@ export async function searchSquareAvailability(
   input: SearchSquareAvailabilityInput,
 ): Promise<SquareAvailabilitySlot[]> {
   validateSearchAvailabilityInput(input);
+  const body = buildSquareAvailabilitySearchRequestBody(input);
+  const startAtRange = body.query.filter.start_at_range;
+
+  logWorkflowInfo("square.availability_search.request_payload", {
+    operation: "square.search_availability",
+    step: "build_request",
+    appointment_intent_id: input.appointmentIntentId,
+    selected_start_at: input.selectedStartAt?.trim() || input.startAt.trim(),
+    selected_timezone: input.timezone?.trim() || null,
+    generated_start_at_range: startAtRange,
+    payload: body,
+  });
 
   const response = await squareRequest<SearchAvailabilityResponse>({
     method: "POST",
     path: "/v2/bookings/availability/search",
+    appointmentIntentId: input.appointmentIntentId?.trim() || undefined,
     operationName: "square.search_availability",
-    body: {
-      query: {
-        filter: {
-          start_at_range: {
-            start_at: input.startAt,
-            end_at: input.endAt,
-          },
-          location_id: input.locationId,
-          segment_filters: [
-            {
-              service_variation_id: input.serviceVariationId,
-              team_member_id_filter: {
-                any: [input.teamMemberId],
-              },
-            },
-          ],
-        },
-      },
-    },
+    body,
   });
 
   return (response.availabilities ?? []).flatMap(normalizeAvailability);
+}
+
+export function buildSquareAvailabilitySearchRequestBody(input: SearchSquareAvailabilityInput) {
+  validateSearchAvailabilityInput(input);
+
+  return {
+    query: {
+      filter: {
+        start_at_range: buildSquareAvailabilityStartAtRange(input.startAt, input.endAt),
+        location_id: input.locationId.trim(),
+        segment_filters: [
+          {
+            service_variation_id: input.serviceVariationId.trim(),
+            team_member_id_filter: {
+              any: [input.teamMemberId.trim()],
+            },
+          },
+        ],
+      },
+    },
+  };
+}
+
+export function buildSquareAvailabilityStartAtRange(startAt: string, endAt: string) {
+  const trimmedStartAt = startAt.trim();
+  const trimmedEndAt = endAt.trim();
+  const startAtMs = parseRfc3339Instant(trimmedStartAt, "startAt");
+  const requestedEndAtMs = parseRfc3339Instant(trimmedEndAt, "endAt");
+  const minimumEndAtMs = startAtMs + MIN_SQUARE_AVAILABILITY_SEARCH_RANGE_MS;
+
+  return {
+    start_at: trimmedStartAt,
+    end_at: requestedEndAtMs >= minimumEndAtMs ? trimmedEndAt : new Date(minimumEndAtMs).toISOString(),
+  };
 }
 
 export function findExactAvailableSlot(input: FindExactAvailableSlotInput): SquareAvailabilitySlot | null {
@@ -117,7 +152,18 @@ export function findExactAvailableSlot(input: FindExactAvailableSlotInput): Squa
     throw new Error("Missing desired start time for Square availability match.");
   }
 
-  return input.availability.find((slot) => slot.startAt === desiredStartAt) ?? null;
+  return input.availability.find((slot) => isSameInstant(slot.startAt, desiredStartAt)) ?? null;
+}
+
+function isSameInstant(left: string, right: string) {
+  const leftMs = Date.parse(left);
+  const rightMs = Date.parse(right);
+
+  if (Number.isFinite(leftMs) && Number.isFinite(rightMs)) {
+    return leftMs === rightMs;
+  }
+
+  return left.trim() === right.trim();
 }
 
 export async function createSquareBooking(input: CreateSquareBookingInput): Promise<CreateSquareBookingResult> {
@@ -227,6 +273,16 @@ function validateSearchAvailabilityInput(input: SearchSquareAvailabilityInput) {
   if (!input.endAt.trim()) {
     throw new Error("Missing required end time for Square availability search.");
   }
+}
+
+function parseRfc3339Instant(value: string, fieldName: string) {
+  const parsed = Date.parse(value);
+
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Square availability ${fieldName} must be a valid RFC3339 timestamp.`);
+  }
+
+  return parsed;
 }
 
 function validateCreateBookingInput(input: CreateSquareBookingInput) {
