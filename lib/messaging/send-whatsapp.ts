@@ -2,6 +2,7 @@ import "server-only";
 
 import { env, requireEnv } from "@/lib/env";
 import {
+  logWorkflowInfo,
   logSupabaseWorkflowEvent,
   logTelnyxRequest,
   logTelnyxResponse,
@@ -82,6 +83,42 @@ type TelnyxWhatsAppResponse = {
   };
 };
 
+type TelnyxTemplateTextParameter = {
+  type: "text";
+  text: string;
+};
+
+type TelnyxTemplateBodyComponent = {
+  type: "body";
+  parameters: TelnyxTemplateTextParameter[];
+};
+
+type TelnyxTemplateButtonComponent = {
+  type: "button";
+  sub_type: "url";
+  index: number;
+  parameters: TelnyxTemplateTextParameter[];
+};
+
+type TelnyxTemplateComponent = TelnyxTemplateBodyComponent | TelnyxTemplateButtonComponent;
+
+type TelnyxTemplateMessagePayload = {
+  from: string;
+  to: string;
+  webhook_url?: string;
+  whatsapp_message: {
+    type: "template";
+    template: {
+      name: string;
+      language: {
+        code: string;
+        policy: "deterministic";
+      };
+      components: TelnyxTemplateComponent[];
+    };
+  };
+};
+
 export function getTelnyxWhatsAppConfig(): TelnyxWhatsAppConfig {
   return {
     apiKey: requireEnv("TELNYX_API_KEY").trim(),
@@ -141,6 +178,15 @@ async function withTelnyxRetry<T>(operation: () => Promise<T>, args: TelnyxWhats
 async function sendTelnyxWhatsAppRequest<T>(args: TelnyxWhatsAppRequestArgs): Promise<T> {
   const config = getTelnyxWhatsAppConfig();
   const startedAt = Date.now();
+  const payload = buildTelnyxTemplateMessagePayload({
+    from: config.fromNumber,
+    to: args.to,
+    webhookUrl: config.webhookUrl,
+    templateName: args.templateName,
+    bodyParameters: args.bodyParameters,
+    buttonUrlParameter: args.buttonUrlParameter,
+  });
+  validateTelnyxTemplateMessagePayload(payload);
 
   logTelnyxRequest({
     operation: "telnyx_whatsapp_send",
@@ -150,6 +196,19 @@ async function sendTelnyxWhatsAppRequest<T>(args: TelnyxWhatsAppRequestArgs): Pr
     templateName: args.templateName,
     to: args.to,
   });
+  logWorkflowInfo("telnyx.whatsapp.request.payload", {
+    operation: "telnyx_whatsapp_send",
+    step: "request_payload",
+    appointment_intent_id: args.appointmentIntentId,
+    message_type: args.messageType,
+    template_name: args.templateName,
+    to_phone: args.to,
+    payload,
+    parameter_types: describeTelnyxPayloadTypes(payload),
+    template_components: payload.whatsapp_message.template.components,
+    variable_substitutions: describeTemplateVariableSubstitutions(payload),
+    schema_audit: describeTelnyxTemplateSchemaAudit(payload),
+  });
 
   try {
     const response = await fetch(TELNYX_WHATSAPP_MESSAGES_URL, {
@@ -158,16 +217,7 @@ async function sendTelnyxWhatsAppRequest<T>(args: TelnyxWhatsAppRequestArgs): Pr
         Authorization: `Bearer ${config.apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(
-        buildTelnyxTemplateMessagePayload({
-          from: config.fromNumber,
-          to: args.to,
-          webhookUrl: config.webhookUrl,
-          templateName: args.templateName,
-          bodyParameters: args.bodyParameters,
-          buttonUrlParameter: args.buttonUrlParameter,
-        }),
-      ),
+      body: JSON.stringify(payload),
     });
     const durationMs = Date.now() - startedAt;
 
@@ -352,7 +402,7 @@ export function buildTelnyxTemplateMessagePayload(input: {
   templateName: string;
   bodyParameters: string[];
   buttonUrlParameter?: string;
-}) {
+}): TelnyxTemplateMessagePayload {
   return {
     from: input.from,
     to: input.to,
@@ -363,6 +413,7 @@ export function buildTelnyxTemplateMessagePayload(input: {
         name: input.templateName,
         language: {
           code: "en",
+          policy: "deterministic",
         },
         components: [
           {
@@ -378,7 +429,7 @@ export function buildTelnyxTemplateMessagePayload(input: {
                 {
                   type: "button",
                   sub_type: "url",
-                  index: "0",
+                  index: 0,
                   // Dynamic URL button parameters fill the button suffix only.
                   // For /pay/{{1}}, pass the secure pay token, never the full Square checkout URL.
                   parameters: [
@@ -392,6 +443,142 @@ export function buildTelnyxTemplateMessagePayload(input: {
             : []),
         ],
       },
+    },
+  };
+}
+
+export function validateTelnyxTemplateMessagePayload(payload: TelnyxTemplateMessagePayload) {
+  assertNonEmptyString(payload.from, "from");
+  assertNonEmptyString(payload.to, "to");
+
+  if (payload.webhook_url !== undefined) {
+    assertNonEmptyString(payload.webhook_url, "webhook_url");
+  }
+
+  if (payload.whatsapp_message.type !== "template") {
+    throw new Error("Telnyx WhatsApp payload whatsapp_message.type must be \"template\".");
+  }
+
+  const template = payload.whatsapp_message.template;
+  assertNonEmptyString(template.name, "whatsapp_message.template.name");
+  assertNonEmptyString(template.language.code, "whatsapp_message.template.language.code");
+
+  if (template.language.policy !== "deterministic") {
+    throw new Error("whatsapp_message.template.language.policy must be \"deterministic\".");
+  }
+
+  if (!Array.isArray(template.components) || template.components.length === 0) {
+    throw new Error("Telnyx WhatsApp template components must be a non-empty array.");
+  }
+
+  template.components.forEach((component, componentIndex) => {
+    const path = `whatsapp_message.template.components[${componentIndex}]`;
+
+    assertNonEmptyString(component.type, `${path}.type`);
+
+    if (component.type === "body") {
+      assertTextParameters(component.parameters, `${path}.parameters`);
+      return;
+    }
+
+    if (component.type === "button") {
+      if (component.sub_type !== "url") {
+        throw new Error(`${path}.sub_type must be "url".`);
+      }
+
+      if (!Number.isInteger(component.index)) {
+        throw new Error(`${path}.index must be an integer number, not ${typeof component.index}.`);
+      }
+
+      assertTextParameters(component.parameters, `${path}.parameters`);
+      return;
+    }
+
+    throw new Error(`${path}.type is not supported by this WhatsApp template sender.`);
+  });
+}
+
+function assertTextParameters(parameters: TelnyxTemplateTextParameter[], path: string) {
+  if (!Array.isArray(parameters)) {
+    throw new Error(`${path} must be an array.`);
+  }
+
+  parameters.forEach((parameter, parameterIndex) => {
+    const parameterPath = `${path}[${parameterIndex}]`;
+
+    if (parameter.type !== "text") {
+      throw new Error(`${parameterPath}.type must be "text".`);
+    }
+
+    assertNonEmptyString(parameter.text, `${parameterPath}.text`);
+  });
+}
+
+function assertNonEmptyString(value: unknown, path: string) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${path} must be a non-empty string.`);
+  }
+}
+
+function describeTelnyxPayloadTypes(payload: TelnyxTemplateMessagePayload) {
+  return {
+    from: typeof payload.from,
+    to: typeof payload.to,
+    webhook_url: payload.webhook_url === undefined ? "undefined" : typeof payload.webhook_url,
+    whatsapp_message_type: typeof payload.whatsapp_message.type,
+    template_name: typeof payload.whatsapp_message.template.name,
+    language_code: typeof payload.whatsapp_message.template.language.code,
+    language_policy: typeof payload.whatsapp_message.template.language.policy,
+    components: payload.whatsapp_message.template.components.map((component, componentIndex) => ({
+      component_index: componentIndex,
+      type: component.type,
+      type_typeof: typeof component.type,
+      sub_type: component.type === "button" ? component.sub_type : undefined,
+      sub_type_typeof: component.type === "button" ? typeof component.sub_type : undefined,
+      index: component.type === "button" ? component.index : undefined,
+      index_typeof: component.type === "button" ? typeof component.index : undefined,
+      parameters: component.parameters.map((parameter, parameterIndex) => ({
+        parameter_index: parameterIndex,
+        type: parameter.type,
+        type_typeof: typeof parameter.type,
+        text_typeof: typeof parameter.text,
+        text_length: parameter.text.length,
+      })),
+    })),
+  };
+}
+
+function describeTemplateVariableSubstitutions(payload: TelnyxTemplateMessagePayload) {
+  return payload.whatsapp_message.template.components.map((component, componentIndex) => ({
+    component_index: componentIndex,
+    component_type: component.type,
+    button_index: component.type === "button" ? component.index : undefined,
+    substitutions: component.parameters.map((parameter, parameterIndex) => ({
+      variable_position: parameterIndex + 1,
+      parameter_type: parameter.type,
+      text: parameter.text,
+    })),
+  }));
+}
+
+function describeTelnyxTemplateSchemaAudit(payload: TelnyxTemplateMessagePayload) {
+  return {
+    integer_fields: payload.whatsapp_message.template.components.flatMap((component, componentIndex) =>
+      component.type === "button"
+        ? [
+            {
+              path: `whatsapp_message.template.components[${componentIndex}].index`,
+              value: component.index,
+              typeof: typeof component.index,
+            },
+          ]
+        : [],
+    ),
+    absent_fields: {
+      currency: true,
+      media: true,
+      media_indexes: true,
+      expiration: true,
     },
   };
 }
