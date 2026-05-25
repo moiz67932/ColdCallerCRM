@@ -403,6 +403,25 @@ export function buildTelnyxTemplateMessagePayload(input: {
   bodyParameters: string[];
   buttonUrlParameter?: string;
 }): TelnyxTemplateMessagePayload {
+  const components: TelnyxTemplateComponent[] = [
+    {
+      type: "body",
+      // Body parameters fill template body variables in order: {{1}}, {{2}}, {{3}}, etc.
+      parameters: buildTextParameters(input.bodyParameters),
+    },
+  ];
+
+  if (input.buttonUrlParameter) {
+    components.push({
+      type: "button",
+      sub_type: "url",
+      index: 0,
+      // Dynamic URL button parameters fill the button suffix only.
+      // For /pay/{{1}}, pass the secure pay token, never the full Square checkout URL.
+      parameters: buildTextParameters([input.buttonUrlParameter]),
+    });
+  }
+
   return {
     from: input.from,
     to: input.to,
@@ -415,36 +434,17 @@ export function buildTelnyxTemplateMessagePayload(input: {
           code: "en",
           policy: "deterministic",
         },
-        components: [
-          {
-            type: "body",
-            // Body parameters fill template body variables in order: {{1}}, {{2}}, {{3}}, etc.
-            parameters: input.bodyParameters.map((parameter) => ({
-              type: "text",
-              text: parameter,
-            })),
-          },
-          ...(input.buttonUrlParameter
-            ? [
-                {
-                  type: "button",
-                  sub_type: "url",
-                  index: 0,
-                  // Dynamic URL button parameters fill the button suffix only.
-                  // For /pay/{{1}}, pass the secure pay token, never the full Square checkout URL.
-                  parameters: [
-                    {
-                      type: "text",
-                      text: input.buttonUrlParameter,
-                    },
-                  ],
-                },
-              ]
-            : []),
-        ],
+        components,
       },
     },
   };
+}
+
+function buildTextParameters(parameters: string[]): TelnyxTemplateTextParameter[] {
+  return parameters.map((parameter) => ({
+    type: "text",
+    text: parameter,
+  }));
 }
 
 export function validateTelnyxTemplateMessagePayload(payload: TelnyxTemplateMessagePayload) {
