@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 
 import { after } from "next/server";
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 
 import { prisma } from "@/lib/workstation-db";
 import { parseTelnyxEvent } from "@/lib/telnyx/events";
 import { verifyTelnyxSignature } from "@/lib/telnyx/signature";
 import { processMessagingWebhookEvent } from "@/lib/telnyx/webhook-processor";
+import { failJson, okJson } from "@/lib/api/paid-appointment-response";
 
 export const runtime = "nodejs";
 
@@ -38,7 +39,10 @@ export async function POST(request: NextRequest) {
       // Ignore duplicate malformed payload inserts.
     }
 
-    return NextResponse.json({ accepted: false, error: "Malformed webhook payload" }, { status: 400 });
+    return failJson(
+      { errorCode: "VALIDATION_FAILED", step: "parse_telnyx_webhook", message: "Malformed webhook payload" },
+      { status: 400 },
+    );
   }
 
   const signatureResult = verifyTelnyxSignature({
@@ -69,19 +73,36 @@ export async function POST(request: NextRequest) {
     });
 
     if (!signatureResult.verified) {
-      return NextResponse.json({ accepted: false, error: signatureResult.reason }, { status: 401 });
+      return failJson(
+        {
+          errorCode: "INVALID_TELNYX_SIGNATURE",
+          step: "verify_signature",
+          message: "Invalid Telnyx webhook signature.",
+          safeDetails: { reason: signatureResult.reason },
+        },
+        { status: 401 },
+      );
     }
 
     after(() => {
       void processMessagingWebhookEvent(stored.id, parsedEvent);
     });
 
-    return NextResponse.json({ accepted: true });
+    return okJson(
+      { accepted: true, event_type: parsedEvent.data.event_type },
+      { step: "telnyx_webhook_accepted", message: "Telnyx messaging webhook accepted." },
+    );
   } catch (error) {
     if (error instanceof Error && error.message.toLowerCase().includes("duplicate")) {
-      return NextResponse.json({ accepted: true, duplicate: true });
+      return okJson(
+        { accepted: true, duplicate: true, event_type: parsedEvent.data.event_type },
+        { step: "telnyx_webhook_duplicate_ignored", message: "Duplicate Telnyx messaging webhook ignored." },
+      );
     }
 
-    return NextResponse.json({ accepted: false }, { status: 500 });
+    return failJson(
+      { errorCode: "TELNYX_WEBHOOK_STORE_FAILED", step: "store_telnyx_webhook", message: "Unable to store Telnyx webhook." },
+      { status: 500 },
+    );
   }
 }
