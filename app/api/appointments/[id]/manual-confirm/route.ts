@@ -7,6 +7,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { logError, logWarn } from "@/lib/logger";
 import { buildSquareBookingIdempotencyKey } from "@/lib/appointments/idempotency";
 import { insertAppointmentWorkflowEvent } from "@/lib/appointments/workflow-events";
+import { insertTelnyxMessageEvent } from "@/lib/appointments/message-events";
 import { failJson, okJson, validationFailJson, manualReviewJson } from "@/lib/api/paid-appointment-response";
 import {
   createDebugId,
@@ -22,7 +23,6 @@ import {
   type ManualConfirmInput,
 } from "@/lib/validation/paid-appointment";
 import {
-  normalizeMessageEventRow,
   type SupabaseRow,
 } from "@/lib/category7-db";
 
@@ -367,17 +367,26 @@ async function sendConfirmationMessageSafely(
       selectedTimeDisplay: getString(appointmentIntent, "selected_time_display") ?? requireString(appointmentIntent, "selected_start_at"),
     });
 
-    await insertMessageEvent(supabase, {
-      organization_id: getString(appointmentIntent, "organization_id"),
-      appointment_intent_id: appointmentIntentId,
-      provider: "telnyx",
-      channel: "whatsapp",
-      message_type: "appointment_confirmation",
-      recipient_phone_e164: getString(appointmentIntent, "caller_phone_e164"),
-      provider_message_id: message.providerMessageId,
-      status: message.status,
-      payload: message.raw,
-    });
+    await insertTelnyxMessageEvent(
+      supabase,
+      {
+        organizationId: getString(appointmentIntent, "organization_id"),
+        appointmentIntentId,
+        appointmentIntent,
+        toPhoneE164: getString(appointmentIntent, "caller_phone_e164") ?? getString(appointmentIntent, "caller_phone"),
+        messageType: "appointment_confirmation",
+        providerMessageId: message.providerMessageId,
+        status: "sent",
+        payload: {
+          provider_response: message.raw,
+          telnyx_status: message.status,
+        },
+      },
+      {
+        operation: "manual_confirm",
+        failureEventName: "appointments.manual_confirm.message_event_insert_failed",
+      },
+    );
     await insertWorkflowEvent(supabase, {
       organization_id: getString(appointmentIntent, "organization_id"),
       appointment_intent_id: appointmentIntentId,
@@ -393,6 +402,22 @@ async function sendConfirmationMessageSafely(
       appointmentIntentId,
       message,
     });
+    await insertTelnyxMessageEvent(
+      supabase,
+      {
+        organizationId: getString(appointmentIntent, "organization_id"),
+        appointmentIntentId,
+        appointmentIntent,
+        toPhoneE164: getString(appointmentIntent, "caller_phone_e164") ?? getString(appointmentIntent, "caller_phone"),
+        messageType: "appointment_confirmation",
+        status: "failed",
+        error,
+      },
+      {
+        operation: "manual_confirm",
+        failureEventName: "appointments.manual_confirm.message_event_insert_failed",
+      },
+    );
     await safeUpdateLastError(supabase, appointmentIntentId, message);
     await insertWorkflowEvent(supabase, {
       organization_id: getString(appointmentIntent, "organization_id"),
@@ -447,14 +472,6 @@ async function insertWorkflowEvent(supabase: ReturnType<typeof getSupabaseAdmin>
     operation: "manual_confirm",
     failureEventName: "appointments.manual_confirm.workflow_event_insert_failed",
   });
-}
-
-async function insertMessageEvent(supabase: ReturnType<typeof getSupabaseAdmin>, row: SupabaseRow) {
-  const { error } = await supabase.from("message_events").insert(normalizeMessageEventRow(row));
-
-  if (error) {
-    logWarn("appointments.manual_confirm.message_event_insert_failed", { message: error.message });
-  }
 }
 
 function appendInternalNote(existingNote: string | null, newNote: string | undefined, now: Date) {

@@ -6,6 +6,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { logError, logWarn } from "@/lib/logger";
 import { buildPaymentLinkIdempotencyKey } from "@/lib/appointments/idempotency";
 import { insertAppointmentWorkflowEvent } from "@/lib/appointments/workflow-events";
+import { insertTelnyxMessageEvent } from "@/lib/appointments/message-events";
 import { failJson, okJson, validationFailJson, telnyxFailJson } from "@/lib/api/paid-appointment-response";
 import {
   createDebugId,
@@ -22,7 +23,6 @@ import {
   type SendLinkAgainInput,
 } from "@/lib/validation/paid-appointment";
 import {
-  normalizeMessageEventRow,
   type SupabaseRow,
 } from "@/lib/category7-db";
 
@@ -189,17 +189,26 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
         selectedTimeDisplay: getString(appointmentIntent, "selected_time_display") ?? undefined,
       });
 
-      await insertMessageEvent(supabase, {
-        organization_id: getString(appointmentIntent, "organization_id"),
-        appointment_intent_id: appointmentIntentId,
-        provider: "telnyx",
-        channel: "whatsapp",
-        message_type: "payment_link",
-        recipient_phone_e164: recipient,
-        provider_message_id: message.providerMessageId,
-        status: message.status,
-        payload: message.raw,
-      });
+      await insertTelnyxMessageEvent(
+        supabase,
+        {
+          organizationId: getString(appointmentIntent, "organization_id"),
+          appointmentIntentId,
+          appointmentIntent,
+          toPhoneE164: recipient,
+          messageType: "payment_link",
+          providerMessageId: message.providerMessageId,
+          status: "sent",
+          payload: {
+            provider_response: message.raw,
+            telnyx_status: message.status,
+          },
+        },
+        {
+          operation: "send_link_again",
+          failureEventName: "appointments.send_link_again.message_event_insert_failed",
+        },
+      );
 
       appointmentIntent = await updateAppointmentIntent(supabase, appointmentIntentId, {
         ...markPaymentLinkSent(),
@@ -254,6 +263,27 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       );
     } catch (error) {
       const safeError = error instanceof Error ? error.message : "Unknown WhatsApp send error.";
+
+      await insertTelnyxMessageEvent(
+        supabase,
+        {
+          organizationId: getString(appointmentIntent, "organization_id"),
+          appointmentIntentId,
+          appointmentIntent,
+          toPhoneE164: recipient,
+          messageType: "payment_link",
+          status: "failed",
+          error,
+          payload: {
+            reused_existing_link: reusedExistingLink,
+            force_new_link_ignored: forceNewLinkIgnored,
+          },
+        },
+        {
+          operation: "send_link_again",
+          failureEventName: "appointments.send_link_again.message_event_insert_failed",
+        },
+      );
 
       await insertWorkflowEvent(supabase, {
         organization_id: getString(appointmentIntent, "organization_id"),
@@ -411,14 +441,6 @@ async function insertWorkflowEvent(supabase: ReturnType<typeof getSupabaseAdmin>
     operation: "send_link_again",
     failureEventName: "appointments.send_link_again.workflow_event_insert_failed",
   });
-}
-
-async function insertMessageEvent(supabase: ReturnType<typeof getSupabaseAdmin>, row: SupabaseRow) {
-  const { error } = await supabase.from("message_events").insert(normalizeMessageEventRow(row));
-
-  if (error) {
-    logWarn("appointments.send_link_again.message_event_insert_failed", { message: error.message });
-  }
 }
 
 function requireString(row: SupabaseRow, key: string) {

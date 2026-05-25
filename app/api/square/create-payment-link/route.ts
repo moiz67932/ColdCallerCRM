@@ -6,6 +6,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { logError, logInfo, logWarn } from "@/lib/logger";
 import { buildPaymentLinkIdempotencyKey } from "@/lib/appointments/idempotency";
 import { insertAppointmentWorkflowEvent } from "@/lib/appointments/workflow-events";
+import { insertTelnyxMessageEvent } from "@/lib/appointments/message-events";
 import { failJson, okJson, validationFailJson } from "@/lib/api/paid-appointment-response";
 import {
   createDebugId,
@@ -22,7 +23,6 @@ import {
 } from "@/lib/validation/paid-appointment";
 import {
   normalizeAppointmentPaymentRow,
-  normalizeMessageEventRow,
   type SupabaseRow,
 } from "@/lib/category7-db";
 
@@ -334,17 +334,26 @@ async function trySendPaymentLinkMessage(
       selectedTimeDisplay: getString(appointmentIntent, "selected_time_display") ?? undefined,
     });
 
-    await insertMessageEvent(supabase, {
-      organization_id: getString(appointmentIntent, "organization_id"),
-      appointment_intent_id: appointmentIntentId,
-      provider: "telnyx",
-      channel: "whatsapp",
-      message_type: "payment_link",
-      recipient_phone_e164: getString(appointmentIntent, "caller_phone_e164"),
-      provider_message_id: message.providerMessageId,
-      status: message.status,
-      payload: message.raw,
-    });
+    await insertTelnyxMessageEvent(
+      supabase,
+      {
+        organizationId: getString(appointmentIntent, "organization_id"),
+        appointmentIntentId,
+        appointmentIntent,
+        toPhoneE164: getString(appointmentIntent, "caller_phone_e164"),
+        messageType: "payment_link",
+        providerMessageId: message.providerMessageId,
+        status: "sent",
+        payload: {
+          provider_response: message.raw,
+          telnyx_status: message.status,
+        },
+      },
+      {
+        operation: "create_payment_link",
+        failureEventName: "square.manual_payment_link.message_event_insert_failed",
+      },
+    );
 
     const updatedIntent = await updateAppointmentIntent(supabase, appointmentIntentId, {
       ...markPaymentLinkSent(),
@@ -372,6 +381,22 @@ async function trySendPaymentLinkMessage(
   } catch (error) {
     const safeError = error instanceof Error ? error.message : "Unknown WhatsApp send error.";
 
+    await insertTelnyxMessageEvent(
+      supabase,
+      {
+        organizationId: getString(appointmentIntent, "organization_id"),
+        appointmentIntentId,
+        appointmentIntent,
+        toPhoneE164: getString(appointmentIntent, "caller_phone_e164"),
+        messageType: "payment_link",
+        status: "failed",
+        error,
+      },
+      {
+        operation: "create_payment_link",
+        failureEventName: "square.manual_payment_link.message_event_insert_failed",
+      },
+    );
     await insertWorkflowEvent(supabase, {
       organization_id: getString(appointmentIntent, "organization_id"),
       appointment_intent_id: appointmentIntentId,
@@ -479,14 +504,6 @@ async function insertWorkflowEvent(supabase: ReturnType<typeof getSupabaseAdmin>
     operation: "create_payment_link",
     failureEventName: "square.manual_payment_link.workflow_event_insert_failed",
   });
-}
-
-async function insertMessageEvent(supabase: ReturnType<typeof getSupabaseAdmin>, row: SupabaseRow) {
-  const { error } = await supabase.from("message_events").insert(normalizeMessageEventRow(row));
-
-  if (error) {
-    logWarn("square.manual_payment_link.message_event_insert_failed", { message: error.message });
-  }
 }
 
 function buildResponse(

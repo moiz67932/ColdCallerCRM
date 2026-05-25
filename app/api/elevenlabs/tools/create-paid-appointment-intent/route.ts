@@ -9,6 +9,7 @@ import { hasValidElevenLabsToolBearerAuth } from "@/lib/elevenlabs/tool-auth";
 import { logError, logInfo, logWarn } from "@/lib/logger";
 import { buildPaymentLinkIdempotencyKey } from "@/lib/appointments/idempotency";
 import { insertAppointmentWorkflowEvent } from "@/lib/appointments/workflow-events";
+import { insertTelnyxMessageEvent } from "@/lib/appointments/message-events";
 import { failJson, okJson, squareFailJson, validationFailJson } from "@/lib/api/paid-appointment-response";
 import {
   createDebugId,
@@ -25,7 +26,6 @@ import {
   type CreatePaidAppointmentIntentInput,
 } from "@/lib/validation/paid-appointment";
 import {
-  normalizeMessageEventRow,
   type SupabaseRow,
 } from "@/lib/category7-db";
 
@@ -179,28 +179,64 @@ export async function POST(request: NextRequest) {
       payload: { square_payment_link_id: paymentLink.paymentLinkId, square_order_id: paymentLink.orderId },
     });
 
-    const whatsAppResult = await sendPaymentLinkWhatsApp({
-      appointmentIntentId,
-      toPhoneE164: callerPhoneE164,
-      patientName: input.caller_name,
-      serviceName: input.service_name,
-      clinicName: resolvedContext.clinicName,
-      paymentLinkUrl: brandedPayUrl,
-      paymentButtonToken: payToken,
-      selectedTimeDisplay: input.selected_time_display,
-    });
+    const whatsAppResult = await (async () => {
+      try {
+        return await sendPaymentLinkWhatsApp({
+          appointmentIntentId,
+          toPhoneE164: callerPhoneE164,
+          patientName: input.caller_name,
+          serviceName: input.service_name,
+          clinicName: resolvedContext.clinicName,
+          paymentLinkUrl: brandedPayUrl,
+          paymentButtonToken: payToken,
+          selectedTimeDisplay: input.selected_time_display,
+        });
+      } catch (error) {
+        await insertTelnyxMessageEvent(
+          supabase,
+          {
+            organizationId: resolvedContext.organizationId,
+            appointmentIntentId,
+            toPhoneE164: callerPhoneE164,
+            messageType: "payment_link",
+            status: "failed",
+            error,
+            payload: { message_type: "payment_link" },
+          },
+          {
+            operation: "create_paid_appointment_intent",
+            failureEventName: "paid_appointment_intent.message_event_insert_failed",
+          },
+        );
 
-    await insertMessageEvent(supabase, {
-      organization_id: resolvedContext.organizationId,
-      appointment_intent_id: appointmentIntentId,
-      provider: "telnyx",
-      channel: "whatsapp",
-      message_type: "payment_link",
-      recipient_phone_e164: callerPhoneE164,
-      provider_message_id: whatsAppResult.providerMessageId,
-      status: whatsAppResult.status,
-      payload: whatsAppResult.raw,
-    });
+        throw new PaidAppointmentIntentError({
+          errorCode: "PAYMENT_LINK_SEND_FAILED",
+          step: "send_whatsapp",
+          say: "I created the secure deposit link, but I'm having trouble sending it to WhatsApp right now. A team member can resend it.",
+          status: 502,
+        });
+      }
+    })();
+
+    await insertTelnyxMessageEvent(
+      supabase,
+      {
+        organizationId: resolvedContext.organizationId,
+        appointmentIntentId,
+        toPhoneE164: callerPhoneE164,
+        messageType: "payment_link",
+        providerMessageId: whatsAppResult.providerMessageId,
+        status: "sent",
+        payload: {
+          provider_response: whatsAppResult.raw,
+          telnyx_status: whatsAppResult.status,
+        },
+      },
+      {
+        operation: "create_paid_appointment_intent",
+        failureEventName: "paid_appointment_intent.message_event_insert_failed",
+      },
+    );
 
     await updateAppointmentIntent(supabase, appointmentIntentId, {
       ...markPaymentLinkSent(),
@@ -543,14 +579,6 @@ async function insertWorkflowEvent(supabase: ReturnType<typeof getSupabaseAdmin>
     operation: "create_paid_appointment_intent",
     failureEventName: "paid_appointment_intent.workflow_event_insert_failed",
   });
-}
-
-async function insertMessageEvent(supabase: ReturnType<typeof getSupabaseAdmin>, row: SupabaseRow) {
-  const { error } = await supabase.from("message_events").insert(normalizeMessageEventRow(row));
-
-  if (error) {
-    logWarn("paid_appointment_intent.message_event_insert_failed", { message: error.message });
-  }
 }
 
 function resolveCallerPhoneE164(callerPhone: string) {

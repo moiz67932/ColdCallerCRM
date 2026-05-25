@@ -26,9 +26,24 @@ export function normalizeMessageEventRow(row: SupabaseRow): SupabaseRow {
     normalized.to_phone = normalized.to_phone_e164;
   }
 
-  if (typeof normalized.status === "string" && !MESSAGE_EVENT_STATUSES.has(normalized.status)) {
-    normalized.provider_status = normalized.provider_status ?? normalized.status;
+  const status = getNonEmptyString(normalized.status);
+  const providerStatus = getNonEmptyString(normalized.provider_status);
+
+  if (!status) {
+    normalized.status = "queued";
+  } else if (!MESSAGE_EVENT_STATUSES.has(status)) {
+    normalized.provider_status = providerStatus ?? status;
     normalized.status = "sent";
+  } else {
+    normalized.status = status;
+  }
+
+  if (!providerStatus && normalized.provider_status !== undefined) {
+    delete normalized.provider_status;
+  }
+
+  if (normalized.payload === undefined || normalized.payload === null) {
+    normalized.payload = {};
   }
 
   delete normalized.recipient_phone_e164;
@@ -54,4 +69,8 @@ export function normalizeAppointmentPaymentRow(row: SupabaseRow): SupabaseRow {
   delete normalized.square_payment_link_url;
   delete normalized.raw;
   return normalized;
+}
+
+function getNonEmptyString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
