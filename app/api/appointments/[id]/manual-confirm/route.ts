@@ -195,6 +195,8 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     const now = new Date();
     appointmentIntent = await updateAppointmentIntent(supabase, appointmentIntentId, {
       ...markConfirmed(now),
+      last_error: null,
+      last_error_at: null,
       internal_notes: appendInternalNote(getString(appointmentIntent, "internal_notes"), input.note, now),
     });
 

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { BarChart3, Clock3, Import, PhoneCall, Settings, Bot } from "lucide-react";
+import { BarChart3, CalendarClock, Clock3, Import, PhoneCall, Settings, Bot } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,7 @@ const navItems = [
   { href: "/import", label: "Lead Import", icon: Import },
   { href: "/queue", label: "Calling Workspace", icon: PhoneCall },
   { href: "/history", label: "Call History", icon: Clock3 },
+  { href: "/appointments", label: "Appointments", icon: CalendarClock },
   { href: "/automations", label: "Automations", icon: Bot },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
