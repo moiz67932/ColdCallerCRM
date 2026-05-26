@@ -5,6 +5,7 @@ import { createSquareBooking, findExactAvailableSlot, searchSquareAvailability }
 import { getOrCreateSquareCustomer } from "@/lib/square/customers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { logError, logWarn } from "@/lib/logger";
+import { formatAppointmentDateTimeForMessage, getAppointmentTimeZone } from "@/lib/appointments/appointment-time-format";
 import { buildSquareBookingIdempotencyKey } from "@/lib/appointments/idempotency";
 import { insertAppointmentWorkflowEvent } from "@/lib/appointments/workflow-events";
 import { insertTelnyxMessageEvent } from "@/lib/appointments/message-events";
@@ -364,7 +365,14 @@ async function sendConfirmationMessageSafely(
       patientName: requireString(appointmentIntent, "caller_name"),
       serviceName: requireString(appointmentIntent, "service_name"),
       clinicName: getString(appointmentIntent, "clinic_name") ?? "the clinic",
-      selectedTimeDisplay: getString(appointmentIntent, "selected_time_display") ?? requireString(appointmentIntent, "selected_start_at"),
+      selectedTimeDisplay: formatAppointmentDateTimeForMessage({
+        selectedStartAt: getString(appointmentIntent, "selected_start_at"),
+        selectedTimeDisplay: getString(appointmentIntent, "selected_time_display"),
+        timeZone: getAppointmentTimeZone(appointmentIntent),
+        appointmentIntentId,
+        operation: "manual_confirm",
+        step: "send_confirmation_whatsapp",
+      }),
     });
 
     await insertTelnyxMessageEvent(

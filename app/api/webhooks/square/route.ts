@@ -18,6 +18,7 @@ import { getOrCreateSquareCustomer } from "@/lib/square/customers";
 import { mapSquarePaymentStatus, retrieveSquarePayment } from "@/lib/square/payments";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { logError, logWarn } from "@/lib/logger";
+import { formatAppointmentDateTimeForMessage, getAppointmentTimeZone } from "@/lib/appointments/appointment-time-format";
 import { buildSquareBookingIdempotencyKey } from "@/lib/appointments/idempotency";
 import { insertAppointmentWorkflowEvent } from "@/lib/appointments/workflow-events";
 import { insertTelnyxMessageEvent } from "@/lib/appointments/message-events";
@@ -616,7 +617,7 @@ async function sendConfirmationMessageSafely(
       patientName: requireString(appointmentIntent, "caller_name"),
       serviceName: requireString(appointmentIntent, "service_name"),
       clinicName: getString(appointmentIntent, "clinic_name") ?? "the clinic",
-      selectedTimeDisplay: getString(appointmentIntent, "selected_time_display") ?? requireString(appointmentIntent, "selected_start_at"),
+      selectedTimeDisplay: formatAppointmentTimeForMessage(appointmentIntent, appointmentIntentId, "send_confirmation_whatsapp"),
     });
 
     logWorkflowInfo("confirmation_whatsapp_sent", {
@@ -701,7 +702,7 @@ async function sendManualReviewMessageSafely(
       patientName: requireString(appointmentIntent, "caller_name"),
       serviceName: requireString(appointmentIntent, "service_name"),
       clinicName: getString(appointmentIntent, "clinic_name") ?? "the clinic",
-      selectedTimeDisplay: getString(appointmentIntent, "selected_time_display") ?? undefined,
+      selectedTimeDisplay: formatAppointmentTimeForMessage(appointmentIntent, appointmentIntentId, "send_manual_review_whatsapp"),
     });
 
     await insertTelnyxMessageEvent(
@@ -801,6 +802,17 @@ async function ensureConfirmedBookingState(
 
 function isBookingConfirmed(appointmentIntent: SupabaseRow) {
   return Boolean(getString(appointmentIntent, "square_booking_id") || getString(appointmentIntent, "confirmed_at"));
+}
+
+function formatAppointmentTimeForMessage(appointmentIntent: SupabaseRow, appointmentIntentId: string, step: string) {
+  return formatAppointmentDateTimeForMessage({
+    selectedStartAt: getString(appointmentIntent, "selected_start_at"),
+    selectedTimeDisplay: getString(appointmentIntent, "selected_time_display"),
+    timeZone: getAppointmentTimeZone(appointmentIntent),
+    appointmentIntentId,
+    operation: "square_webhook",
+    step,
+  });
 }
 
 async function retrievePaymentSafely(paymentId: string | null) {
