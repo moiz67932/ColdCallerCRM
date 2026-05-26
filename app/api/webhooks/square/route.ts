@@ -260,6 +260,7 @@ export async function POST(request: NextRequest) {
   });
 
   if (getString(appointmentIntent, "payment_status") === "completed" && getString(appointmentIntent, "square_booking_id")) {
+    appointmentIntent = await ensureConfirmedBookingState(supabase, appointmentIntent, appointmentIntentId);
     await insertWorkflowEvent(supabase, {
       organization_id: getString(appointmentIntent, "organization_id"),
       appointment_intent_id: appointmentIntentId,
@@ -278,7 +279,13 @@ export async function POST(request: NextRequest) {
       status: 200,
     });
     return okJson(
-      { received: true, duplicate_or_already_processed: true },
+      {
+        received: true,
+        duplicate_or_already_processed: true,
+        payment_status: "completed",
+        appointment_status: "confirmed",
+        square_booking_id: getString(appointmentIntent, "square_booking_id"),
+      },
       {
         step: "square_webhook_duplicate_ignored",
         message: "Duplicate event ignored",
@@ -395,6 +402,35 @@ export async function POST(request: NextRequest) {
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown booking error.";
+    const latestAppointmentIntent = (await findAppointmentIntentById(supabase, appointmentIntentId)) ?? appointmentIntent;
+
+    if (isBookingConfirmed(latestAppointmentIntent)) {
+      const restoredIntent = await ensureConfirmedBookingState(supabase, latestAppointmentIntent, appointmentIntentId);
+
+      logWorkflowInfo("manual_review_skipped_because_booking_confirmed", {
+        debug_id: debugId,
+        operation: "square_webhook",
+        step: "confirm_paid_appointment",
+        appointment_intent_id: appointmentIntentId,
+        square_payment_id: paymentId,
+        square_order_id: orderId,
+        square_booking_id: getString(restoredIntent, "square_booking_id"),
+        safe_message: "Manual review skipped because Square booking is already confirmed.",
+      });
+
+      return okJson(
+        {
+          received: true,
+          event_type: normalizedEvent.eventType,
+          payment_status: "completed",
+          appointment_status: "confirmed",
+          square_booking_id: getString(restoredIntent, "square_booking_id"),
+          manual_review_needed: false,
+          square_booking_action: "reused",
+        },
+        { step: "square_webhook_processed", message: "Square payment webhook processed.", debugId, appointmentIntentId },
+      );
+    }
 
     logError("square.webhook.confirmation_failed", { appointmentIntentId, message });
     logWorkflowError("square.webhook.confirmation_failed", {
@@ -430,8 +466,17 @@ async function confirmPaidAppointment(
   const existingBookingId = getString(appointmentIntent, "square_booking_id");
 
   if (existingBookingId) {
+    appointmentIntent = await ensureConfirmedBookingState(supabase, appointmentIntent, appointmentIntentId);
+    logWorkflowInfo("appointment_confirmed", {
+      operation: "square_webhook",
+      step: "confirm_existing_booking",
+      appointment_intent_id: appointmentIntentId,
+      square_booking_id: existingBookingId,
+      appointment_status: "confirmed",
+    });
+
     return {
-      appointmentStatus: getString(appointmentIntent, "appointment_status") ?? "square_booking_created",
+      appointmentStatus: "confirmed",
       squareBookingId: existingBookingId,
       manualReviewNeeded: false,
       reusedExistingBooking: true,
@@ -486,9 +531,25 @@ async function confirmPaidAppointment(
     square_booking_id: booking.bookingId,
     square_customer_id: customer.customerId,
     square_booking_created_at: now.toISOString(),
+    last_error: null,
+  });
+  logWorkflowInfo("square_booking_created", {
+    operation: "square_webhook",
+    step: "create_square_booking",
+    appointment_intent_id: appointmentIntentId,
+    square_booking_id: booking.bookingId,
+    square_customer_id: customer.customerId,
   });
   appointmentIntent = await updateAppointmentIntent(supabase, appointmentIntentId, {
     ...markConfirmed(now),
+    last_error: null,
+  });
+  logWorkflowInfo("appointment_confirmed", {
+    operation: "square_webhook",
+    step: "confirm_appointment",
+    appointment_intent_id: appointmentIntentId,
+    square_booking_id: booking.bookingId,
+    appointment_status: "confirmed",
   });
 
   await insertWorkflowEvent(supabase, {
@@ -515,6 +576,20 @@ async function markIntentManualReview(
   appointmentIntentId: string,
   lastError: string,
 ) {
+  const latestAppointmentIntent = (await findAppointmentIntentById(supabase, appointmentIntentId)) ?? appointmentIntent;
+
+  if (isBookingConfirmed(latestAppointmentIntent)) {
+    await ensureConfirmedBookingState(supabase, latestAppointmentIntent, appointmentIntentId);
+    logWorkflowInfo("manual_review_skipped_because_booking_confirmed", {
+      operation: "square_webhook",
+      step: "mark_manual_review",
+      appointment_intent_id: appointmentIntentId,
+      square_booking_id: getString(latestAppointmentIntent, "square_booking_id"),
+      safe_message: "Manual review skipped because Square booking is already confirmed.",
+    });
+    return;
+  }
+
   await updateAppointmentIntent(supabase, appointmentIntentId, {
     ...markManualReviewNeeded(),
     last_error: lastError,
@@ -542,6 +617,16 @@ async function sendConfirmationMessageSafely(
       serviceName: requireString(appointmentIntent, "service_name"),
       clinicName: getString(appointmentIntent, "clinic_name") ?? "the clinic",
       selectedTimeDisplay: getString(appointmentIntent, "selected_time_display") ?? requireString(appointmentIntent, "selected_start_at"),
+    });
+
+    logWorkflowInfo("confirmation_whatsapp_sent", {
+      operation: "square_webhook",
+      step: "send_confirmation_whatsapp",
+      appointment_intent_id: appointmentIntentId,
+      square_booking_id: getString(appointmentIntent, "square_booking_id"),
+      telnyx_message_id: message.providerMessageId,
+      message_type: "appointment_confirmation",
+      status: message.status,
     });
 
     await insertTelnyxMessageEvent(
@@ -683,6 +768,41 @@ async function findAppointmentIntentByOrderId(supabase: ReturnType<typeof getSup
   return data as SupabaseRow | null;
 }
 
+async function findAppointmentIntentById(supabase: ReturnType<typeof getSupabaseAdmin>, appointmentIntentId: string) {
+  const { data, error } = await supabase.from("appointment_intents").select("*").eq("id", appointmentIntentId).maybeSingle();
+
+  if (error) {
+    logWarn("square.webhook.intent_lookup_failed", { message: error.message });
+    return null;
+  }
+
+  return data as SupabaseRow | null;
+}
+
+async function ensureConfirmedBookingState(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  appointmentIntent: SupabaseRow,
+  appointmentIntentId: string,
+) {
+  const patch: SupabaseRow = {
+    appointment_status: "confirmed",
+    payment_status: "completed",
+    confirmed_at: getString(appointmentIntent, "confirmed_at") ?? new Date().toISOString(),
+    last_error: null,
+  };
+  const squareBookingId = getString(appointmentIntent, "square_booking_id");
+
+  if (squareBookingId) {
+    patch.square_booking_id = squareBookingId;
+  }
+
+  return updateAppointmentIntent(supabase, appointmentIntentId, patch);
+}
+
+function isBookingConfirmed(appointmentIntent: SupabaseRow) {
+  return Boolean(getString(appointmentIntent, "square_booking_id") || getString(appointmentIntent, "confirmed_at"));
+}
+
 async function retrievePaymentSafely(paymentId: string | null) {
   if (!paymentId) {
     return null;
@@ -746,6 +866,20 @@ async function safeUpdateLastError(
   appointmentIntentId: string,
   lastError: string,
 ) {
+  const appointmentIntent = await findAppointmentIntentById(supabase, appointmentIntentId);
+
+  if (appointmentIntent && isBookingConfirmed(appointmentIntent)) {
+    await ensureConfirmedBookingState(supabase, appointmentIntent, appointmentIntentId);
+    logWorkflowInfo("manual_review_skipped_because_booking_confirmed", {
+      operation: "square_webhook",
+      step: "update_last_error",
+      appointment_intent_id: appointmentIntentId,
+      square_booking_id: getString(appointmentIntent, "square_booking_id"),
+      safe_message: "last_error update skipped because Square booking is already confirmed.",
+    });
+    return;
+  }
+
   const { error } = await supabase.from("appointment_intents").update({ last_error: lastError }).eq("id", appointmentIntentId);
 
   if (error) {
