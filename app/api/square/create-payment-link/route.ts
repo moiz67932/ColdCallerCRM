@@ -588,8 +588,13 @@ function requireString(row: SupabaseRow, key: string) {
   return value;
 }
 
-function getString(row: SupabaseRow, key: string) {
-  const value = row[key];
+function getString(row: unknown, key: string) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    return null;
+  }
+
+  const record = row as SupabaseRow;
+  const value = record[key];
 
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
