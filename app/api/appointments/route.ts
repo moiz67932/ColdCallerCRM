@@ -58,7 +58,9 @@ export async function GET(request: NextRequest) {
       throw new Error(error.message);
     }
 
-    const rows = ((data ?? []) as SupabaseRow[]).filter((row) => matchesFilter(row, filter)).filter((row) => matchesSearch(row, search));
+    const rows = ((data ?? []) as unknown as SupabaseRow[])
+      .filter((row) => matchesFilter(row, filter))
+      .filter((row) => matchesSearch(row, search));
 
     return okJson(
       {
