@@ -294,6 +294,10 @@ export async function POST(request: NextRequest) {
     squareStatus ??= getString(squarePayment, "status");
   }
 
+  paymentId ??= getString(squarePayment, "id");
+  orderId ??= getString(squarePayment, "order_id");
+  squareStatus ??= getString(squarePayment, "status");
+
   const internalPaymentStatus = mapSquarePaymentStatus(squareStatus);
 
   if (internalPaymentStatus !== "completed") {
@@ -318,6 +322,29 @@ export async function POST(request: NextRequest) {
     return okJson(
       { received: true, event_type: normalizedEvent.eventType, payment_status: internalPaymentStatus },
       { step: "payment_status_updated", message: "Payment status updated.", debugId, appointmentIntentId },
+    );
+  }
+
+  if (!paymentId) {
+    logWorkflowError("square.webhook.completed_payment_missing_id", {
+      debug_id: debugId,
+      operation: "square_webhook",
+      step: "validate_completed_payment",
+      appointment_intent_id: appointmentIntentId,
+      square_order_id: orderId,
+      status: 422,
+      error_code: "COMPLETED_PAYMENT_MISSING_ID",
+      safe_message: "Completed Square payment webhook did not include a payment ID.",
+    });
+    return failJson(
+      {
+        errorCode: "COMPLETED_PAYMENT_MISSING_ID",
+        step: "validate_completed_payment",
+        message: "Completed Square payment webhook did not include a payment ID.",
+        debugId,
+        appointmentIntentId,
+      },
+      { status: 422 },
     );
   }
 
@@ -729,24 +756,115 @@ async function safeUpdateLastError(
 async function upsertAppointmentPayment(supabase: ReturnType<typeof getSupabaseAdmin>, row: SupabaseRow) {
   const normalizedRow = normalizeAppointmentPaymentRow(row);
   const paymentId = getString(normalizedRow, "square_payment_id");
+  const appointmentIntentId = getString(normalizedRow, "appointment_intent_id");
+  const orderId = getString(normalizedRow, "square_order_id");
 
   if (!paymentId) {
+    const fallbackConflictKey = "appointment_intent_id,square_order_id";
+
+    if (appointmentIntentId && orderId) {
+      const { data: existing, error: lookupError } = await supabase
+        .from("appointment_payments")
+        .select("id")
+        .eq("appointment_intent_id", appointmentIntentId)
+        .eq("square_order_id", orderId)
+        .limit(1)
+        .maybeSingle();
+
+      if (lookupError) {
+        logWarn("square.webhook.payment_lookup_failed", { message: lookupError.message });
+        return;
+      }
+
+      const existingId = getString(existing, "id");
+
+      if (existingId) {
+        const { error } = await supabase.from("appointment_payments").update(normalizedRow).eq("id", existingId);
+
+        if (error) {
+          logWarn("square.webhook.payment_update_failed", { message: error.message });
+          return;
+        }
+
+        logAppointmentPaymentUpsertSuccess(normalizedRow, fallbackConflictKey, "update");
+        return;
+      }
+    }
+
     const { error } = await supabase.from("appointment_payments").insert(normalizedRow);
 
     if (error) {
       logWarn("square.webhook.payment_insert_failed", { message: error.message });
+      return;
     }
 
+    logAppointmentPaymentUpsertSuccess(normalizedRow, "none", "insert");
     return;
   }
 
-  const { error } = await supabase.from("appointment_payments").upsert(normalizedRow, {
-    onConflict: "square_payment_id",
-  });
+  const conflictKey = "square_payment_id";
+  const { data: existing, error: lookupError } = await supabase
+    .from("appointment_payments")
+    .select("id")
+    .eq("square_payment_id", paymentId)
+    .limit(1)
+    .maybeSingle();
+
+  if (lookupError) {
+    logWarn("square.webhook.payment_lookup_failed", { message: lookupError.message });
+    return;
+  }
+
+  const existingId = getString(existing, "id");
+
+  if (existingId) {
+    const { error } = await supabase.from("appointment_payments").update(normalizedRow).eq("id", existingId);
+
+    if (error) {
+      logWarn("square.webhook.payment_update_failed", { message: error.message });
+      return;
+    }
+
+    logAppointmentPaymentUpsertSuccess(normalizedRow, conflictKey, "update");
+    return;
+  }
+
+  const { error } = await supabase.from("appointment_payments").insert(normalizedRow);
 
   if (error) {
-    logWarn("square.webhook.payment_upsert_failed", { message: error.message });
+    if (isUniqueViolation(error)) {
+      const { error: updateError } = await supabase.from("appointment_payments").update(normalizedRow).eq("square_payment_id", paymentId);
+
+      if (updateError) {
+        logWarn("square.webhook.payment_update_after_conflict_failed", { message: updateError.message });
+        return;
+      }
+
+      logAppointmentPaymentUpsertSuccess(normalizedRow, conflictKey, "update_after_conflict");
+      return;
+    }
+
+    logWarn("square.webhook.payment_insert_failed", { message: error.message });
+    return;
   }
+
+  logAppointmentPaymentUpsertSuccess(normalizedRow, conflictKey, "insert");
+}
+
+function logAppointmentPaymentUpsertSuccess(row: SupabaseRow, conflictKey: string, action: string) {
+  logWorkflowInfo("appointment_payment.upsert_success", {
+    operation: "square_webhook",
+    step: "upsert_appointment_payment",
+    appointment_intent_id: getString(row, "appointment_intent_id"),
+    square_payment_id: getString(row, "square_payment_id"),
+    square_order_id: getString(row, "square_order_id"),
+    conflict_key: conflictKey,
+    action,
+  });
+}
+
+function isUniqueViolation(error: { code?: string | null; message?: string | null }) {
+  return error.code === "23505" || /duplicate key/i.test(error.message ?? "");
 }
 
 async function insertWorkflowEvent(supabase: ReturnType<typeof getSupabaseAdmin>, row: SupabaseRow) {

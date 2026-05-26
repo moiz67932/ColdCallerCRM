@@ -456,12 +456,44 @@ async function upsertAppointmentPayment(supabase: ReturnType<typeof getSupabaseA
   const appointmentIntentId = getString(normalizedRow, "appointment_intent_id");
 
   if (paymentId) {
-    const { error } = await supabase.from("appointment_payments").upsert(normalizedRow, {
-      onConflict: "square_payment_id",
-    });
+    const { data: existing, error: lookupError } = await supabase
+      .from("appointment_payments")
+      .select("id")
+      .eq("square_payment_id", paymentId)
+      .limit(1)
+      .maybeSingle();
+
+    if (lookupError) {
+      logWarn("square.manual_payment_link.payment_lookup_failed", { message: lookupError.message });
+      return;
+    }
+
+    const existingId = getString(existing, "id");
+
+    if (existingId) {
+      const { error } = await supabase.from("appointment_payments").update(normalizedRow).eq("id", existingId);
+
+      if (error) {
+        logWarn("square.manual_payment_link.payment_update_failed", { message: error.message });
+      }
+
+      return;
+    }
+
+    const { error } = await supabase.from("appointment_payments").insert(normalizedRow);
 
     if (error) {
-      logWarn("square.manual_payment_link.payment_upsert_failed", { message: error.message });
+      if (isUniqueViolation(error)) {
+        const { error: updateError } = await supabase.from("appointment_payments").update(normalizedRow).eq("square_payment_id", paymentId);
+
+        if (updateError) {
+          logWarn("square.manual_payment_link.payment_update_after_conflict_failed", { message: updateError.message });
+        }
+
+        return;
+      }
+
+      logWarn("square.manual_payment_link.payment_insert_failed", { message: error.message });
     }
 
     return;
@@ -497,6 +529,10 @@ async function upsertAppointmentPayment(supabase: ReturnType<typeof getSupabaseA
   if (error) {
     logWarn("square.manual_payment_link.payment_insert_failed", { message: error.message });
   }
+}
+
+function isUniqueViolation(error: { code?: string | null; message?: string | null }) {
+  return error.code === "23505" || /duplicate key/i.test(error.message ?? "");
 }
 
 async function insertWorkflowEvent(supabase: ReturnType<typeof getSupabaseAdmin>, row: SupabaseRow) {

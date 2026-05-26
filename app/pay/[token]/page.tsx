@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { createDebugId, logWorkflowError, logWorkflowInfo } from "@/lib/logging/workflow-logger";
 import { verifyPayToken } from "@/lib/payments/pay-token";
+import { normalizePayTokenRouteParam } from "@/lib/payments/pay-token-route";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { PayTokenRouteParamSchema } from "@/lib/validation/paid-appointment";
 
@@ -13,7 +14,19 @@ type AppointmentIntent = Record<string, unknown>;
 
 export default async function PayDepositPage({ params }: PayPageProps) {
   const debugId = createDebugId("pay_page");
-  const parsedParams = PayTokenRouteParamSchema.safeParse(await params);
+  const routeParams = await params;
+  const normalizedParams = normalizePayTokenRouteParam(routeParams.token);
+
+  if (normalizedParams.placeholderPrefixStripped) {
+    logWorkflowInfo("pay.deposit.placeholder_prefix_stripped", {
+      debug_id: debugId,
+      operation: "pay_deposit_page",
+      step: "normalize_token_param",
+      prefix_variant: normalizedParams.prefixVariant,
+    });
+  }
+
+  const parsedParams = PayTokenRouteParamSchema.safeParse({ token: normalizedParams.token });
 
   if (!parsedParams.success) {
     logWorkflowError("pay.deposit.invalid_token_param", {
