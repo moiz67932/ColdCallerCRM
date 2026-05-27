@@ -378,7 +378,7 @@ function AppointmentDetailDrawer({
         </header>
 
         <div className="flex-1 space-y-4 overflow-y-auto p-4">
-          {detailLoading || !intent ? (
+          {detailLoading || !detail || !intent ? (
             <p className="text-sm text-slate-500">Loading details...</p>
           ) : (
             <>
