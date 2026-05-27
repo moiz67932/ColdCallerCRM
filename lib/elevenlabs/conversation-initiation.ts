@@ -1,7 +1,7 @@
 import { normalizePhoneDigits } from "@/lib/phone";
 import type { VoiceContextCompact } from "@/lib/elevenlabs/voice-context";
 import type { ActiveDemoBindingMatchType } from "@/lib/elevenlabs/demo-binding-resolver";
-import { getSharedDemoVoiceContextWithBackendPricing, portiveCategoryDetailsText, portiveFaqText, portivePolicyText } from "@/lib/elevenlabs/shared-demo-context";
+import { getSharedDemoVoiceContextWithBackendPricing, portiveFaqText, portivePolicyText } from "@/lib/elevenlabs/shared-demo-context";
 
 type JsonRecord = Record<string, unknown>;
 type DynamicVariableValue = string | number | boolean;
@@ -64,6 +64,8 @@ function emptyDynamicVariables(contextError: string, precallMatchType: ActiveDem
     injectables_list_text: "",
     laser_list_text: "",
     skin_list_text: "",
+    wellness_list_text: "",
+    body_list_text: "",
     waxing_brows_list_text: "",
     lashes_list_text: "",
     pricing_lookup_text: "",
@@ -74,12 +76,14 @@ function emptyDynamicVariables(contextError: string, precallMatchType: ActiveDem
     location_short: "",
     hours_short: "",
     booking_cta: "",
+    clinic_timezone: "",
     faqs_short: "",
     policy_short: "",
     lead_id: "",
     binding_id: "",
     lead_demo_profile_id: "",
     precall_match_type: precallMatchType,
+    match_type: precallMatchType,
   };
 }
 
@@ -94,6 +98,14 @@ function safeServiceNamesText(context: VoiceContextCompact) {
   return truncate(context.safe_service_names.join(", "), 800);
 }
 
+function pricingServiceCount(context: VoiceContextCompact) {
+  return context.services_with_pricing_and_deposits_text
+    .split(".")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .length;
+}
+
 function compactContextDynamicVariables(input: {
   context: VoiceContextCompact;
   leadId: unknown;
@@ -105,23 +117,26 @@ function compactContextDynamicVariables(input: {
     active_context_resolved: true,
     clinic_name: truncate(input.context.clinic_name, 200),
     service_categories_short: truncate(input.context.service_categories_short, 300),
-    service_menu_short: truncate(input.context.service_menu_short, 1600),
-    services_by_category_text: truncate(portiveCategoryDetailsText(), 1800),
+    service_menu_short: truncate(input.context.service_menu_short, 4000),
+    services_by_category_text: truncate(input.context.services_by_category_text, 4000),
     safe_service_names_text: truncate(input.context.safe_service_names_text || safeServiceNamesText(input.context), 1200),
-    facials_list_text: truncate(input.context.facials_list_text, 900),
-    injectables_list_text: truncate(input.context.injectables_list_text, 900),
-    laser_list_text: truncate(input.context.laser_list_text, 900),
-    skin_list_text: truncate(input.context.skin_list_text, 900),
+    facials_list_text: truncate(input.context.facials_list_text, 1400),
+    injectables_list_text: truncate(input.context.injectables_list_text, 1400),
+    laser_list_text: truncate(input.context.laser_list_text, 1400),
+    skin_list_text: truncate(input.context.skin_list_text, 1400),
+    wellness_list_text: truncate(input.context.wellness_list_text, 1400),
+    body_list_text: truncate(input.context.body_list_text, 1400),
     waxing_brows_list_text: truncate(input.context.waxing_brows_list_text, 700),
     lashes_list_text: truncate(input.context.lashes_list_text, 700),
     pricing_lookup_text: truncate(input.context.pricing_lookup_text, 700),
-    services_with_pricing_and_deposits_text: truncate(input.context.services_with_pricing_and_deposits_text, 1000),
+    services_with_pricing_and_deposits_text: truncate(input.context.services_with_pricing_and_deposits_text, 4000),
     deposit_policy_text: truncate(input.context.deposit_policy_text, 500),
     voice_quality_score: input.context.voice_quality_score,
     voice_context_warnings: truncate(input.context.voice_context_warnings, 500),
     location_short: truncate(input.context.location_short, 300),
     hours_short: truncate(input.context.hours_short, 300),
     booking_cta: truncate(input.context.booking_cta, 300),
+    clinic_timezone: truncate(input.context.timezone ?? "", 100),
     faqs_short: truncate(portiveFaqText(), 900),
     policy_short: truncate(portivePolicyText(), 500),
     lead_id: String(input.leadId ?? ""),
@@ -129,6 +144,7 @@ function compactContextDynamicVariables(input: {
     lead_demo_profile_id: String(input.leadDemoProfileId ?? ""),
     context_error: "",
     precall_match_type: input.matchType,
+    match_type: input.matchType,
   };
 }
 
@@ -174,6 +190,7 @@ export async function buildElevenLabsConversationInitiationClientData(
 
   try {
     const context = await getSharedDemoVoiceContextWithBackendPricing();
+    const servicesWithPricingAndDepositsText = context.services_with_pricing_and_deposits_text;
 
     console.info("ElevenLabs conversation-initiation shared demo context.", {
       route: "/api/elevenlabs/hooks/conversation-initiation",
@@ -184,6 +201,11 @@ export async function buildElevenLabsConversationInitiationClientData(
       match_type: "shared_demo_context",
       binding_id: null,
       lead_id: null,
+      has_services_with_pricing_and_deposits_text: Boolean(servicesWithPricingAndDepositsText.trim()),
+      services_with_pricing_and_deposits_text_length: servicesWithPricingAndDepositsText.length,
+      deposit_policy_text: context.deposit_policy_text,
+      pricing_service_count: pricingServiceCount(context),
+      clinic_name: context.clinic_name,
       duration_ms: Math.round(nowMs() - startedAt),
     });
 

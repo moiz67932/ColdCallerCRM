@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { normalizePhoneDigits } from "@/lib/phone";
 import { voiceContextText } from "@/lib/elevenlabs/voice-context";
-import { getSharedDemoVoiceContextWithBackendPricing, portiveCategoryDetailsText, portiveFaqText, portivePolicyText } from "@/lib/elevenlabs/shared-demo-context";
+import { getSharedDemoVoiceContextWithBackendPricing, portiveFaqText, portivePolicyText } from "@/lib/elevenlabs/shared-demo-context";
 
 export const resolveDemoContextRequestSchema = z.object({
   conversation_id: z.string().min(1),
@@ -49,14 +49,18 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
     agent_id: input.agent_id,
     caller_e164: input.caller_number,
     phone_e164: context.phone_e164 || input.called_number,
+    normalized_caller_digits: callerDigits,
+    normalized_called_digits: calledDigits,
     lead_id: "",
     lead_demo_profile_id: "",
     binding_id: null,
     match_type: "shared_demo_context" as const,
     caller_matched: false,
+    called_number_matched: true,
+    reason: "",
     services_with_pricing_and_deposits_text: context.services_with_pricing_and_deposits_text,
     deposit_policy_text: context.deposit_policy_text,
-    context_text: `${voiceContextText(context)}\nServices by category with duration and pricing: ${portiveCategoryDetailsText()}\nServices with pricing and deposits: ${context.services_with_pricing_and_deposits_text}\nFAQs: ${portiveFaqText()}\nPolicies: ${portivePolicyText()}`,
+    context_text: `${voiceContextText(context)}\nServices by category with duration, pricing, and deposits: ${context.services_by_category_text}\nServices with pricing and deposits: ${context.services_with_pricing_and_deposits_text}\nFAQs: ${portiveFaqText()}\nPolicies: ${portivePolicyText()}`,
     context,
   };
 }

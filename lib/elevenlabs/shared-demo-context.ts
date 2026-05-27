@@ -224,6 +224,20 @@ function servicesByCategory(category: string) {
   return PORTIVE_SERVICES.filter((service) => service.category === category);
 }
 
+function categoryForPricedService(serviceName: string) {
+  const normalizedName = serviceName.toLowerCase();
+  const exactStaticService = PORTIVE_SERVICES.find((service) => service.name.toLowerCase() === normalizedName);
+
+  if (exactStaticService) return exactStaticService.category;
+  if (/\b(botox|dysport|filler|kybella|inject)\b/i.test(serviceName)) return "Injectables";
+  if (/\b(hydra\s*facial|facial)\b/i.test(serviceName)) return "Facials";
+  if (/\b(laser|ipl|rf|radiofrequency)\b/i.test(serviceName)) return "Laser Services";
+  if (/\b(peel|microneedl|skin)\b/i.test(serviceName)) return "Skin Treatments";
+  if (/\b(glp|weight|wellness|b12|vitamin)\b/i.test(serviceName)) return "Wellness";
+  if (/\b(body|contour)\b/i.test(serviceName)) return "Body Treatments";
+  return "Consultations";
+}
+
 function serviceDetail(service: PortiveService) {
   return `${service.name} (${service.duration}, ${service.price})`;
 }
@@ -271,6 +285,78 @@ export function servicesWithPricingAndDepositsText(services: DemoServicePricing[
   }).join(". ");
 }
 
+function pricedServiceDetail(service: DemoServicePricing) {
+  const pricing = buildDepositPricingDetails({
+    serviceName: service.name,
+    servicePriceCents: service.servicePriceCents,
+    depositPercentBps: service.depositPercentBps,
+    depositAmountCents: service.depositAmountCents,
+    currency: service.currency,
+  });
+  const durationText = service.durationMinutes ? `${service.durationMinutes} minutes` : "duration not configured";
+
+  if (pricing.service_price_text && pricing.deposit_amount_text) {
+    return `${service.name}, ${durationText}, total price ${pricing.service_price_text}, ${pricing.deposit_percent_text} deposit ${pricing.deposit_amount_text}`;
+  }
+
+  if (pricing.deposit_amount_text) {
+    return `${service.name}, ${durationText}, total price not configured, ${pricing.deposit_percent_text} deposit ${pricing.deposit_amount_text}; pricing incomplete`;
+  }
+
+  return `${service.name}, ${durationText}, pricing incomplete`;
+}
+
+function pricedServicesByCategoryMap(services: DemoServicePricing[]) {
+  const grouped = new Map<string, string[]>();
+
+  for (const service of services) {
+    const category = categoryForPricedService(service.name);
+    const existing = grouped.get(category) ?? [];
+    existing.push(pricedServiceDetail(service));
+    grouped.set(category, existing);
+  }
+
+  return grouped;
+}
+
+function mergedServicesByCategoryText(services: DemoServicePricing[]) {
+  const pricedByCategory = pricedServicesByCategoryMap(services);
+
+  for (const category of [...new Set(PORTIVE_SERVICES.map((service) => service.category))]) {
+    const existing = pricedByCategory.get(category) ?? [];
+    const pricedNames = new Set(
+      services
+        .filter((service) => categoryForPricedService(service.name) === category)
+        .map((service) => service.name.toLowerCase()),
+    );
+    const staticDetails = servicesByCategory(category)
+      .filter((service) => !pricedNames.has(service.name.toLowerCase()))
+      .map(serviceDetail);
+
+    if (existing.length || staticDetails.length) {
+      pricedByCategory.set(category, [...existing, ...staticDetails]);
+    }
+  }
+
+  return [...pricedByCategory.entries()]
+    .map(([category, details]) => `${category}: ${details.join("; ")}`)
+    .join(". ");
+}
+
+function listTextForPricedCategory(services: DemoServicePricing[], category: string, fallbackServices: PortiveService[]) {
+  const pricedDetails = services.filter((service) => categoryForPricedService(service.name) === category).map(pricedServiceDetail);
+  const pricedNames = new Set(
+    services
+      .filter((service) => categoryForPricedService(service.name) === category)
+      .map((service) => service.name.toLowerCase()),
+  );
+  const fallbackDetails = fallbackServices
+    .filter((service) => !pricedNames.has(service.name.toLowerCase()))
+    .map(serviceDetail);
+
+  return [...pricedDetails, ...fallbackDetails].join("; ");
+}
+
 export async function getSharedDemoVoiceContextWithBackendPricing(): Promise<VoiceContextCompact> {
   const backendPricing = await loadDemoServicePricingFromBackend();
   return getSharedDemoVoiceContext(backendPricing.length ? backendPricing : PORTIVE_DEMO_PAID_SERVICES);
@@ -280,9 +366,16 @@ export function getSharedDemoVoiceContext(servicePricing: DemoServicePricing[] =
   const phone = env.ELEVENLABS_PHONE_E164 ?? env.DEMO_TELNYX_PHONE_E164 ?? "";
   const categories = [...new Set(PORTIVE_SERVICES.map((service) => service.category))];
   const pricing = PORTIVE_SERVICES.map((service) => `${service.name}: ${service.price}`).join("; ");
-  const detailsByCategory = Object.fromEntries(categories.map((category) => [category, servicesByCategory(category).map(serviceDetail)]));
   const servicesWithPricingText = servicesWithPricingAndDepositsText(servicePricing);
+  const servicesByCategoryText = mergedServicesByCategoryText(servicePricing) || portiveCategoryDetailsText();
   const depositPolicyText = buildDepositPolicyText();
+  const safeServiceNames = [...new Set([...PORTIVE_SERVICES.map((service) => service.name), ...servicePricing.map((service) => service.name)])];
+  const facialsListText = listTextForPricedCategory(servicePricing, "Facials", servicesByCategory("Facials"));
+  const injectablesListText = listTextForPricedCategory(servicePricing, "Injectables", servicesByCategory("Injectables"));
+  const laserListText = listTextForPricedCategory(servicePricing, "Laser Services", servicesByCategory("Laser Services"));
+  const skinListText = listTextForPricedCategory(servicePricing, "Skin Treatments", servicesByCategory("Skin Treatments"));
+  const wellnessListText = listTextForPricedCategory(servicePricing, "Wellness", servicesByCategory("Wellness"));
+  const bodyListText = listTextForPricedCategory(servicePricing, "Body Treatments", servicesByCategory("Body Treatments"));
 
   return {
     clinic_name: PORTIVE_CLINIC_NAME,
@@ -290,21 +383,24 @@ export function getSharedDemoVoiceContext(servicePricing: DemoServicePricing[] =
     binding_id: null,
     phone_e164: phone,
     service_categories_short: listForSpeech(categories),
-    service_menu_short: `The menu includes ${portiveCategoryDetailsText()}.`,
-    safe_service_names: PORTIVE_SERVICES.map((service) => service.name),
-    safe_service_names_text: PORTIVE_SERVICES.map((service) => service.name).join(", "),
+    service_menu_short: `The menu includes ${servicesByCategoryText}.`,
+    services_by_category_text: servicesByCategoryText,
+    safe_service_names: safeServiceNames,
+    safe_service_names_text: safeServiceNames.join(", "),
     category_lists: {
-      facials_list_text: (detailsByCategory.Facials ?? []).join("; "),
-      injectables_list_text: (detailsByCategory.Injectables ?? []).join("; "),
-      laser_list_text: (detailsByCategory["Laser Services"] ?? []).join("; "),
-      skin_list_text: (detailsByCategory["Skin Treatments"] ?? []).join("; "),
-      wellness_list_text: (detailsByCategory.Wellness ?? []).join("; "),
-      body_list_text: (detailsByCategory["Body Treatments"] ?? []).join("; "),
+      facials_list_text: facialsListText,
+      injectables_list_text: injectablesListText,
+      laser_list_text: laserListText,
+      skin_list_text: skinListText,
+      wellness_list_text: wellnessListText,
+      body_list_text: bodyListText,
     },
-    facials_list_text: (detailsByCategory.Facials ?? []).join("; "),
-    injectables_list_text: (detailsByCategory.Injectables ?? []).join("; "),
-    laser_list_text: (detailsByCategory["Laser Services"] ?? []).join("; "),
-    skin_list_text: (detailsByCategory["Skin Treatments"] ?? []).join("; "),
+    facials_list_text: facialsListText,
+    injectables_list_text: injectablesListText,
+    laser_list_text: laserListText,
+    skin_list_text: skinListText,
+    wellness_list_text: wellnessListText,
+    body_list_text: bodyListText,
     waxing_brows_list_text: "",
     lashes_list_text: "",
     pricing_lookup_text: pricing,
