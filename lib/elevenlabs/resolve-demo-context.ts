@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { normalizePhoneDigits } from "@/lib/phone";
 import { voiceContextText } from "@/lib/elevenlabs/voice-context";
-import { getSharedDemoVoiceContext, portiveCategoryDetailsText, portiveFaqText, portivePolicyText } from "@/lib/elevenlabs/shared-demo-context";
+import { getSharedDemoVoiceContextWithBackendPricing, portiveCategoryDetailsText, portiveFaqText, portivePolicyText } from "@/lib/elevenlabs/shared-demo-context";
 
 export const resolveDemoContextRequestSchema = z.object({
   conversation_id: z.string().min(1),
@@ -29,7 +29,7 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
     throw new Error("Invalid called_number. Expected a valid phone number.");
   }
 
-  const context = getSharedDemoVoiceContext();
+  const context = await getSharedDemoVoiceContextWithBackendPricing();
 
   console.info("ElevenLabs resolve-demo-context shared demo context.", {
     conversation_id: input.conversation_id,
@@ -54,7 +54,9 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
     binding_id: null,
     match_type: "shared_demo_context" as const,
     caller_matched: false,
-    context_text: `${voiceContextText(context)}\nServices by category with duration and pricing: ${portiveCategoryDetailsText()}\nFAQs: ${portiveFaqText()}\nPolicies: ${portivePolicyText()}`,
+    services_with_pricing_and_deposits_text: context.services_with_pricing_and_deposits_text,
+    deposit_policy_text: context.deposit_policy_text,
+    context_text: `${voiceContextText(context)}\nServices by category with duration and pricing: ${portiveCategoryDetailsText()}\nServices with pricing and deposits: ${context.services_with_pricing_and_deposits_text}\nFAQs: ${portiveFaqText()}\nPolicies: ${portivePolicyText()}`,
     context,
   };
 }

@@ -69,3 +69,4 @@ next-env.d.ts
 
 # local dev tools
 .supabase/
+.env*

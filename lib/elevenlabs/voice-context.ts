@@ -17,6 +17,8 @@ export type VoiceContextCompact = {
   waxing_brows_list_text: string;
   lashes_list_text: string;
   pricing_lookup_text: string;
+  services_with_pricing_and_deposits_text: string;
+  deposit_policy_text: string;
   voice_quality_score: number;
   voice_context_warnings: string;
   booking_cta: string;
@@ -190,6 +192,8 @@ export function buildVoiceContextCompact(input: {
     waxing_brows_list_text: categoryLists.waxing_brows_list_text ?? "",
     lashes_list_text: categoryLists.lashes_list_text ?? "",
     pricing_lookup_text: pricing.join("; ").slice(0, 600),
+    services_with_pricing_and_deposits_text: "",
+    deposit_policy_text: "",
     voice_quality_score: voiceQualityScore,
     voice_context_warnings: warnings.join("; "),
     booking_cta: "Would you like to book a consultation?",
@@ -211,6 +215,8 @@ export function voiceContextText(context: VoiceContextCompact) {
     context.waxing_brows_list_text ? `Waxing and brows: ${context.waxing_brows_list_text}.` : "",
     context.lashes_list_text ? `Lashes: ${context.lashes_list_text}.` : "",
     context.pricing_lookup_text ? `Known pricing: ${context.pricing_lookup_text}.` : "",
+    context.services_with_pricing_and_deposits_text ? `Bookable service deposits: ${context.services_with_pricing_and_deposits_text}.` : "",
+    context.deposit_policy_text ? `Deposit policy: ${context.deposit_policy_text}` : "",
     "Use this safely: list service names only. Do not explain medical benefits, outcomes, risks, or suitability. For details, say a licensed provider can explain during consultation.",
     `Booking CTA: ${context.booking_cta}`,
   ].filter(Boolean).join("\n");
@@ -244,6 +250,8 @@ export function parseVoiceContextCompact(value: unknown): VoiceContextCompact | 
     waxing_brows_list_text: cleanText(record.waxing_brows_list_text) || categoryLists.waxing_brows_list_text || "",
     lashes_list_text: cleanText(record.lashes_list_text) || categoryLists.lashes_list_text || "",
     pricing_lookup_text: cleanText(record.pricing_lookup_text),
+    services_with_pricing_and_deposits_text: cleanText(record.services_with_pricing_and_deposits_text),
+    deposit_policy_text: cleanText(record.deposit_policy_text),
     voice_quality_score: typeof record.voice_quality_score === "number" ? record.voice_quality_score : Number(record.voice_quality_score ?? 0) || 0,
     voice_context_warnings: cleanText(record.voice_context_warnings),
     booking_cta: cleanText(record.booking_cta) || "Would you like to book a consultation?",

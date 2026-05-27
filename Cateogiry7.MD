@@ -102,6 +102,8 @@ sequenceDiagram
 - The code uses direct REST calls through `fetch`, not the Square SDK.
 - `package.json` has no Square SDK dependency.
 - Main request helper: `lib/square/client.ts`.
+- Paid appointment checkout amount is the deposit amount only. Service mappings store the total service price in `service_price_cents`, the policy in `deposit_percent_bps` (`2000` = 20%), and the charged deposit in `deposit_amount_cents`.
+- Demo Botox Consultation pricing should be `service_price_cents = 25000`, `deposit_percent_bps = 2000`, `deposit_amount_cents = 5000`, `currency = 'USD'`.
 - Default sandbox base URL: `https://connect.squareupsandbox.com`.
 - Default Square API version: `2026-05-20`.
 - Headers sent on Square requests:
@@ -434,6 +436,8 @@ Test 1: Square payment link only
 3. Confirm `appointment_intents.square_payment_link_url`, `square_order_id`, `square_payment_link_id`, `payment_status`, and `appointment_status` update.
 4. Confirm `appointment_payments` row is upserted.
 5. Open the returned Square checkout link manually.
+6. Confirm the Square checkout amount equals `deposit_amount_cents`, not `service_price_cents`.
+7. Confirm the response data includes `service_price_text`, `deposit_amount_text`, `deposit_percent_bps`, and `human_deposit_sentence`.
 
 Test 2: `/pay/[token]`
 
@@ -468,8 +472,9 @@ Test 5: Square webhook
 2. Confirm Square webhook reaches Vercel.
 3. Confirm `payment_status=completed`.
 4. Confirm Square booking is created.
-5. Confirm `appointment_status=confirmed`.
-6. Confirm confirmation WhatsApp is sent.
+5. Confirm `appointment_payments.amount_cents` equals the deposit amount and `appointment_intents.deposit_amount_cents` remains the charged deposit.
+6. Confirm `appointment_status=confirmed`.
+7. Confirm confirmation WhatsApp is sent.
 
 Test 6: failure/recovery
 

@@ -1,7 +1,7 @@
 import { normalizePhoneDigits } from "@/lib/phone";
 import type { VoiceContextCompact } from "@/lib/elevenlabs/voice-context";
 import type { ActiveDemoBindingMatchType } from "@/lib/elevenlabs/demo-binding-resolver";
-import { getSharedDemoVoiceContext, portiveCategoryDetailsText, portiveFaqText, portivePolicyText } from "@/lib/elevenlabs/shared-demo-context";
+import { getSharedDemoVoiceContextWithBackendPricing, portiveCategoryDetailsText, portiveFaqText, portivePolicyText } from "@/lib/elevenlabs/shared-demo-context";
 
 type JsonRecord = Record<string, unknown>;
 type DynamicVariableValue = string | number | boolean;
@@ -67,6 +67,8 @@ function emptyDynamicVariables(contextError: string, precallMatchType: ActiveDem
     waxing_brows_list_text: "",
     lashes_list_text: "",
     pricing_lookup_text: "",
+    services_with_pricing_and_deposits_text: "",
+    deposit_policy_text: "",
     voice_quality_score: 0,
     voice_context_warnings: contextError,
     location_short: "",
@@ -113,6 +115,8 @@ function compactContextDynamicVariables(input: {
     waxing_brows_list_text: truncate(input.context.waxing_brows_list_text, 700),
     lashes_list_text: truncate(input.context.lashes_list_text, 700),
     pricing_lookup_text: truncate(input.context.pricing_lookup_text, 700),
+    services_with_pricing_and_deposits_text: truncate(input.context.services_with_pricing_and_deposits_text, 1000),
+    deposit_policy_text: truncate(input.context.deposit_policy_text, 500),
     voice_quality_score: input.context.voice_quality_score,
     voice_context_warnings: truncate(input.context.voice_context_warnings, 500),
     location_short: truncate(input.context.location_short, 300),
@@ -169,7 +173,7 @@ export async function buildElevenLabsConversationInitiationClientData(
   const calledDigits = normalizePhoneDigits(input.called_number);
 
   try {
-    const context = getSharedDemoVoiceContext();
+    const context = await getSharedDemoVoiceContextWithBackendPricing();
 
     console.info("ElevenLabs conversation-initiation shared demo context.", {
       route: "/api/elevenlabs/hooks/conversation-initiation",

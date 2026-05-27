@@ -17,6 +17,7 @@ import { markPaymentLinkCreated, markPaymentLinkSent } from "@/lib/appointments/
 import { requireApiAuth } from "@/lib/api-auth";
 import { sendPaymentLinkWhatsApp } from "@/lib/messaging/send-whatsapp";
 import { createPayToken } from "@/lib/payments/pay-token";
+import { buildDepositPricingDetails } from "@/lib/payments/deposit-pricing";
 import {
   CreatePaymentLinkSchema,
   type CreatePaymentLinkInput,
@@ -268,6 +269,7 @@ async function createAndPersistPaymentLink(
     callerEmail: getString(appointmentIntent, "caller_email") ?? undefined,
     amountCents: requireNumber(appointmentIntent, "deposit_amount_cents"),
     currency: requireString(appointmentIntent, "currency"),
+    depositPercentText: buildDepositPricingDetailsFromIntent(appointmentIntent).deposit_percent_text,
     selectedStartAt: getString(appointmentIntent, "selected_start_at") ?? undefined,
     idempotencyKey: buildPaymentLinkIdempotencyKey(appointmentIntentId),
   });
@@ -548,6 +550,8 @@ function buildResponse(
   messageError?: string,
   paymentLinkAction: "created" | "reused" | "ignored" = "reused",
 ) {
+  const pricingDetails = buildDepositPricingDetailsFromIntent(appointmentIntent);
+
   return {
     payment_link_action: paymentLinkAction,
     created: paymentLinkAction === "created",
@@ -560,9 +564,28 @@ function buildResponse(
     square_payment_link_id: getString(appointmentIntent, "square_payment_link_id"),
     checkout_url: getString(appointmentIntent, "square_payment_link_url"),
     brandedPayUrl: getBrandedPayUrl(getString(appointmentIntent, "id")),
+    service_price_cents: pricingDetails.service_price_cents,
+    deposit_percent: pricingDetails.deposit_percent,
+    deposit_percent_bps: pricingDetails.deposit_percent_bps,
+    deposit_amount_cents: pricingDetails.deposit_amount_cents,
+    currency: pricingDetails.currency,
+    service_price_text: pricingDetails.service_price_text,
+    deposit_amount_text: pricingDetails.deposit_amount_text,
+    deposit_policy_text: pricingDetails.deposit_policy_text,
+    human_deposit_sentence: pricingDetails.human_deposit_sentence,
     payment_link_sent: paymentLinkSent,
     message_error: messageError,
   };
+}
+
+function buildDepositPricingDetailsFromIntent(appointmentIntent: SupabaseRow) {
+  return buildDepositPricingDetails({
+    serviceName: getString(appointmentIntent, "service_name") ?? "Appointment",
+    servicePriceCents: getNumberOrNull(appointmentIntent, "service_price_cents"),
+    depositPercentBps: getNumberOrNull(appointmentIntent, "deposit_percent_bps"),
+    depositAmountCents: getNumberOrNull(appointmentIntent, "deposit_amount_cents"),
+    currency: getString(appointmentIntent, "currency") ?? "USD",
+  });
 }
 
 function getBrandedPayUrl(appointmentIntentId: string | null) {
@@ -607,4 +630,13 @@ function requireNumber(row: SupabaseRow, key: string) {
   }
 
   return value;
+}
+
+function getNumberOrNull(row: SupabaseRow, key: string) {
+  if (row[key] === undefined || row[key] === null || row[key] === "") {
+    return null;
+  }
+
+  const value = Number(row[key]);
+  return Number.isFinite(value) ? value : null;
 }

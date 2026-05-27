@@ -15,6 +15,7 @@ export type CreateAppointmentPaymentLinkInput = {
   callerEmail?: string;
   amountCents: number;
   currency: string;
+  depositPercentText?: string;
   selectedStartAt?: string;
   idempotencyKey?: string;
 };
@@ -49,22 +50,7 @@ export async function createAppointmentPaymentLink(
     idempotencyKey: input.idempotencyKey?.trim() || buildPaymentLinkIdempotencyKey(input.appointmentIntentId),
     appointmentIntentId: input.appointmentIntentId,
     operationName: "square.create_appointment_payment_link",
-    body: {
-      description: buildPaymentLinkDescription(input),
-      payment_note: `appointment_intent_id:${input.appointmentIntentId}`,
-      quick_pay: {
-        name: `${input.serviceName} Deposit`,
-        price_money: {
-          amount: input.amountCents,
-          currency: input.currency,
-        },
-        location_id: input.locationId,
-      },
-      checkout_options: {
-        ask_for_shipping_address: false,
-      },
-      pre_populated_data: buildPrePopulatedData(input),
-    },
+    body: buildSquarePaymentLinkRequestBody(input),
   });
 
   const paymentLink = response.payment_link;
@@ -93,6 +79,25 @@ export function retrieveSquarePayment(paymentId: string) {
     path: `/v2/payments/${encodeURIComponent(trimmedPaymentId)}`,
     operationName: "square.retrieve_payment",
   });
+}
+
+export function buildSquarePaymentLinkRequestBody(input: CreateAppointmentPaymentLinkInput) {
+  return {
+    description: buildPaymentLinkDescription(input),
+    payment_note: buildPaymentNote(input),
+    quick_pay: {
+      name: `${input.serviceName} Deposit`,
+      price_money: {
+        amount: input.amountCents,
+        currency: input.currency,
+      },
+      location_id: input.locationId,
+    },
+    checkout_options: {
+      ask_for_shipping_address: false,
+    },
+    pre_populated_data: buildPrePopulatedData(input),
+  };
 }
 
 export function mapSquarePaymentStatus(squareStatus: string | null | undefined): InternalSquarePaymentStatus {
@@ -153,6 +158,7 @@ function buildPrePopulatedData(input: CreateAppointmentPaymentLinkInput) {
 
 function buildPaymentLinkDescription(input: CreateAppointmentPaymentLinkInput) {
   return [
+    buildDepositDescription(input),
     input.clinicName?.trim(),
     input.callerName?.trim() ? `Caller: ${input.callerName.trim()}` : undefined,
     input.selectedStartAt?.trim() ? `Selected start: ${input.selectedStartAt.trim()}` : undefined,
@@ -160,4 +166,21 @@ function buildPaymentLinkDescription(input: CreateAppointmentPaymentLinkInput) {
   ]
     .filter(Boolean)
     .join(" | ");
+}
+
+function buildPaymentNote(input: CreateAppointmentPaymentLinkInput) {
+  return [buildDepositDescription(input), `appointment_intent_id:${input.appointmentIntentId.trim()}`]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function buildDepositDescription(input: CreateAppointmentPaymentLinkInput) {
+  const serviceName = input.serviceName.trim();
+  const depositPercentText = input.depositPercentText?.trim();
+
+  if (!serviceName) {
+    return undefined;
+  }
+
+  return depositPercentText ? `${depositPercentText} deposit for ${serviceName}` : `Deposit for ${serviceName}`;
 }

@@ -1,5 +1,12 @@
 import { env } from "@/lib/env";
 import type { VoiceContextCompact } from "@/lib/elevenlabs/voice-context";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import {
+  DEFAULT_DEPOSIT_PERCENT_BPS,
+  buildDepositPolicyText,
+  buildDepositPricingDetails,
+  calculateDepositAmountCents,
+} from "@/lib/payments/deposit-pricing";
 
 export type PortiveService = {
   name: string;
@@ -16,10 +23,40 @@ export type PortiveFaq = {
   category: string;
 };
 
+type DemoServicePricing = {
+  name: string;
+  durationMinutes: number | null;
+  servicePriceCents: number | null;
+  depositPercentBps: number;
+  depositAmountCents: number | null;
+  currency: string;
+};
+
+type ClinicServicesSquareMapPricingRow = {
+  internal_service_name?: string | null;
+  display_service_name?: string | null;
+  duration_minutes?: number | string | null;
+  service_price_cents?: number | string | null;
+  deposit_percent_bps?: number | string | null;
+  deposit_amount_cents?: number | string | null;
+  currency?: string | null;
+};
+
 export const PORTIVE_CLINIC_NAME = "Portive Clinic";
 export const PORTIVE_LOCATION = "Newport Beach, CA";
 export const PORTIVE_HOURS = "Mon-Fri 9:00 AM-6:00 PM, Sat 10:00 AM-3:00 PM, Sun closed";
 export const PORTIVE_BOOKING_CTA = "Would you like to book a consultation at Portive Clinic?";
+
+export const PORTIVE_DEMO_PAID_SERVICES: DemoServicePricing[] = [
+  {
+    name: "Botox Consultation",
+    durationMinutes: 30,
+    servicePriceCents: 25000,
+    depositPercentBps: DEFAULT_DEPOSIT_PERCENT_BPS,
+    depositAmountCents: 5000,
+    currency: "USD",
+  },
+];
 
 export const PORTIVE_SERVICES: PortiveService[] = [
   {
@@ -157,7 +194,7 @@ export const PORTIVE_FAQS: PortiveFaq[] = [
   },
   {
     question: "Do you take deposits?",
-    answer: "Portive Clinic may request a booking deposit for longer appointments. The team can confirm the deposit amount when scheduling.",
+    answer: "Appointments use a 20% deposit. The appointment is confirmed after the deposit is paid and the booking is created.",
     category: "Booking",
   },
   {
@@ -208,14 +245,44 @@ export function portiveFaqText() {
 }
 
 export function portivePolicyText() {
-  return "Booking deposits may be requested for longer appointments. Please give at least 24 hours notice to reschedule or cancel. The phone agent must not provide medical advice and should route clinical questions to a licensed provider.";
+  return `${buildDepositPolicyText()} Please give at least 24 hours notice to reschedule or cancel. The phone agent must not provide medical advice and should route clinical questions to a licensed provider.`;
 }
 
-export function getSharedDemoVoiceContext(): VoiceContextCompact {
+export function servicesWithPricingAndDepositsText(services: DemoServicePricing[]) {
+  return services.map((service) => {
+    const pricing = buildDepositPricingDetails({
+      serviceName: service.name,
+      servicePriceCents: service.servicePriceCents,
+      depositPercentBps: service.depositPercentBps,
+      depositAmountCents: service.depositAmountCents,
+      currency: service.currency,
+    });
+    const durationText = service.durationMinutes ? `${service.durationMinutes} minutes` : "duration not configured";
+
+    if (pricing.service_price_text && pricing.deposit_amount_text) {
+      return `${service.name}: ${durationText}, total price ${pricing.service_price_text}, ${pricing.deposit_percent_text} deposit ${pricing.deposit_amount_text}`;
+    }
+
+    if (pricing.deposit_amount_text) {
+      return `${service.name}: ${durationText}, total price not configured, ${pricing.deposit_percent_text} deposit ${pricing.deposit_amount_text}; pricing incomplete`;
+    }
+
+    return `${service.name}: ${durationText}, pricing incomplete`;
+  }).join(". ");
+}
+
+export async function getSharedDemoVoiceContextWithBackendPricing(): Promise<VoiceContextCompact> {
+  const backendPricing = await loadDemoServicePricingFromBackend();
+  return getSharedDemoVoiceContext(backendPricing.length ? backendPricing : PORTIVE_DEMO_PAID_SERVICES);
+}
+
+export function getSharedDemoVoiceContext(servicePricing: DemoServicePricing[] = PORTIVE_DEMO_PAID_SERVICES): VoiceContextCompact {
   const phone = env.ELEVENLABS_PHONE_E164 ?? env.DEMO_TELNYX_PHONE_E164 ?? "";
   const categories = [...new Set(PORTIVE_SERVICES.map((service) => service.category))];
   const pricing = PORTIVE_SERVICES.map((service) => `${service.name}: ${service.price}`).join("; ");
   const detailsByCategory = Object.fromEntries(categories.map((category) => [category, servicesByCategory(category).map(serviceDetail)]));
+  const servicesWithPricingText = servicesWithPricingAndDepositsText(servicePricing);
+  const depositPolicyText = buildDepositPolicyText();
 
   return {
     clinic_name: PORTIVE_CLINIC_NAME,
@@ -241,6 +308,8 @@ export function getSharedDemoVoiceContext(): VoiceContextCompact {
     waxing_brows_list_text: "",
     lashes_list_text: "",
     pricing_lookup_text: pricing,
+    services_with_pricing_and_deposits_text: servicesWithPricingText,
+    deposit_policy_text: depositPolicyText,
     voice_quality_score: 100,
     voice_context_warnings: "",
     booking_cta: PORTIVE_BOOKING_CTA,
@@ -249,4 +318,73 @@ export function getSharedDemoVoiceContext(): VoiceContextCompact {
     hours_short: PORTIVE_HOURS,
     timezone: "America/Los_Angeles",
   };
+}
+
+async function loadDemoServicePricingFromBackend(): Promise<DemoServicePricing[]> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+    return [];
+  }
+
+  try {
+    let query = getSupabaseAdmin()
+      .from("clinic_services_square_map")
+      .select("internal_service_name,display_service_name,duration_minutes,service_price_cents,deposit_percent_bps,deposit_amount_cents,currency")
+      .eq("is_active", true)
+      .order("internal_service_name", { ascending: true })
+      .limit(20);
+
+    if (env.DEMO_RUNTIME_ORGANIZATION_ID?.trim()) {
+      query = query.eq("organization_id", env.DEMO_RUNTIME_ORGANIZATION_ID.trim());
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.warn("Shared demo pricing context lookup failed.", { message: error.message });
+      return [];
+    }
+
+    return (data ?? []).map(normalizeDemoServicePricingRow).filter((row): row is DemoServicePricing => Boolean(row));
+  } catch (error) {
+    console.warn("Shared demo pricing context lookup failed.", {
+      message: error instanceof Error ? error.message : "Unknown pricing lookup error.",
+    });
+    return [];
+  }
+}
+
+function normalizeDemoServicePricingRow(row: ClinicServicesSquareMapPricingRow): DemoServicePricing | null {
+  const name = cleanString(row.display_service_name) ?? cleanString(row.internal_service_name);
+
+  if (!name) {
+    return null;
+  }
+
+  const servicePriceCents = numberOrNull(row.service_price_cents);
+  const depositPercentBps = positiveNumberOrDefault(row.deposit_percent_bps, DEFAULT_DEPOSIT_PERCENT_BPS);
+  const storedDepositAmountCents = numberOrNull(row.deposit_amount_cents);
+  const calculatedDepositAmountCents = calculateDepositAmountCents(servicePriceCents, depositPercentBps);
+
+  return {
+    name,
+    durationMinutes: numberOrNull(row.duration_minutes),
+    servicePriceCents,
+    depositPercentBps,
+    depositAmountCents: calculatedDepositAmountCents ?? storedDepositAmountCents,
+    currency: cleanString(row.currency) ?? "USD",
+  };
+}
+
+function cleanString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function numberOrNull(value: unknown) {
+  const numberValue = Number(value);
+  return Number.isInteger(numberValue) && numberValue >= 0 ? numberValue : null;
+}
+
+function positiveNumberOrDefault(value: unknown, fallback: number) {
+  const numberValue = Number(value);
+  return Number.isInteger(numberValue) && numberValue > 0 ? numberValue : fallback;
 }

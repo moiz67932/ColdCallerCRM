@@ -346,6 +346,7 @@ create table if not exists public.clinic_services_square_map (
 
   duration_minutes int not null,
   service_price_cents int,
+  deposit_percent_bps int not null default 2000,
   deposit_amount_cents int not null default 0,
   currency text not null default 'USD',
 
@@ -423,6 +424,9 @@ alter table public.clinic_services_square_map
 
 alter table public.clinic_services_square_map
   add column if not exists service_price_cents int;
+
+alter table public.clinic_services_square_map
+  add column if not exists deposit_percent_bps int default 2000;
 
 alter table public.clinic_services_square_map
   add column if not exists deposit_amount_cents int default 0;
@@ -532,6 +536,7 @@ create table if not exists public.appointment_intents (
   duration_minutes int,
   deposit_amount_cents int,
   service_price_cents int,
+  deposit_percent_bps int not null default 2000,
   currency text not null default 'USD',
 
   payment_provider text not null default 'square',
@@ -560,6 +565,7 @@ create table if not exists public.appointment_intents (
   last_error_at timestamptz,
 
   idempotency_key text,
+  pricing_source text,
 
   raw_booking_details jsonb not null default '{}'::jsonb,
   square_payload jsonb not null default '{}'::jsonb,
@@ -682,6 +688,9 @@ alter table public.appointment_intents
   add column if not exists service_price_cents int;
 
 alter table public.appointment_intents
+  add column if not exists deposit_percent_bps int default 2000;
+
+alter table public.appointment_intents
   add column if not exists currency text default 'USD';
 
 alter table public.appointment_intents
@@ -746,6 +755,9 @@ alter table public.appointment_intents
 
 alter table public.appointment_intents
   add column if not exists idempotency_key text;
+
+alter table public.appointment_intents
+  add column if not exists pricing_source text;
 
 alter table public.appointment_intents
   add column if not exists raw_booking_details jsonb default '{}'::jsonb;
@@ -1799,6 +1811,7 @@ begin
     square_service_variation_version,
     duration_minutes,
     service_price_cents,
+    deposit_percent_bps,
     deposit_amount_cents,
     currency,
     last_verified_available_start_at,
@@ -1822,7 +1835,8 @@ begin
     'AMVXOV43BHNMI4QH6C4GTHTK',
     1779597480505,
     30,
-    5000,
+    25000,
+    2000,
     5000,
     'USD',
     '2026-05-25T14:00:00Z'::timestamptz,
@@ -1836,7 +1850,13 @@ begin
       'service_variation_version', 1779597480505,
       'duration_minutes', 30
     ),
-    jsonb_build_object('created_for', 'square_paid_booking_demo')
+    jsonb_build_object(
+      'created_for', 'square_paid_booking_demo',
+      'deposit_policy', jsonb_build_object(
+        'deposit_percent_bps', 2000,
+        'pricing_source', 'clinic_services_square_map'
+      )
+    )
   )
   on conflict (organization_id, square_environment, internal_service_name)
   do update set
@@ -1852,6 +1872,7 @@ begin
     square_service_variation_version = excluded.square_service_variation_version,
     duration_minutes = excluded.duration_minutes,
     service_price_cents = excluded.service_price_cents,
+    deposit_percent_bps = excluded.deposit_percent_bps,
     deposit_amount_cents = excluded.deposit_amount_cents,
     currency = excluded.currency,
     last_verified_available_start_at = excluded.last_verified_available_start_at,

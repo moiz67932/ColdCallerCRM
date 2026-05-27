@@ -2,6 +2,11 @@ import "server-only";
 
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { squareRequest } from "@/lib/square/client";
+import {
+  DEFAULT_DEPOSIT_PRICING_SOURCE,
+  calculateDepositAmountCents,
+  normalizeDepositPercentBps,
+} from "@/lib/payments/deposit-pricing";
 
 export type SquareServiceMapping = {
   organizationId: string;
@@ -11,8 +16,11 @@ export type SquareServiceMapping = {
   square_service_variation_id: string;
   square_service_variation_version: number;
   duration_minutes: number;
+  service_price_cents: number | null;
+  deposit_percent_bps: number;
   deposit_amount_cents: number;
   currency: string;
+  pricing_incomplete: boolean;
   raw: unknown;
 };
 
@@ -42,9 +50,13 @@ export type ResolvedSquareServiceForBooking = {
   serviceVariationId: string;
   serviceVariationVersion: number;
   durationMinutes: number;
+  servicePriceCents: number | null;
+  depositPercentBps: number;
   depositAmountCents: number;
   currency: string;
+  pricingIncomplete: boolean;
   source: "clinic_services_square_map";
+  pricingSource: "clinic_services_square_map";
   rawMapping: unknown;
 };
 
@@ -65,8 +77,11 @@ type ClinicServicesSquareMapRow = {
   square_service_variation_id?: string;
   square_service_variation_version?: number | string;
   duration_minutes?: number | string;
+  service_price_cents?: number | string | null;
+  deposit_percent_bps?: number | string | null;
   deposit_amount_cents?: number | string;
   currency?: string;
+  metadata?: unknown;
 };
 
 type CatalogMoney = {
@@ -130,8 +145,11 @@ export async function getSquareServiceMapping(
         "square_service_variation_id",
         "square_service_variation_version",
         "duration_minutes",
+        "service_price_cents",
+        "deposit_percent_bps",
         "deposit_amount_cents",
         "currency",
+        "metadata",
       ].join(","),
     )
     .eq("organization_id", input.organizationId.trim())
@@ -167,9 +185,13 @@ export async function resolveServiceForBooking(
     serviceVariationId: mapping.square_service_variation_id,
     serviceVariationVersion: mapping.square_service_variation_version,
     durationMinutes: mapping.duration_minutes,
+    servicePriceCents: mapping.service_price_cents,
+    depositPercentBps: mapping.deposit_percent_bps,
     depositAmountCents: mapping.deposit_amount_cents,
     currency: mapping.currency,
+    pricingIncomplete: mapping.pricing_incomplete,
     source: "clinic_services_square_map",
+    pricingSource: DEFAULT_DEPOSIT_PRICING_SOURCE,
     rawMapping: mapping.raw,
   };
 }
@@ -209,6 +231,11 @@ function normalizeCatalogItem(item: CatalogObject): SquareCatalogService[] {
 }
 
 function normalizeServiceMapping(row: ClinicServicesSquareMapRow): SquareServiceMapping {
+  const servicePriceCents = optionalNonNegativeInteger(row.service_price_cents, "service_price_cents");
+  const depositPercentBps = normalizeDepositPercentBps(optionalPositiveInteger(row.deposit_percent_bps, "deposit_percent_bps"));
+  const storedDepositAmountCents = requireNonNegativeInteger(row.deposit_amount_cents, "deposit_amount_cents");
+  const calculatedDepositAmountCents = calculateDepositAmountCents(servicePriceCents, depositPercentBps);
+
   return {
     organizationId: requireString(row.organization_id, "organization_id"),
     internalServiceName: requireString(row.internal_service_name, "internal_service_name"),
@@ -220,8 +247,11 @@ function normalizeServiceMapping(row: ClinicServicesSquareMapRow): SquareService
       "square_service_variation_version",
     ),
     duration_minutes: requirePositiveInteger(row.duration_minutes, "duration_minutes"),
-    deposit_amount_cents: requireNonNegativeInteger(row.deposit_amount_cents, "deposit_amount_cents"),
+    service_price_cents: servicePriceCents,
+    deposit_percent_bps: depositPercentBps,
+    deposit_amount_cents: calculatedDepositAmountCents ?? storedDepositAmountCents,
     currency: requireString(row.currency, "currency"),
+    pricing_incomplete: !servicePriceCents,
     raw: row,
   };
 }
@@ -277,6 +307,34 @@ function requireNonNegativeInteger(value: unknown, fieldName: string) {
 
   if (!Number.isInteger(numberValue) || numberValue < 0) {
     throw new Error(`Square service mapping field must be a non-negative integer: ${fieldName}`);
+  }
+
+  return numberValue;
+}
+
+function optionalNonNegativeInteger(value: unknown, fieldName: string) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const numberValue = Number(value);
+
+  if (!Number.isInteger(numberValue) || numberValue < 0) {
+    throw new Error(`Square service mapping field must be a non-negative integer when present: ${fieldName}`);
+  }
+
+  return numberValue;
+}
+
+function optionalPositiveInteger(value: unknown, fieldName: string) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const numberValue = Number(value);
+
+  if (!Number.isInteger(numberValue) || numberValue <= 0) {
+    throw new Error(`Square service mapping field must be a positive integer when present: ${fieldName}`);
   }
 
   return numberValue;

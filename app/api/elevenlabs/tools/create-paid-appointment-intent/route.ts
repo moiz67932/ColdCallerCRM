@@ -21,6 +21,7 @@ import { normalizePhoneNumber } from "@/lib/phone";
 import { getMissingPaidAppointmentEnvNames, requireEnv } from "@/lib/env";
 import { sendPaymentLinkWhatsApp } from "@/lib/messaging/send-whatsapp";
 import { createPayToken } from "@/lib/payments/pay-token";
+import { buildDepositPricingDetails } from "@/lib/payments/deposit-pricing";
 import {
   CreatePaidAppointmentIntentSchema,
   type CreatePaidAppointmentIntentInput,
@@ -110,6 +111,13 @@ export async function POST(request: NextRequest) {
       organizationId: resolvedContext.organizationId,
       serviceName: input.service_name,
     });
+    const pricingDetails = buildDepositPricingDetails({
+      serviceName: service.serviceName,
+      servicePriceCents: service.servicePriceCents,
+      depositPercentBps: service.depositPercentBps,
+      depositAmountCents: service.depositAmountCents,
+      currency: service.currency,
+    });
     logWorkflowInfo("paid_appointment_intent.availability_search_skipped", {
       debug_id: debugId,
       operation: "create_paid_appointment_intent",
@@ -152,13 +160,14 @@ export async function POST(request: NextRequest) {
     const paymentLink = await createAppointmentPaymentLink({
       appointmentIntentId,
       locationId: service.locationId,
-      serviceName: input.service_name,
+      serviceName: service.serviceName,
       clinicName: resolvedContext.clinicName,
       callerName: input.caller_name,
       callerPhone: callerPhoneE164,
       callerEmail: input.caller_email,
-      amountCents: service.depositAmountCents,
+      amountCents: pricingDetails.deposit_amount_cents ?? service.depositAmountCents,
       currency: service.currency,
+      depositPercentText: pricingDetails.deposit_percent_text,
       selectedStartAt: input.selected_start_at,
       idempotencyKey: buildPaymentLinkIdempotencyKey(appointmentIntentId),
     });
@@ -281,14 +290,24 @@ export async function POST(request: NextRequest) {
         payment_status: "pending",
         appointment_status: "payment_link_sent",
         payment_link_action: "created",
+        appointment_intent_id: appointmentIntentId,
         brandedPayUrl,
+        service_price_cents: pricingDetails.service_price_cents,
+        deposit_percent: pricingDetails.deposit_percent,
+        deposit_percent_bps: pricingDetails.deposit_percent_bps,
+        deposit_amount_cents: pricingDetails.deposit_amount_cents,
+        currency: pricingDetails.currency,
+        service_price_text: pricingDetails.service_price_text,
+        deposit_amount_text: pricingDetails.deposit_amount_text,
+        deposit_policy_text: pricingDetails.deposit_policy_text,
+        human_deposit_sentence: pricingDetails.human_deposit_sentence,
       },
       {
         step: "payment_link_sent",
         message: "Secure deposit button sent to WhatsApp.",
         debugId,
         appointmentIntentId,
-        say: "I've sent the secure deposit button to your WhatsApp. Once completed, your appointment will be confirmed.",
+        say: buildPaymentLinkSentSay(pricingDetails.deposit_amount_text),
       },
     );
   } catch (error) {
@@ -491,8 +510,11 @@ async function insertAppointmentIntent(args: {
     serviceVariationId: string;
     serviceVariationVersion: number;
     durationMinutes: number;
+    servicePriceCents: number | null;
+    depositPercentBps: number;
     depositAmountCents: number;
     currency: string;
+    pricingSource: string;
   };
 }) {
   const { input, supabase, organizationId, clinicId, callerPhoneE164, service } = args;
@@ -519,8 +541,11 @@ async function insertAppointmentIntent(args: {
       selected_timezone: input.selected_timezone,
       selected_time_display: input.selected_time_display,
       duration_minutes: service.durationMinutes,
+      service_price_cents: service.servicePriceCents,
+      deposit_percent_bps: service.depositPercentBps,
       deposit_amount_cents: service.depositAmountCents,
       currency: service.currency,
+      pricing_source: service.pricingSource,
       payment_status: "pending",
       appointment_status: "details_collected",
       raw_booking_details: {
@@ -528,6 +553,20 @@ async function insertAppointmentIntent(args: {
         selected_start_at: input.selected_start_at,
         selected_timezone: input.selected_timezone,
         selected_time_display: input.selected_time_display,
+        pricing: {
+          service_price_cents: service.servicePriceCents,
+          deposit_percent_bps: service.depositPercentBps,
+          deposit_amount_cents: service.depositAmountCents,
+          currency: service.currency,
+          pricing_source: service.pricingSource,
+        },
+      },
+      metadata: {
+        pricing_source: service.pricingSource,
+        service_price_cents: service.servicePriceCents,
+        deposit_percent_bps: service.depositPercentBps,
+        deposit_amount_cents: service.depositAmountCents,
+        currency: service.currency,
       },
     })
     .select("id")
@@ -620,6 +659,14 @@ function maskPhone(phoneE164: string) {
 
 function getPublicAppUrl() {
   return (process.env.PUBLIC_APP_URL ?? process.env.APP_BASE_URL ?? "http://localhost:3000").replace(/\/+$/, "");
+}
+
+function buildPaymentLinkSentSay(depositAmountText: string | null) {
+  if (depositAmountText) {
+    return `I've sent the secure deposit link to your WhatsApp for the ${depositAmountText} deposit. Once completed, your appointment will be confirmed.`;
+  }
+
+  return "I've sent the secure deposit link to your WhatsApp. The link will show the deposit before you pay. Once completed, your appointment will be confirmed.";
 }
 
 class PaidAppointmentIntentError extends Error {
