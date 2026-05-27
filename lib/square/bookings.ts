@@ -52,6 +52,14 @@ export type CreateSquareBookingResult = {
   raw: unknown;
 };
 
+export type ListSquareBookingsInput = {
+  locationId: string;
+  teamMemberId?: string | null;
+  startAtMin: string;
+  startAtMax: string;
+  limit?: number;
+};
+
 type SquareAppointmentSegment = {
   duration_minutes?: number;
   service_variation_id?: string;
@@ -81,6 +89,11 @@ type CreateBookingResponse = {
 
 type RetrieveBookingResponse = {
   booking?: unknown;
+};
+
+type ListBookingsResponse = {
+  bookings?: unknown[];
+  cursor?: string;
 };
 
 export async function searchSquareAvailability(
@@ -221,6 +234,28 @@ export function retrieveSquareBooking(bookingId: string) {
   });
 }
 
+export async function listSquareBookings(input: ListSquareBookingsInput) {
+  validateListBookingsInput(input);
+  const params = new URLSearchParams({
+    location_id: input.locationId.trim(),
+    start_at_min: input.startAtMin.trim(),
+    start_at_max: input.startAtMax.trim(),
+    limit: String(input.limit ?? 100),
+  });
+
+  if (input.teamMemberId?.trim()) {
+    params.set("team_member_id", input.teamMemberId.trim());
+  }
+
+  const response = await squareRequest<ListBookingsResponse>({
+    method: "GET",
+    path: `/v2/bookings?${params.toString()}`,
+    operationName: "square.list_bookings",
+  });
+
+  return response.bookings ?? [];
+}
+
 function normalizeAvailability(availability: SquareAvailability): SquareAvailabilitySlot[] {
   const startAt = availability.start_at;
   const locationId = availability.location_id;
@@ -317,4 +352,13 @@ function validateCreateBookingInput(input: CreateSquareBookingInput) {
   if (!Number.isInteger(input.durationMinutes) || input.durationMinutes <= 0) {
     throw new Error("Square durationMinutes must be a positive integer.");
   }
+}
+
+function validateListBookingsInput(input: ListSquareBookingsInput) {
+  if (!input.locationId.trim()) {
+    throw new Error("Missing required Square location ID for booking list.");
+  }
+
+  parseRfc3339Instant(input.startAtMin, "startAtMin");
+  parseRfc3339Instant(input.startAtMax, "startAtMax");
 }

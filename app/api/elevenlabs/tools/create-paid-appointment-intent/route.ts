@@ -22,6 +22,7 @@ import { getMissingPaidAppointmentEnvNames, requireEnv } from "@/lib/env";
 import { sendPaymentLinkWhatsApp } from "@/lib/messaging/send-whatsapp";
 import { createPayToken } from "@/lib/payments/pay-token";
 import { buildDepositPricingDetails } from "@/lib/payments/deposit-pricing";
+import { getSupabaseRuntimeFingerprint } from "@/lib/runtime-env-debug";
 import {
   CreatePaidAppointmentIntentSchema,
   type CreatePaidAppointmentIntentInput,
@@ -46,6 +47,7 @@ export async function POST(request: NextRequest) {
     debug_id: debugId,
     operation: "create_paid_appointment_intent",
     step: "request_start",
+    ...getSupabaseRuntimeFingerprint(),
   });
 
   const missingEnvNames = getMissingPaidAppointmentEnvNames();
@@ -147,7 +149,17 @@ export async function POST(request: NextRequest) {
       operation: "create_paid_appointment_intent",
       step: "insert_appointment_intent",
       appointment_intent_id: appointmentIntentId,
+      organization_id: resolvedContext.organizationId,
       conversation_id: input.conversation_id,
+      caller_phone_e164_masked: maskPhone(callerPhoneE164),
+      service_name: input.service_name,
+      selected_start_at: input.selected_start_at,
+      selected_timezone: input.selected_timezone,
+      selected_time_display: input.selected_time_display,
+      payment_status: getString(appointmentIntent, "payment_status"),
+      appointment_status: getString(appointmentIntent, "appointment_status"),
+      idempotency_key: getString(appointmentIntent, "idempotency_key"),
+      row_action: "created",
     });
     await insertWorkflowEvent(supabase, {
       organization_id: resolvedContext.organizationId,
@@ -569,7 +581,7 @@ async function insertAppointmentIntent(args: {
         currency: service.currency,
       },
     })
-    .select("id")
+    .select("id,organization_id,caller_phone_e164,service_name,selected_start_at,payment_status,appointment_status,idempotency_key")
     .single();
 
   if (error) {

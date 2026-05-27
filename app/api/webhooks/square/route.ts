@@ -7,6 +7,8 @@ import {
   normalizeSquareWebhookEvent,
   parseSquareWebhookEvent,
   SQUARE_SIGNATURE_HEADER,
+  type NormalizedSquareWebhookEvent,
+  type SquarePaymentWebhookIds,
   verifySquareWebhookSignature,
 } from "@/lib/square/webhooks";
 import {
@@ -16,6 +18,8 @@ import {
 } from "@/lib/square/bookings";
 import { getOrCreateSquareCustomer } from "@/lib/square/customers";
 import { mapSquarePaymentStatus, retrieveSquarePayment } from "@/lib/square/payments";
+import { SquareApiError } from "@/lib/square/client";
+import { extractSquareErrors } from "@/lib/square/error-details";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { logError, logWarn } from "@/lib/logger";
 import { formatAppointmentDateTimeForMessage, getAppointmentTimeZone } from "@/lib/appointments/appointment-time-format";
@@ -35,6 +39,7 @@ import {
   normalizeAppointmentPaymentRow,
   type SupabaseRow,
 } from "@/lib/category7-db";
+import { getSupabaseRuntimeFingerprint } from "@/lib/runtime-env-debug";
 
 export const runtime = "nodejs";
 
@@ -44,6 +49,7 @@ export async function POST(request: NextRequest) {
     debug_id: debugId,
     operation: "square_webhook",
     step: "request_start",
+    ...getSupabaseRuntimeFingerprint(),
   });
 
   const rawBody = await request.text();
@@ -157,11 +163,16 @@ export async function POST(request: NextRequest) {
   }
 
   const normalizedEvent = normalizeSquareWebhookEvent(event);
+  const ids = extractSquarePaymentIdsFromEvent(event);
   logWorkflowInfo("square.webhook.event_received", {
     debug_id: debugId,
     operation: "square_webhook",
     step: "event_received",
     event_type: normalizedEvent.eventType,
+    square_event_id: normalizedEvent.eventId,
+    square_payment_id: ids.paymentId,
+    square_order_id: ids.orderId,
+    square_payment_status: ids.status,
     payload: {
       event_id: normalizedEvent.eventId,
       merchant_id: normalizedEvent.merchantId,
@@ -169,6 +180,28 @@ export async function POST(request: NextRequest) {
     },
   });
   const supabase = getSupabaseAdmin();
+  const eventInserted = await insertSquareWebhookEventIfNew(supabase, normalizedEvent, event, ids);
+
+  if (!eventInserted) {
+    logWorkflowInfo("square.webhook.duplicate_event_ignored", {
+      debug_id: debugId,
+      operation: "square_webhook",
+      step: "event_idempotency_check",
+      square_event_id: normalizedEvent.eventId,
+      square_payment_id: ids.paymentId,
+      square_order_id: ids.orderId,
+      status: 200,
+    });
+    return okJson(
+      {
+        received: true,
+        duplicate_or_already_processed: true,
+        event_type: normalizedEvent.eventType,
+        square_event_id: normalizedEvent.eventId,
+      },
+      { step: "square_webhook_duplicate_ignored", message: "Duplicate Square webhook event ignored.", debugId },
+    );
+  }
 
   if (!isSquarePaymentUpdatedEvent(event)) {
     logWorkflowInfo("square.webhook.ignored_event", {
@@ -178,13 +211,17 @@ export async function POST(request: NextRequest) {
       status: 200,
       event_type: normalizedEvent.eventType,
     });
+    await markSquareWebhookEventProcessed(supabase, normalizedEvent.eventId, {
+      status: "ignored",
+      squarePaymentId: ids.paymentId,
+      squareOrderId: ids.orderId,
+    });
     return okJson(
       { received: true, ignored: true, event_type: normalizedEvent.eventType },
       { step: "square_webhook_ignored", message: "Unhandled Square event ignored.", debugId },
     );
   }
 
-  const ids = extractSquarePaymentIdsFromEvent(event);
   let paymentId = ids.paymentId;
   let orderId = ids.orderId;
   let squareStatus = ids.status;
@@ -197,6 +234,12 @@ export async function POST(request: NextRequest) {
       step: "extract_payment_ids",
       status: 200,
       error_code: "MISSING_PAYMENT_AND_ORDER_ID",
+    });
+    await markSquareWebhookEventProcessed(supabase, normalizedEvent.eventId, {
+      status: "ignored",
+      squarePaymentId: paymentId,
+      squareOrderId: orderId,
+      errorMessage: "Square payment identifiers missing.",
     });
     return okJson(
       { received: true, ignored: true, event_type: normalizedEvent.eventType, reason: "missing_payment_and_order_id" },
@@ -227,8 +270,16 @@ export async function POST(request: NextRequest) {
       step: "load_appointment_intent",
       square_payment_id: paymentId,
       square_order_id: orderId,
+      square_event_id: normalizedEvent.eventId,
+      payment_metadata_keys: getPaymentMetadataKeys(squarePayment),
       status: 200,
       error_code: "APPOINTMENT_INTENT_NOT_FOUND",
+    });
+    await markSquareWebhookEventProcessed(supabase, normalizedEvent.eventId, {
+      status: "ignored",
+      squarePaymentId: paymentId,
+      squareOrderId: orderId,
+      errorMessage: "Appointment intent not found for Square order/payment.",
     });
     return okJson(
       { received: true, event_type: normalizedEvent.eventType, appointment_intent_found: false },
@@ -237,6 +288,12 @@ export async function POST(request: NextRequest) {
   }
 
   const appointmentIntentId = requireString(appointmentIntent, "id");
+  await markSquareWebhookEventResolved(supabase, normalizedEvent.eventId, {
+    appointmentIntentId,
+    organizationId: getString(appointmentIntent, "organization_id"),
+    squarePaymentId: paymentId,
+    squareOrderId: orderId,
+  });
 
   await insertWorkflowEvent(supabase, {
     organization_id: getString(appointmentIntent, "organization_id"),
@@ -278,6 +335,13 @@ export async function POST(request: NextRequest) {
       square_order_id: orderId,
       square_booking_id: getString(appointmentIntent, "square_booking_id"),
       status: 200,
+    });
+    await markSquareWebhookEventProcessed(supabase, normalizedEvent.eventId, {
+      status: "ignored",
+      appointmentIntentId,
+      organizationId: getString(appointmentIntent, "organization_id"),
+      squarePaymentId: paymentId,
+      squareOrderId: orderId,
     });
     return okJson(
       {
@@ -326,6 +390,13 @@ export async function POST(request: NextRequest) {
       status: 200,
       payment_status: internalPaymentStatus,
     });
+    await markSquareWebhookEventProcessed(supabase, normalizedEvent.eventId, {
+      status: "processed",
+      appointmentIntentId,
+      organizationId: getString(appointmentIntent, "organization_id"),
+      squarePaymentId: paymentId,
+      squareOrderId: orderId,
+    });
 
     return okJson(
       { received: true, event_type: normalizedEvent.eventType, payment_status: internalPaymentStatus },
@@ -343,6 +414,14 @@ export async function POST(request: NextRequest) {
       status: 422,
       error_code: "COMPLETED_PAYMENT_MISSING_ID",
       safe_message: "Completed Square payment webhook did not include a payment ID.",
+    });
+    await markSquareWebhookEventProcessed(supabase, normalizedEvent.eventId, {
+      status: "failed",
+      appointmentIntentId,
+      organizationId: getString(appointmentIntent, "organization_id"),
+      squarePaymentId: paymentId,
+      squareOrderId: orderId,
+      errorMessage: "Completed Square payment webhook did not include a payment ID.",
     });
     return failJson(
       {
@@ -377,6 +456,13 @@ export async function POST(request: NextRequest) {
 
   try {
     const result = await confirmPaidAppointment(supabase, appointmentIntent, appointmentIntentId);
+    await markSquareWebhookEventProcessed(supabase, normalizedEvent.eventId, {
+      status: "processed",
+      appointmentIntentId,
+      organizationId: getString(appointmentIntent, "organization_id"),
+      squarePaymentId: paymentId,
+      squareOrderId: orderId,
+    });
     logWorkflowInfo("square.webhook.request_complete", {
       debug_id: debugId,
       operation: "square_webhook",
@@ -441,8 +527,19 @@ export async function POST(request: NextRequest) {
       appointment_intent_id: appointmentIntentId,
       square_payment_id: paymentId,
       square_order_id: orderId,
+      square_event_id: normalizedEvent.eventId,
       error_code: "CONFIRMATION_FAILED",
       safe_message: message,
+      square_errors: error instanceof SquareApiError ? extractSquareErrors(error.errorBody) : undefined,
+      square_status: error instanceof SquareApiError ? error.status : undefined,
+    });
+    await markSquareWebhookEventProcessed(supabase, normalizedEvent.eventId, {
+      status: "failed",
+      appointmentIntentId,
+      organizationId: getString(appointmentIntent, "organization_id"),
+      squarePaymentId: paymentId,
+      squareOrderId: orderId,
+      errorMessage: message,
     });
     await markIntentManualReview(supabase, appointmentIntent, appointmentIntentId, message);
 
@@ -484,6 +581,39 @@ async function confirmPaidAppointment(
     };
   }
 
+  const lockedIntent = await acquireBookingLock(supabase, appointmentIntentId);
+
+  if (!lockedIntent) {
+    const latestAppointmentIntent = (await findAppointmentIntentById(supabase, appointmentIntentId)) ?? appointmentIntent;
+
+    if (isBookingConfirmed(latestAppointmentIntent)) {
+      appointmentIntent = await ensureConfirmedBookingState(supabase, latestAppointmentIntent, appointmentIntentId);
+      return {
+        appointmentStatus: "confirmed",
+        squareBookingId: getString(appointmentIntent, "square_booking_id"),
+        manualReviewNeeded: false,
+        reusedExistingBooking: true,
+      };
+    }
+
+    logWorkflowInfo("square_booking_already_in_progress", {
+      operation: "square_webhook",
+      step: "acquire_booking_lock",
+      appointment_intent_id: appointmentIntentId,
+      booking_status: getString(latestAppointmentIntent, "booking_status"),
+      appointment_status: getString(latestAppointmentIntent, "appointment_status"),
+      safe_message: "Booking creation is already in progress or no longer eligible.",
+    });
+
+    return {
+      appointmentStatus: getString(latestAppointmentIntent, "appointment_status") ?? "payment_completed",
+      squareBookingId: getString(latestAppointmentIntent, "square_booking_id"),
+      manualReviewNeeded: false,
+      reusedExistingBooking: true,
+    };
+  }
+
+  appointmentIntent = lockedIntent;
   const selectedStartAt = requireString(appointmentIntent, "selected_start_at");
   const durationMinutes = requireNumber(appointmentIntent, "duration_minutes");
   const availability = await searchSquareAvailability({
@@ -513,18 +643,59 @@ async function confirmPaidAppointment(
     email: getString(appointmentIntent, "caller_email") ?? undefined,
     appointmentIntentId,
   });
-  const booking = await createSquareBooking({
-    appointmentIntentId,
-    locationId: slot.locationId,
-    customerId: customer.customerId,
-    startAt: selectedStartAt,
-    teamMemberId: slot.teamMemberId,
-    serviceVariationId: slot.serviceVariationId,
-    serviceVariationVersion: slot.serviceVariationVersion,
-    durationMinutes: slot.durationMinutes,
-    customerNote: getString(appointmentIntent, "notes") ?? getRawBookingNotes(appointmentIntent),
-    idempotencyKey: buildSquareBookingIdempotencyKey(appointmentIntentId),
+  const bookingIdempotencyKey = buildSquareBookingIdempotencyKey(appointmentIntentId);
+
+  logWorkflowInfo("square.create_booking.preflight", {
+    operation: "square_webhook",
+    step: "create_square_booking",
+    appointment_intent_id: appointmentIntentId,
+    organization_id: getString(appointmentIntent, "organization_id"),
+    selected_start_at: selectedStartAt,
+    business_timezone: getAppointmentTimeZone(appointmentIntent),
+    location_id: slot.locationId,
+    team_member_id: slot.teamMemberId,
+    service_variation_id: slot.serviceVariationId,
+    customer_id: customer.customerId,
+    square_booking_idempotency_key: bookingIdempotencyKey,
   });
+  let booking: Awaited<ReturnType<typeof createSquareBooking>>;
+
+  try {
+    booking = await createSquareBooking({
+      appointmentIntentId,
+      locationId: slot.locationId,
+      customerId: customer.customerId,
+      startAt: selectedStartAt,
+      teamMemberId: slot.teamMemberId,
+      serviceVariationId: slot.serviceVariationId,
+      serviceVariationVersion: slot.serviceVariationVersion,
+      durationMinutes: slot.durationMinutes,
+      customerNote: getString(appointmentIntent, "notes") ?? getRawBookingNotes(appointmentIntent),
+      idempotencyKey: bookingIdempotencyKey,
+    });
+  } catch (error) {
+    logWorkflowError("square.create_booking.failed", {
+      operation: "square_webhook",
+      step: "create_square_booking",
+      appointment_intent_id: appointmentIntentId,
+      organization_id: getString(appointmentIntent, "organization_id"),
+      selected_start_at: selectedStartAt,
+      business_timezone: getAppointmentTimeZone(appointmentIntent),
+      location_id: slot.locationId,
+      team_member_id: slot.teamMemberId,
+      service_variation_id: slot.serviceVariationId,
+      customer_id: customer.customerId,
+      square_booking_idempotency_key: bookingIdempotencyKey,
+      square_status: error instanceof SquareApiError ? error.status : undefined,
+      square_errors: error instanceof SquareApiError ? extractSquareErrors(error.errorBody) : undefined,
+      safe_message: error instanceof Error ? error.message : "Square CreateBooking failed.",
+    });
+    await updateAppointmentIntent(supabase, appointmentIntentId, {
+      booking_status: "failed",
+      last_error: error instanceof Error ? error.message : "Square CreateBooking failed.",
+    });
+    throw error;
+  }
   const now = new Date();
 
   appointmentIntent = await updateAppointmentIntent(supabase, appointmentIntentId, {
@@ -532,6 +703,7 @@ async function confirmPaidAppointment(
     square_booking_id: booking.bookingId,
     square_customer_id: customer.customerId,
     square_booking_created_at: now.toISOString(),
+    booking_status: "created",
     last_error: null,
   });
   logWorkflowInfo("square_booking_created", {
@@ -593,6 +765,7 @@ async function markIntentManualReview(
 
   await updateAppointmentIntent(supabase, appointmentIntentId, {
     ...markManualReviewNeeded(),
+    booking_status: "failed",
     last_error: lastError,
   });
   await insertWorkflowEvent(supabase, {
@@ -780,6 +953,127 @@ async function findAppointmentIntentById(supabase: ReturnType<typeof getSupabase
   return data as SupabaseRow | null;
 }
 
+async function insertSquareWebhookEventIfNew(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  event: NormalizedSquareWebhookEvent,
+  rawEvent: unknown,
+  ids: SquarePaymentWebhookIds,
+) {
+  if (!event.eventId) {
+    logWarn("square.webhook.event_id_missing");
+    return true;
+  }
+
+  const { error } = await supabase.from("square_webhook_events").insert({
+    square_event_id: event.eventId,
+    event_type: event.eventType,
+    square_payment_id: ids.paymentId,
+    square_order_id: ids.orderId,
+    status: "received",
+    payload: rawEvent,
+  });
+
+  if (!error) {
+    return true;
+  }
+
+  if (isUniqueViolation(error)) {
+    return false;
+  }
+
+  if (error.code === "42P01") {
+    logWarn("square.webhook.event_table_missing", { message: error.message });
+    return true;
+  }
+
+  throw new Error(`Failed to record Square webhook event: ${error.message}`);
+}
+
+async function markSquareWebhookEventResolved(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  squareEventId: string | null,
+  input: {
+    appointmentIntentId?: string | null;
+    organizationId?: string | null;
+    squarePaymentId?: string | null;
+    squareOrderId?: string | null;
+  },
+) {
+  await updateSquareWebhookEvent(supabase, squareEventId, {
+    appointment_intent_id: input.appointmentIntentId,
+    organization_id: input.organizationId,
+    square_payment_id: input.squarePaymentId,
+    square_order_id: input.squareOrderId,
+  });
+}
+
+async function markSquareWebhookEventProcessed(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  squareEventId: string | null,
+  input: {
+    status: "processed" | "ignored" | "failed";
+    appointmentIntentId?: string | null;
+    organizationId?: string | null;
+    squarePaymentId?: string | null;
+    squareOrderId?: string | null;
+    errorMessage?: string | null;
+  },
+) {
+  await updateSquareWebhookEvent(supabase, squareEventId, {
+    status: input.status,
+    appointment_intent_id: input.appointmentIntentId,
+    organization_id: input.organizationId,
+    square_payment_id: input.squarePaymentId,
+    square_order_id: input.squareOrderId,
+    error_message: input.errorMessage,
+    processed_at: new Date().toISOString(),
+  });
+}
+
+async function updateSquareWebhookEvent(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  squareEventId: string | null,
+  patch: SupabaseRow,
+) {
+  if (!squareEventId) {
+    return;
+  }
+
+  const normalizedPatch = Object.fromEntries(
+    Object.entries(patch).filter(([, value]) => value !== undefined),
+  );
+
+  const { error } = await supabase
+    .from("square_webhook_events")
+    .update(normalizedPatch)
+    .eq("square_event_id", squareEventId);
+
+  if (error && error.code !== "42P01") {
+    logWarn("square.webhook.event_update_failed", { message: error.message });
+  }
+}
+
+async function acquireBookingLock(supabase: ReturnType<typeof getSupabaseAdmin>, appointmentIntentId: string) {
+  const { data, error } = await supabase
+    .from("appointment_intents")
+    .update({
+      booking_status: "creating_booking",
+      last_error: null,
+    })
+    .eq("id", appointmentIntentId)
+    .is("square_booking_id", null)
+    .neq("appointment_status", "confirmed")
+    .or("booking_status.is.null,booking_status.neq.creating_booking")
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to acquire appointment booking lock: ${error.message}`);
+  }
+
+  return data as SupabaseRow | null;
+}
+
 async function ensureConfirmedBookingState(
   supabase: ReturnType<typeof getSupabaseAdmin>,
   appointmentIntent: SupabaseRow,
@@ -788,6 +1082,7 @@ async function ensureConfirmedBookingState(
   const patch: SupabaseRow = {
     appointment_status: "confirmed",
     payment_status: "completed",
+    booking_status: "created",
     confirmed_at: getString(appointmentIntent, "confirmed_at") ?? new Date().toISOString(),
     last_error: null,
   };
@@ -1028,6 +1323,22 @@ function getPaymentFromWebhookEvent(event: unknown) {
   if (!isRecord(object)) return null;
   const payment = object.payment;
   return isRecord(payment) ? payment : null;
+}
+
+function getPaymentMetadataKeys(payment: unknown) {
+  if (!isRecord(payment)) return [];
+  const keys = new Set<string>();
+
+  for (const key of ["note", "order_id", "reference_id", "buyer_email_address"]) {
+    if (payment[key] !== undefined && payment[key] !== null) keys.add(key);
+  }
+
+  const metadata = payment.metadata;
+  if (isRecord(metadata)) {
+    for (const key of Object.keys(metadata)) keys.add(`metadata.${key}`);
+  }
+
+  return [...keys].sort();
 }
 
 function addMinutes(isoDate: string, minutes: number) {

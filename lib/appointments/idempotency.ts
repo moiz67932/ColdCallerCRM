@@ -11,7 +11,7 @@ export function buildPaymentLinkIdempotencyKey(appointmentIntentId: string) {
 }
 
 export function buildSquareBookingIdempotencyKey(appointmentIntentId: string) {
-  return buildStableKey(`appointment_intent:${normalizeAppointmentIntentId(appointmentIntentId)}:square_booking:v1`);
+  return buildStableKey(`booking_${normalizeAppointmentIntentId(appointmentIntentId)}`);
 }
 
 export function buildTelnyxMessageIdempotencyKey(appointmentIntentId: string, messageType: TelnyxMessageType) {
