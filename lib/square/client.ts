@@ -19,6 +19,7 @@ export type SquareRequestArgs = {
   idempotencyKey?: string;
   appointmentIntentId?: string;
   operationName?: string;
+  timeoutMs?: number;
 };
 
 type SquareRequestLogContext = Pick<SquareRequestArgs, "appointmentIntentId" | "operationName"> & {
@@ -112,6 +113,10 @@ async function sendSquareRequest<T>(args: SquareRequestArgs): Promise<T> {
   const config = getSquareConfig();
   const url = getSquareUrl(config.baseUrl, args.path);
   const startedAt = Date.now();
+  const abortController = args.timeoutMs ? new AbortController() : null;
+  const timeout = abortController
+    ? setTimeout(() => abortController.abort(), args.timeoutMs)
+    : null;
 
   logSquareRequest({
     operation: args.operationName,
@@ -130,7 +135,9 @@ async function sendSquareRequest<T>(args: SquareRequestArgs): Promise<T> {
         "Content-Type": "application/json",
       },
       body: buildSquareRequestBody(args),
+      signal: abortController?.signal,
     });
+    if (timeout) clearTimeout(timeout);
     const durationMs = Date.now() - startedAt;
 
     logSquareResponse({
@@ -169,6 +176,7 @@ async function sendSquareRequest<T>(args: SquareRequestArgs): Promise<T> {
 
     return (await parseSquareResponseBody(response)) as T;
   } catch (error) {
+    if (timeout) clearTimeout(timeout);
     const durationMs = Date.now() - startedAt;
 
     logSquareResponse({

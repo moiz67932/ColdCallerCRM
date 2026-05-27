@@ -15,6 +15,7 @@ export type SearchSquareAvailabilityInput = {
   selectedStartAt?: string | null;
   timezone?: string | null;
   appointmentIntentId?: string | null;
+  timeoutMs?: number;
 };
 
 export type SquareAvailabilitySlot = {
@@ -43,6 +44,7 @@ export type CreateSquareBookingInput = {
   durationMinutes: number;
   customerNote?: string;
   idempotencyKey?: string;
+  timeoutMs?: number;
 };
 
 export type CreateSquareBookingResult = {
@@ -118,6 +120,7 @@ export async function searchSquareAvailability(
     path: "/v2/bookings/availability/search",
     appointmentIntentId: input.appointmentIntentId?.trim() || undefined,
     operationName: "square.search_availability",
+    timeoutMs: input.timeoutMs,
     body,
   });
 
@@ -188,6 +191,7 @@ export async function createSquareBooking(input: CreateSquareBookingInput): Prom
     idempotencyKey: input.idempotencyKey?.trim() || buildSquareBookingIdempotencyKey(input.appointmentIntentId),
     appointmentIntentId: input.appointmentIntentId,
     operationName: "square.create_booking",
+    timeoutMs: input.timeoutMs,
     body: {
       booking: {
         customer_id: input.customerId,

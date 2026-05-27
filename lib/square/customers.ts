@@ -12,6 +12,7 @@ export type CreateSquareCustomerInput = {
   phoneE164: string;
   email?: string;
   appointmentIntentId?: string;
+  timeoutMs?: number;
 };
 
 export type SquareCustomer = {
@@ -56,7 +57,7 @@ export function normalizeCustomerName(fullName: string | null | undefined): Norm
   };
 }
 
-export async function searchSquareCustomerByPhone(phoneE164: string): Promise<SquareCustomer | null> {
+export async function searchSquareCustomerByPhone(phoneE164: string, timeoutMs?: number): Promise<SquareCustomer | null> {
   const phoneNumber = normalizePhoneInput(phoneE164);
 
   if (!phoneNumber) {
@@ -67,6 +68,7 @@ export async function searchSquareCustomerByPhone(phoneE164: string): Promise<Sq
     method: "POST",
     path: "/v2/customers/search",
     operationName: "square.search_customer_by_phone",
+    timeoutMs,
     body: {
       query: {
         filter: {
@@ -102,6 +104,7 @@ export async function createSquareCustomer(input: CreateSquareCustomerInput): Pr
     path: "/v2/customers",
     appointmentIntentId,
     operationName: "square.create_customer",
+    timeoutMs: input.timeoutMs,
     body: {
       given_name: givenName,
       family_name: familyName,
@@ -120,7 +123,7 @@ export async function createSquareCustomer(input: CreateSquareCustomerInput): Pr
 }
 
 export async function getOrCreateSquareCustomer(input: CreateSquareCustomerInput): Promise<SquareCustomer> {
-  const existingCustomer = await searchSquareCustomerByPhone(input.phoneE164);
+  const existingCustomer = await searchSquareCustomerByPhone(input.phoneE164, input.timeoutMs);
 
   if (existingCustomer) {
     return existingCustomer;

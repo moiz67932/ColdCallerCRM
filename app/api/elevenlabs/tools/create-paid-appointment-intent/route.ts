@@ -113,6 +113,16 @@ export async function POST(request: NextRequest) {
       organizationId: resolvedContext.organizationId,
       serviceName: input.service_name,
     });
+    const selectedTimezone =
+      input.selected_timezone ??
+      (await resolveBusinessTimezone({
+        supabase,
+        organizationId: resolvedContext.organizationId,
+        clinicId: resolvedContext.clinicId,
+        squareLocationId: service.locationId,
+      }));
+    const selectedTimeDisplay =
+      input.selected_time_display ?? formatSelectedTimeDisplay(input.selected_start_at, selectedTimezone);
     const pricingDetails = buildDepositPricingDetails({
       serviceName: service.serviceName,
       servicePriceCents: service.servicePriceCents,
@@ -125,7 +135,8 @@ export async function POST(request: NextRequest) {
       operation: "create_paid_appointment_intent",
       step: "check_square_availability",
       selected_start_at: input.selected_start_at,
-      selected_timezone: input.selected_timezone,
+      selected_timezone: selectedTimezone,
+      selected_time_display: selectedTimeDisplay,
       duration_minutes: service.durationMinutes,
       square_location_id: service.locationId,
       square_team_member_id: service.teamMemberId,
@@ -140,6 +151,8 @@ export async function POST(request: NextRequest) {
       clinicId: resolvedContext.clinicId,
       callerPhoneE164,
       service,
+      selectedTimezone,
+      selectedTimeDisplay,
     });
 
     const appointmentIntentId = requireRowId(appointmentIntent, "appointment_intents");
@@ -154,8 +167,8 @@ export async function POST(request: NextRequest) {
       caller_phone_e164_masked: maskPhone(callerPhoneE164),
       service_name: input.service_name,
       selected_start_at: input.selected_start_at,
-      selected_timezone: input.selected_timezone,
-      selected_time_display: input.selected_time_display,
+      selected_timezone: selectedTimezone,
+      selected_time_display: selectedTimeDisplay,
       payment_status: getString(appointmentIntent, "payment_status"),
       appointment_status: getString(appointmentIntent, "appointment_status"),
       idempotency_key: getString(appointmentIntent, "idempotency_key"),
@@ -210,7 +223,7 @@ export async function POST(request: NextRequest) {
           clinicName: resolvedContext.clinicName,
           paymentLinkUrl: brandedPayUrl,
           paymentButtonToken: payToken,
-          selectedTimeDisplay: input.selected_time_display,
+          selectedTimeDisplay: selectedTimeDisplay,
         });
       } catch (error) {
         await insertTelnyxMessageEvent(
@@ -510,12 +523,70 @@ async function resolveOrganizationContext(input: CreatePaidAppointmentIntentInpu
   };
 }
 
+async function resolveBusinessTimezone(input: {
+  supabase: ReturnType<typeof getSupabaseAdmin>;
+  organizationId: string;
+  clinicId: string | null;
+  squareLocationId: string;
+}) {
+  if (input.clinicId) {
+    const { data, error } = await input.supabase
+      .from("clinics")
+      .select("timezone")
+      .eq("id", input.clinicId)
+      .eq("organization_id", input.organizationId)
+      .maybeSingle();
+
+    if (!error) {
+      const timezone = getString((data ?? {}) as SupabaseRow, "timezone");
+      if (timezone) return timezone;
+    }
+  }
+
+  const { data, error } = await input.supabase
+    .from("square_integrations")
+    .select("square_timezone")
+    .eq("organization_id", input.organizationId)
+    .eq("square_location_id", input.squareLocationId)
+    .eq("is_active", true)
+    .limit(1)
+    .maybeSingle();
+
+  if (!error) {
+    const timezone = getString((data ?? {}) as SupabaseRow, "square_timezone");
+    if (timezone) return timezone;
+  }
+
+  return "UTC";
+}
+
+function formatSelectedTimeDisplay(selectedStartAt: string, timezone: string) {
+  const date = new Date(selectedStartAt);
+
+  if (!Number.isFinite(date.getTime())) {
+    return selectedStartAt;
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZoneName: "short",
+  }).format(date);
+}
+
 async function insertAppointmentIntent(args: {
   input: CreatePaidAppointmentIntentInput;
   supabase: ReturnType<typeof getSupabaseAdmin>;
   organizationId: string;
   clinicId: string | null;
   callerPhoneE164: string;
+  selectedTimezone: string;
+  selectedTimeDisplay: string;
   service: {
     locationId: string;
     teamMemberId: string;
@@ -529,7 +600,7 @@ async function insertAppointmentIntent(args: {
     pricingSource: string;
   };
 }) {
-  const { input, supabase, organizationId, clinicId, callerPhoneE164, service } = args;
+  const { input, supabase, organizationId, clinicId, callerPhoneE164, selectedTimezone, selectedTimeDisplay, service } = args;
   const { data, error } = await supabase
     .from("appointment_intents")
     .insert({
@@ -550,8 +621,8 @@ async function insertAppointmentIntent(args: {
       square_service_variation_id: service.serviceVariationId,
       square_service_variation_version: service.serviceVariationVersion,
       selected_start_at: input.selected_start_at,
-      selected_timezone: input.selected_timezone,
-      selected_time_display: input.selected_time_display,
+      selected_timezone: selectedTimezone,
+      selected_time_display: selectedTimeDisplay,
       duration_minutes: service.durationMinutes,
       service_price_cents: service.servicePriceCents,
       deposit_percent_bps: service.depositPercentBps,
@@ -563,8 +634,8 @@ async function insertAppointmentIntent(args: {
       raw_booking_details: {
         notes: input.notes,
         selected_start_at: input.selected_start_at,
-        selected_timezone: input.selected_timezone,
-        selected_time_display: input.selected_time_display,
+        selected_timezone: selectedTimezone,
+        selected_time_display: selectedTimeDisplay,
         pricing: {
           service_price_cents: service.servicePriceCents,
           deposit_percent_bps: service.depositPercentBps,

@@ -43,6 +43,11 @@ import { getSupabaseRuntimeFingerprint } from "@/lib/runtime-env-debug";
 
 export const runtime = "nodejs";
 
+const BOOKING_LOCK_STALE_MS = 2 * 60 * 1000;
+const SQUARE_AVAILABILITY_TIMEOUT_MS = 8_000;
+const SQUARE_CUSTOMER_TIMEOUT_MS = 8_000;
+const SQUARE_CREATE_BOOKING_TIMEOUT_MS = 10_000;
+
 export async function POST(request: NextRequest) {
   const debugId = createDebugId("square_webhook");
   logWorkflowInfo("square.webhook.request_start", {
@@ -581,10 +586,11 @@ async function confirmPaidAppointment(
     };
   }
 
-  const lockedIntent = await acquireBookingLock(supabase, appointmentIntentId);
+  const lockResult = await acquireBookingLock(supabase, appointmentIntentId);
+  const lockedIntent = lockResult.appointmentIntent;
 
   if (!lockedIntent) {
-    const latestAppointmentIntent = (await findAppointmentIntentById(supabase, appointmentIntentId)) ?? appointmentIntent;
+    const latestAppointmentIntent = lockResult.latestAppointmentIntent ?? (await findAppointmentIntentById(supabase, appointmentIntentId)) ?? appointmentIntent;
 
     if (isBookingConfirmed(latestAppointmentIntent)) {
       appointmentIntent = await ensureConfirmedBookingState(supabase, latestAppointmentIntent, appointmentIntentId);
@@ -600,8 +606,11 @@ async function confirmPaidAppointment(
       operation: "square_webhook",
       step: "acquire_booking_lock",
       appointment_intent_id: appointmentIntentId,
+      lock_reason: lockResult.reason,
       booking_status: getString(latestAppointmentIntent, "booking_status"),
       appointment_status: getString(latestAppointmentIntent, "appointment_status"),
+      last_booking_attempt_at: getString(latestAppointmentIntent, "last_booking_attempt_at"),
+      updated_at: getString(latestAppointmentIntent, "updated_at"),
       safe_message: "Booking creation is already in progress or no longer eligible.",
     });
 
@@ -614,133 +623,234 @@ async function confirmPaidAppointment(
   }
 
   appointmentIntent = lockedIntent;
-  const selectedStartAt = requireString(appointmentIntent, "selected_start_at");
-  const durationMinutes = requireNumber(appointmentIntent, "duration_minutes");
-  const availability = await searchSquareAvailability({
-    locationId: requireString(appointmentIntent, "square_location_id"),
-    teamMemberId: requireString(appointmentIntent, "square_team_member_id"),
-    serviceVariationId: requireString(appointmentIntent, "square_service_variation_id"),
-    startAt: selectedStartAt,
-    endAt: addMinutes(selectedStartAt, durationMinutes + 15),
-    selectedStartAt,
-    timezone: getString(appointmentIntent, "selected_timezone"),
-    appointmentIntentId,
-  });
-  const slot = findExactAvailableSlot({ desiredStartAt: selectedStartAt, availability });
-
-  if (!slot) {
-    await markIntentManualReview(supabase, appointmentIntent, appointmentIntentId, "Slot unavailable after payment");
-    return {
-      appointmentStatus: "manual_review_needed",
-      squareBookingId: null,
-      manualReviewNeeded: true,
-    };
-  }
-
-  const customer = await getOrCreateSquareCustomer({
-    fullName: getString(appointmentIntent, "caller_name") ?? undefined,
-    phoneE164: getString(appointmentIntent, "caller_phone_e164") ?? requireString(appointmentIntent, "caller_phone"),
-    email: getString(appointmentIntent, "caller_email") ?? undefined,
-    appointmentIntentId,
-  });
-  const bookingIdempotencyKey = buildSquareBookingIdempotencyKey(appointmentIntentId);
-
-  logWorkflowInfo("square.create_booking.preflight", {
+  logWorkflowInfo("square.booking_lock.acquired", {
     operation: "square_webhook",
-    step: "create_square_booking",
+    step: "acquire_booking_lock",
     appointment_intent_id: appointmentIntentId,
-    organization_id: getString(appointmentIntent, "organization_id"),
-    selected_start_at: selectedStartAt,
-    business_timezone: getAppointmentTimeZone(appointmentIntent),
-    location_id: slot.locationId,
-    team_member_id: slot.teamMemberId,
-    service_variation_id: slot.serviceVariationId,
-    customer_id: customer.customerId,
-    square_booking_idempotency_key: bookingIdempotencyKey,
+    lock_reason: lockResult.reason,
+    stale_lock_recovered: lockResult.staleLockRecovered,
+    booking_status: getString(appointmentIntent, "booking_status"),
+    booking_attempt_count: getNumber(appointmentIntent, "booking_attempt_count"),
+    last_booking_attempt_at: getString(appointmentIntent, "last_booking_attempt_at"),
   });
-  let booking: Awaited<ReturnType<typeof createSquareBooking>>;
 
   try {
-    booking = await createSquareBooking({
-      appointmentIntentId,
-      locationId: slot.locationId,
-      customerId: customer.customerId,
-      startAt: selectedStartAt,
-      teamMemberId: slot.teamMemberId,
-      serviceVariationId: slot.serviceVariationId,
-      serviceVariationVersion: slot.serviceVariationVersion,
-      durationMinutes: slot.durationMinutes,
-      customerNote: getString(appointmentIntent, "notes") ?? getRawBookingNotes(appointmentIntent),
-      idempotencyKey: bookingIdempotencyKey,
+    const selectedStartAt = requireString(appointmentIntent, "selected_start_at");
+    const durationMinutes = requireNumber(appointmentIntent, "duration_minutes");
+    const locationId = requireString(appointmentIntent, "square_location_id");
+    const teamMemberId = requireString(appointmentIntent, "square_team_member_id");
+    const serviceVariationId = requireString(appointmentIntent, "square_service_variation_id");
+    const serviceVariationVersion = requireNumber(appointmentIntent, "square_service_variation_version");
+
+    logWorkflowInfo("square.service_mapping.loaded", {
+      operation: "square_webhook",
+      step: "load_service_mapping",
+      appointment_intent_id: appointmentIntentId,
+      organization_id: getString(appointmentIntent, "organization_id"),
+      service_name: getString(appointmentIntent, "service_name"),
+      duration_minutes: durationMinutes,
+      selected_start_at: selectedStartAt,
+      selected_timezone: getString(appointmentIntent, "selected_timezone"),
+      selected_time_display: getString(appointmentIntent, "selected_time_display"),
+      location_id: locationId,
+      team_member_id: teamMemberId,
+      service_variation_id: serviceVariationId,
+      service_variation_version: serviceVariationVersion,
     });
-  } catch (error) {
-    logWorkflowError("square.create_booking.failed", {
+
+    logWorkflowInfo("square.availability_search.start", {
+      operation: "square_webhook",
+      step: "search_square_availability",
+      appointment_intent_id: appointmentIntentId,
+      selected_start_at: selectedStartAt,
+      selected_timezone: getString(appointmentIntent, "selected_timezone"),
+      selected_time_display: getString(appointmentIntent, "selected_time_display"),
+      location_id: locationId,
+      team_member_id: teamMemberId,
+      service_variation_id: serviceVariationId,
+      timeout_ms: SQUARE_AVAILABILITY_TIMEOUT_MS,
+    });
+    const availability = await searchSquareAvailability({
+      locationId,
+      teamMemberId,
+      serviceVariationId,
+      startAt: selectedStartAt,
+      endAt: addMinutes(selectedStartAt, durationMinutes + 15),
+      selectedStartAt,
+      timezone: getString(appointmentIntent, "selected_timezone"),
+      appointmentIntentId,
+      timeoutMs: SQUARE_AVAILABILITY_TIMEOUT_MS,
+    });
+    logWorkflowInfo("square.availability_search.complete", {
+      operation: "square_webhook",
+      step: "search_square_availability",
+      appointment_intent_id: appointmentIntentId,
+      availability_count: availability.length,
+    });
+    const slot = findExactAvailableSlot({ desiredStartAt: selectedStartAt, availability });
+
+    if (!slot) {
+      await markIntentManualReview(supabase, appointmentIntent, appointmentIntentId, "Slot unavailable after payment", "SLOT_UNAVAILABLE");
+      return {
+        appointmentStatus: "manual_review_needed",
+        squareBookingId: null,
+        manualReviewNeeded: true,
+      };
+    }
+
+    logWorkflowInfo("square.customer.start", {
+      operation: "square_webhook",
+      step: "get_or_create_square_customer",
+      appointment_intent_id: appointmentIntentId,
+      timeout_ms: SQUARE_CUSTOMER_TIMEOUT_MS,
+    });
+    const customer = await getOrCreateSquareCustomer({
+      fullName: getString(appointmentIntent, "caller_name") ?? undefined,
+      phoneE164: getString(appointmentIntent, "caller_phone_e164") ?? requireString(appointmentIntent, "caller_phone"),
+      email: getString(appointmentIntent, "caller_email") ?? undefined,
+      appointmentIntentId,
+      timeoutMs: SQUARE_CUSTOMER_TIMEOUT_MS,
+    });
+    logWorkflowInfo("square.customer.complete", {
+      operation: "square_webhook",
+      step: "get_or_create_square_customer",
+      appointment_intent_id: appointmentIntentId,
+      customer_id: customer.customerId,
+    });
+    const bookingIdempotencyKey = buildSquareBookingIdempotencyKey(appointmentIntentId);
+
+    logWorkflowInfo("square.create_booking.preflight", {
       operation: "square_webhook",
       step: "create_square_booking",
       appointment_intent_id: appointmentIntentId,
       organization_id: getString(appointmentIntent, "organization_id"),
       selected_start_at: selectedStartAt,
+      selected_timezone: getString(appointmentIntent, "selected_timezone"),
+      selected_time_display: getString(appointmentIntent, "selected_time_display"),
       business_timezone: getAppointmentTimeZone(appointmentIntent),
       location_id: slot.locationId,
       team_member_id: slot.teamMemberId,
       service_variation_id: slot.serviceVariationId,
+      service_variation_version: slot.serviceVariationVersion,
       customer_id: customer.customerId,
       square_booking_idempotency_key: bookingIdempotencyKey,
-      square_status: error instanceof SquareApiError ? error.status : undefined,
-      square_errors: error instanceof SquareApiError ? extractSquareErrors(error.errorBody) : undefined,
-      safe_message: error instanceof Error ? error.message : "Square CreateBooking failed.",
+      timeout_ms: SQUARE_CREATE_BOOKING_TIMEOUT_MS,
     });
-    await updateAppointmentIntent(supabase, appointmentIntentId, {
-      booking_status: "failed",
-      last_error: error instanceof Error ? error.message : "Square CreateBooking failed.",
+    let booking: Awaited<ReturnType<typeof createSquareBooking>>;
+
+    try {
+      booking = await createSquareBooking({
+        appointmentIntentId,
+        locationId: slot.locationId,
+        customerId: customer.customerId,
+        startAt: selectedStartAt,
+        teamMemberId: slot.teamMemberId,
+        serviceVariationId: slot.serviceVariationId,
+        serviceVariationVersion: slot.serviceVariationVersion,
+        durationMinutes: slot.durationMinutes,
+        customerNote: getString(appointmentIntent, "notes") ?? getRawBookingNotes(appointmentIntent),
+        idempotencyKey: bookingIdempotencyKey,
+        timeoutMs: SQUARE_CREATE_BOOKING_TIMEOUT_MS,
+      });
+    } catch (error) {
+      const details = getSafeBookingErrorDetails(error);
+      logWorkflowError("square.create_booking.failed", {
+        operation: "square_webhook",
+        step: "create_square_booking",
+        appointment_intent_id: appointmentIntentId,
+        organization_id: getString(appointmentIntent, "organization_id"),
+        selected_start_at: selectedStartAt,
+        selected_timezone: getString(appointmentIntent, "selected_timezone"),
+        selected_time_display: getString(appointmentIntent, "selected_time_display"),
+        business_timezone: getAppointmentTimeZone(appointmentIntent),
+        location_id: slot.locationId,
+        team_member_id: slot.teamMemberId,
+        service_variation_id: slot.serviceVariationId,
+        service_variation_version: slot.serviceVariationVersion,
+        customer_id: customer.customerId,
+        square_booking_idempotency_key: bookingIdempotencyKey,
+        square_status: details.squareStatus,
+        square_errors: details.squareErrors,
+        error_code: details.code,
+        safe_message: details.message,
+      });
+      throw error;
+    }
+    const now = new Date();
+
+    logWorkflowInfo("appointment_intent.update_square_booking.start", {
+      operation: "square_webhook",
+      step: "update_local_square_booking",
+      appointment_intent_id: appointmentIntentId,
+      square_booking_id: booking.bookingId,
+      customer_id: customer.customerId,
     });
-    throw error;
+    appointmentIntent = await updateAppointmentIntent(supabase, appointmentIntentId, {
+      ...markSquareBookingCreated(),
+      square_booking_id: booking.bookingId,
+      square_customer_id: customer.customerId,
+      square_booking_created_at: now.toISOString(),
+      booking_status: "created",
+      last_error: null,
+      last_error_code: null,
+    });
+    logWorkflowInfo("square_booking_created", {
+      operation: "square_webhook",
+      step: "create_square_booking",
+      appointment_intent_id: appointmentIntentId,
+      square_booking_id: booking.bookingId,
+      square_customer_id: customer.customerId,
+    });
+    logWorkflowInfo("appointment_intent.confirm.start", {
+      operation: "square_webhook",
+      step: "confirm_appointment",
+      appointment_intent_id: appointmentIntentId,
+      square_booking_id: booking.bookingId,
+    });
+    appointmentIntent = await updateAppointmentIntent(supabase, appointmentIntentId, {
+      ...markConfirmed(now),
+      last_error: null,
+      last_error_code: null,
+    });
+    logWorkflowInfo("appointment_confirmed", {
+      operation: "square_webhook",
+      step: "confirm_appointment",
+      appointment_intent_id: appointmentIntentId,
+      square_booking_id: booking.bookingId,
+      appointment_status: "confirmed",
+    });
+
+    await insertWorkflowEvent(supabase, {
+      organization_id: getString(appointmentIntent, "organization_id"),
+      appointment_intent_id: appointmentIntentId,
+      event_type: "square_booking_created",
+      status: "success",
+      payload: { square_booking_id: booking.bookingId, square_customer_id: customer.customerId },
+    });
+
+    logWorkflowInfo("confirmation_whatsapp.start", {
+      operation: "square_webhook",
+      step: "send_confirmation_whatsapp",
+      appointment_intent_id: appointmentIntentId,
+      square_booking_id: booking.bookingId,
+    });
+    await sendConfirmationMessageSafely(supabase, appointmentIntent, appointmentIntentId);
+
+    return {
+      appointmentStatus: "confirmed",
+      squareBookingId: booking.bookingId,
+      manualReviewNeeded: false,
+      reusedExistingBooking: false,
+    };
+  } catch (error) {
+    await finalizeBookingFailedAfterPayment(supabase, appointmentIntent, appointmentIntentId, error);
+    return {
+      appointmentStatus: "manual_review_needed",
+      squareBookingId: null,
+      manualReviewNeeded: true,
+      reusedExistingBooking: false,
+    };
   }
-  const now = new Date();
-
-  appointmentIntent = await updateAppointmentIntent(supabase, appointmentIntentId, {
-    ...markSquareBookingCreated(),
-    square_booking_id: booking.bookingId,
-    square_customer_id: customer.customerId,
-    square_booking_created_at: now.toISOString(),
-    booking_status: "created",
-    last_error: null,
-  });
-  logWorkflowInfo("square_booking_created", {
-    operation: "square_webhook",
-    step: "create_square_booking",
-    appointment_intent_id: appointmentIntentId,
-    square_booking_id: booking.bookingId,
-    square_customer_id: customer.customerId,
-  });
-  appointmentIntent = await updateAppointmentIntent(supabase, appointmentIntentId, {
-    ...markConfirmed(now),
-    last_error: null,
-  });
-  logWorkflowInfo("appointment_confirmed", {
-    operation: "square_webhook",
-    step: "confirm_appointment",
-    appointment_intent_id: appointmentIntentId,
-    square_booking_id: booking.bookingId,
-    appointment_status: "confirmed",
-  });
-
-  await insertWorkflowEvent(supabase, {
-    organization_id: getString(appointmentIntent, "organization_id"),
-    appointment_intent_id: appointmentIntentId,
-    event_type: "square_booking_created",
-    status: "success",
-    payload: { square_booking_id: booking.bookingId, square_customer_id: customer.customerId },
-  });
-
-  await sendConfirmationMessageSafely(supabase, appointmentIntent, appointmentIntentId);
-
-  return {
-    appointmentStatus: "confirmed",
-    squareBookingId: booking.bookingId,
-    manualReviewNeeded: false,
-    reusedExistingBooking: false,
-  };
 }
 
 async function markIntentManualReview(
@@ -748,6 +858,7 @@ async function markIntentManualReview(
   appointmentIntent: SupabaseRow,
   appointmentIntentId: string,
   lastError: string,
+  lastErrorCode?: string | null,
 ) {
   const latestAppointmentIntent = (await findAppointmentIntentById(supabase, appointmentIntentId)) ?? appointmentIntent;
 
@@ -765,8 +876,9 @@ async function markIntentManualReview(
 
   await updateAppointmentIntent(supabase, appointmentIntentId, {
     ...markManualReviewNeeded(),
-    booking_status: "failed",
+    booking_status: "booking_failed",
     last_error: lastError,
+    last_error_code: lastErrorCode ?? "BOOKING_FAILED_AFTER_PAYMENT",
   });
   await insertWorkflowEvent(supabase, {
     organization_id: getString(appointmentIntent, "organization_id"),
@@ -776,6 +888,61 @@ async function markIntentManualReview(
     payload: { message: lastError },
   });
   await sendManualReviewMessageSafely(supabase, appointmentIntent, appointmentIntentId);
+}
+
+async function finalizeBookingFailedAfterPayment(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  appointmentIntent: SupabaseRow,
+  appointmentIntentId: string,
+  error: unknown,
+) {
+  const latestAppointmentIntent = (await findAppointmentIntentById(supabase, appointmentIntentId)) ?? appointmentIntent;
+
+  if (isBookingConfirmed(latestAppointmentIntent)) {
+    await ensureConfirmedBookingState(supabase, latestAppointmentIntent, appointmentIntentId);
+    logWorkflowInfo("booking_failed_finalizer_skipped_confirmed", {
+      operation: "square_webhook",
+      step: "booking_failed_after_payment",
+      appointment_intent_id: appointmentIntentId,
+      square_booking_id: getString(latestAppointmentIntent, "square_booking_id"),
+      safe_message: "Booking failure finalizer skipped because booking is already confirmed.",
+    });
+    return;
+  }
+
+  const details = getSafeBookingErrorDetails(error);
+  logWorkflowError("booking_failed_after_payment", {
+    operation: "square_webhook",
+    step: "booking_failed_after_payment",
+    appointment_intent_id: appointmentIntentId,
+    organization_id: getString(latestAppointmentIntent, "organization_id"),
+    error_code: details.code,
+    safe_message: details.message,
+    square_status: details.squareStatus,
+    square_errors: details.squareErrors,
+  });
+
+  await updateAppointmentIntent(supabase, appointmentIntentId, {
+    ...markManualReviewNeeded(),
+    booking_status: "booking_failed",
+    last_error: details.message,
+    last_error_code: details.code,
+    updated_at: new Date().toISOString(),
+  });
+  await insertWorkflowEvent(supabase, {
+    organization_id: getString(latestAppointmentIntent, "organization_id"),
+    appointment_intent_id: appointmentIntentId,
+    event_type: "booking_failed_after_payment",
+    status: "failed",
+    message: details.message,
+    error_message: details.message,
+    payload: {
+      error_code: details.code,
+      square_status: details.squareStatus,
+      square_errors: details.squareErrors,
+    },
+  });
+  await sendManualReviewMessageSafely(supabase, latestAppointmentIntent, appointmentIntentId);
 }
 
 async function sendConfirmationMessageSafely(
@@ -1054,16 +1221,62 @@ async function updateSquareWebhookEvent(
 }
 
 async function acquireBookingLock(supabase: ReturnType<typeof getSupabaseAdmin>, appointmentIntentId: string) {
+  const latestAppointmentIntent = await findAppointmentIntentById(supabase, appointmentIntentId);
+
+  if (!latestAppointmentIntent) {
+    throw new Error(`Appointment intent ${appointmentIntentId} was not found for booking lock.`);
+  }
+
+  const bookingStatus = getString(latestAppointmentIntent, "booking_status");
+  const hasBookingId = Boolean(getString(latestAppointmentIntent, "square_booking_id"));
+  const isConfirmed = getString(latestAppointmentIntent, "appointment_status") === "confirmed";
+
+  if (hasBookingId || isConfirmed) {
+    return {
+      appointmentIntent: null,
+      latestAppointmentIntent,
+      reason: "already_confirmed",
+      staleLockRecovered: false,
+    };
+  }
+
+  if (bookingStatus === "creating_booking") {
+    const lockAgeMs = getBookingLockAgeMs(latestAppointmentIntent);
+
+    if (lockAgeMs !== null && lockAgeMs < BOOKING_LOCK_STALE_MS) {
+      return {
+        appointmentIntent: null,
+        latestAppointmentIntent,
+        reason: "fresh_lock_in_progress",
+        staleLockRecovered: false,
+      };
+    }
+
+    logWorkflowInfo("square.booking_lock.stale_recovery", {
+      operation: "square_webhook",
+      step: "acquire_booking_lock",
+      appointment_intent_id: appointmentIntentId,
+      booking_status: bookingStatus,
+      lock_age_ms: lockAgeMs,
+      last_booking_attempt_at: getString(latestAppointmentIntent, "last_booking_attempt_at"),
+      updated_at: getString(latestAppointmentIntent, "updated_at"),
+      safe_message: "Recovering stale Square booking lock.",
+    });
+  }
+
+  const now = new Date().toISOString();
   const { data, error } = await supabase
     .from("appointment_intents")
     .update({
       booking_status: "creating_booking",
       last_error: null,
+      last_error_code: null,
+      last_booking_attempt_at: now,
+      booking_attempt_count: (getNumber(latestAppointmentIntent, "booking_attempt_count") ?? 0) + 1,
     })
     .eq("id", appointmentIntentId)
     .is("square_booking_id", null)
     .neq("appointment_status", "confirmed")
-    .or("booking_status.is.null,booking_status.neq.creating_booking")
     .select("*")
     .maybeSingle();
 
@@ -1071,7 +1284,12 @@ async function acquireBookingLock(supabase: ReturnType<typeof getSupabaseAdmin>,
     throw new Error(`Failed to acquire appointment booking lock: ${error.message}`);
   }
 
-  return data as SupabaseRow | null;
+  return {
+    appointmentIntent: data as SupabaseRow | null,
+    latestAppointmentIntent,
+    reason: bookingStatus === "creating_booking" ? "stale_lock_recovered" : "lock_acquired",
+    staleLockRecovered: bookingStatus === "creating_booking",
+  };
 }
 
 async function ensureConfirmedBookingState(
@@ -1085,6 +1303,7 @@ async function ensureConfirmedBookingState(
     booking_status: "created",
     confirmed_at: getString(appointmentIntent, "confirmed_at") ?? new Date().toISOString(),
     last_error: null,
+    last_error_code: null,
   };
   const squareBookingId = getString(appointmentIntent, "square_booking_id");
 
@@ -1097,6 +1316,46 @@ async function ensureConfirmedBookingState(
 
 function isBookingConfirmed(appointmentIntent: SupabaseRow) {
   return Boolean(getString(appointmentIntent, "square_booking_id") || getString(appointmentIntent, "confirmed_at"));
+}
+
+function getBookingLockAgeMs(appointmentIntent: SupabaseRow) {
+  const timestamp = getString(appointmentIntent, "last_booking_attempt_at") ?? getString(appointmentIntent, "updated_at");
+
+  if (!timestamp) {
+    return null;
+  }
+
+  const parsed = Date.parse(timestamp);
+
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  return Date.now() - parsed;
+}
+
+function getSafeBookingErrorDetails(error: unknown) {
+  const squareErrors = error instanceof SquareApiError ? extractSquareErrors(error.errorBody) : undefined;
+  const firstSquareError = squareErrors?.[0];
+  const isTimeout =
+    error instanceof Error &&
+    (error.name === "AbortError" || /timed out|timeout/i.test(error.message));
+
+  if (isTimeout) {
+    return {
+      code: "SQUARE_BOOKING_TIMEOUT",
+      message: "Square booking request timed out",
+      squareStatus: error instanceof SquareApiError ? error.status : undefined,
+      squareErrors,
+    };
+  }
+
+  return {
+    code: firstSquareError?.code ?? (error instanceof SquareApiError ? "SQUARE_API_ERROR" : "BOOKING_FAILED_AFTER_PAYMENT"),
+    message: error instanceof Error ? error.message : "Booking failed after payment.",
+    squareStatus: error instanceof SquareApiError ? error.status : undefined,
+    squareErrors,
+  };
 }
 
 function formatAppointmentTimeForMessage(appointmentIntent: SupabaseRow, appointmentIntentId: string, step: string) {
