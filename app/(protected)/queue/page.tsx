@@ -183,6 +183,44 @@ const shortcutOutcomeMap: Record<string, string> = {
   "8": "interested",
 };
 
+const activeManualCallStates: ManualDialUiState[] = [
+  "dialing_lead",
+  "lead_ringing",
+  "lead_answered",
+  "browser_answered",
+  "bridged",
+];
+const terminalManualCallStates = new Set<ManualDialUiState>(["busy", "failed", "no_answer", "ended"]);
+const activeCallStatusSet = new Set(["dialing", "connected"]);
+const activeAttemptLockWindowMs = 60 * 60 * 1000;
+
+function isRecentActiveAttempt(attempt: CallAttempt, now = Date.now()) {
+  if (!activeCallStatusSet.has(attempt.status)) {
+    return false;
+  }
+
+  if (attempt.endedAt) {
+    return false;
+  }
+
+  const progressState = attempt.rawSummaryJson?.progressState as ManualDialUiState | undefined;
+  if (progressState && terminalManualCallStates.has(progressState)) {
+    return false;
+  }
+
+  const activityAt = attempt.answeredAt ?? attempt.startedAt;
+  if (!activityAt) {
+    return true;
+  }
+
+  const activityTime = new Date(activityAt).getTime();
+  if (!Number.isFinite(activityTime)) {
+    return true;
+  }
+
+  return now - activityTime <= activeAttemptLockWindowMs;
+}
+
 function getCallbackDate(preset: "today_later" | "tomorrow_morning" | "tomorrow_afternoon") {
   const now = new Date();
 
@@ -1116,10 +1154,26 @@ export default function QueuePage() {
       await refreshLeads();
     } catch (callError) {
       const message = callError instanceof Error ? callError.message : "Call initiation failed";
+      const failedAttemptId = pendingAttemptIdRef.current;
 
       setError(message);
       setUiCallState("failed", message);
       callStartAttemptedRef.current = false;
+      setPendingAttemptId(null);
+      pendingAttemptIdRef.current = null;
+      if (failedAttemptId) {
+        await fetch(`/api/calls/${failedAttemptId}`, {
+          method: "PATCH",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            status: "failed",
+            clientError: message,
+            progressState: "failed",
+          }),
+        }).catch(() => undefined);
+      }
       if (message.toLowerCase().includes("microphone")) {
         setMicPermission("denied");
       }
@@ -1129,7 +1183,7 @@ export default function QueuePage() {
   }
 
   async function hangupOutboundCall() {
-    const attemptId = latestAttempt?.id ?? pendingAttemptIdRef.current;
+    const attemptId = pendingAttemptIdRef.current ?? hangupAttemptId;
 
     if (!attemptId) {
       return;
@@ -1282,24 +1336,21 @@ export default function QueuePage() {
   };
 
   const displayedCallStatus = manualDialState ?? latestAttempt?.rawSummaryJson?.progressState ?? latestAttempt?.status ?? "idle";
+  const now = Date.now();
   const latestAttemptDismissed = latestAttempt ? locallyEndedAttemptIdsRef.current.has(latestAttempt.id) : false;
-  const activeManualCallStates: ManualDialUiState[] = [
-    "dialing_lead",
-    "lead_ringing",
-    "lead_answered",
-    "browser_answered",
-    "bridged",
-  ];
+  const latestAttemptIsActive = Boolean(latestAttempt && !latestAttemptDismissed && isRecentActiveAttempt(latestAttempt, now));
+  const activeLeadAndAttempt =
+    leads
+      .map((lead) => ({ lead, attempt: lead.callAttempts[0] }))
+      .find(({ attempt }) => attempt && !locallyEndedAttemptIdsRef.current.has(attempt.id) && attempt.id === pendingAttemptId) ?? null;
   const callInProgress = Boolean(
-    (latestAttempt && !latestAttemptDismissed && ["dialing", "connected"].includes(latestAttempt.status)) ||
+    pendingAttemptId ||
+      latestAttemptIsActive ||
       (manualDialState && activeManualCallStates.includes(manualDialState)),
   );
-  const activeCallLeadId =
-    leads.find((lead) => {
-      const attempt = lead.callAttempts[0];
-      return attempt && ["dialing", "connected"].includes(attempt.status) && !locallyEndedAttemptIdsRef.current.has(attempt.id);
-    })?.id ?? (callInProgress ? selectedLead?.id ?? null : null);
+  const activeCallLeadId = activeLeadAndAttempt?.lead.id ?? (callInProgress ? selectedLead?.id ?? null : null);
   const selectedLeadOwnsActiveCall = !activeCallLeadId || selectedLead?.id === activeCallLeadId;
+  const hangupAttemptId = pendingAttemptId ?? activeLeadAndAttempt?.attempt?.id ?? (latestAttemptIsActive ? latestAttempt?.id : null) ?? null;
   const softphoneReady = isBrowserReadyForOutboundDial();
   const browserFirstFlow = getManualDialFlow() === "browser_first";
   const callButtonDisabled =
@@ -1356,8 +1407,7 @@ export default function QueuePage() {
               <button
                 className={`w-full rounded-md border px-3 py-2 text-left ${
                   selectedLeadId === lead.id ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white hover:bg-slate-50"
-                } ${activeCallLeadId && activeCallLeadId !== lead.id ? "cursor-not-allowed opacity-50" : ""}`}
-                disabled={Boolean(activeCallLeadId && activeCallLeadId !== lead.id)}
+                } ${activeCallLeadId === lead.id && selectedLeadId !== lead.id ? "border-cyan-500 bg-cyan-50" : ""}`}
                 key={lead.id}
                 onClick={() => setSelectedLeadId(lead.id)}
                 type="button"
@@ -1412,7 +1462,7 @@ export default function QueuePage() {
                     <PhoneCall className="mr-2 h-4 w-4" />
                     {calling ? "Starting..." : callInProgress ? "Call Live" : "Call"}
                   </Button>
-                  <Button disabled={!callInProgress || !selectedLeadOwnsActiveCall} onClick={() => void hangupOutboundCall()} variant="destructive">
+                  <Button disabled={!hangupAttemptId} onClick={() => void hangupOutboundCall()} variant="destructive">
                     <PhoneOff className="mr-2 h-4 w-4" />
                     Hang up
                   </Button>
