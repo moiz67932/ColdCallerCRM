@@ -60,7 +60,7 @@ export async function resolveElevenLabsDemoContext(input: ResolveDemoContextRequ
     reason: "",
     services_with_pricing_and_deposits_text: context.services_with_pricing_and_deposits_text,
     deposit_policy_text: context.deposit_policy_text,
-    context_text: `${voiceContextText(context)}\nServices by category with duration, pricing, and deposits: ${context.services_by_category_text}\nServices with pricing and deposits: ${context.services_with_pricing_and_deposits_text}\nFAQs: ${portiveFaqText()}\nPolicies: ${portivePolicyText()}`,
+    context_text: `${voiceContextText(context)}\nSpoken services by category: ${context.services_by_category_text}\nExact bookable service pricing and deposits: ${context.exact_service_pricing_text || context.services_with_pricing_and_deposits_text}\nFAQs: ${portiveFaqText()}\nPolicies: ${portivePolicyText()}`,
     context,
   };
 }

@@ -7,20 +7,29 @@ export type VoiceContextCompact = {
   phone_e164: string;
   service_categories_short: string;
   service_menu_short: string;
+  service_menu_spoken_short: string;
   services_by_category_text: string;
   safe_service_names: string[];
   safe_service_names_text: string;
   category_lists: Record<string, string>;
   facials_list_text: string;
+  facials_list_spoken_short: string;
   injectables_list_text: string;
+  injectables_list_spoken_short: string;
   laser_list_text: string;
+  laser_list_spoken_short: string;
   skin_list_text: string;
+  skin_list_spoken_short: string;
   wellness_list_text: string;
+  wellness_list_spoken_short: string;
   body_list_text: string;
+  body_list_spoken_short: string;
   waxing_brows_list_text: string;
   lashes_list_text: string;
   pricing_lookup_text: string;
   services_with_pricing_and_deposits_text: string;
+  bookable_services_with_deposits_text: string;
+  exact_service_pricing_text: string;
   deposit_policy_text: string;
   voice_quality_score: number;
   voice_context_warnings: string;
@@ -113,6 +122,19 @@ function shortenServiceLabel(name: string) {
   return clean;
 }
 
+function stripServiceDetail(label: string) {
+  return cleanText(label).replace(/\s*\([^)]*\)/g, "").replace(/,\s*(total price|[0-9]+ minutes).*$/i, "");
+}
+
+function spokenShortList(text: string) {
+  const names = text
+    .split(/;|,/)
+    .map(stripServiceDetail)
+    .filter(Boolean);
+
+  return formatServiceList([...new Set(names)].slice(0, 5));
+}
+
 function summarizeHours(profile: ExtractedProfile) {
   const openDays = weekdayOrder
     .map((day) => ({ day, hours: profile.hours[day] }))
@@ -172,7 +194,7 @@ export function buildVoiceContextCompact(input: {
     ]),
   );
   let serviceMenuShort = serviceCategoriesShort
-    ? `The menu includes ${serviceCategoriesShort}.`
+    ? `${serviceCategoriesShort}.`
     : formatServiceList(safeServiceNames.slice(0, MAX_SPOKEN_SERVICES).map(shortenServiceLabel));
   if (serviceMenuShort.length > 220) serviceMenuShort = serviceMenuShort.slice(0, 220).replace(/\s+\S*$/, "").replace(/[,.]$/, "");
   if (bannedVoiceMenuPattern.test(serviceMenuShort)) warnings.push("voice menu contained banned terms and was filtered");
@@ -185,20 +207,29 @@ export function buildVoiceContextCompact(input: {
     phone_e164: input.phoneE164,
     service_categories_short: serviceCategoriesShort,
     service_menu_short: serviceMenuShort,
+    service_menu_spoken_short: serviceMenuShort,
     services_by_category_text: "",
     safe_service_names: safeServiceNames,
     safe_service_names_text: safeServiceNames.join(", "),
-    category_lists: categoryLists,
+    category_lists: {},
     facials_list_text: categoryLists.facials_list_text ?? "",
+    facials_list_spoken_short: spokenShortList(categoryLists.facials_list_text ?? ""),
     injectables_list_text: categoryLists.injectables_list_text ?? "",
+    injectables_list_spoken_short: spokenShortList(categoryLists.injectables_list_text ?? ""),
     laser_list_text: categoryLists.laser_list_text ?? "",
+    laser_list_spoken_short: spokenShortList(categoryLists.laser_list_text ?? ""),
     skin_list_text: categoryLists.skin_list_text ?? "",
+    skin_list_spoken_short: spokenShortList(categoryLists.skin_list_text ?? ""),
     wellness_list_text: categoryLists.wellness_list_text ?? "",
+    wellness_list_spoken_short: spokenShortList(categoryLists.wellness_list_text ?? ""),
     body_list_text: categoryLists.body_list_text ?? "",
+    body_list_spoken_short: spokenShortList(categoryLists.body_list_text ?? ""),
     waxing_brows_list_text: categoryLists.waxing_brows_list_text ?? "",
     lashes_list_text: categoryLists.lashes_list_text ?? "",
     pricing_lookup_text: pricing.join("; ").slice(0, 600),
     services_with_pricing_and_deposits_text: "",
+    bookable_services_with_deposits_text: "",
+    exact_service_pricing_text: "",
     deposit_policy_text: "",
     voice_quality_score: voiceQualityScore,
     voice_context_warnings: warnings.join("; "),
@@ -213,19 +244,20 @@ export function buildVoiceContextCompact(input: {
 export function voiceContextText(context: VoiceContextCompact) {
   return [
     `Clinic: ${context.clinic_name}.`,
-    `Service categories: ${context.service_categories_short || context.service_menu_short || "Ask the clinic about available services."}.`,
-    context.facials_list_text ? `Facials: ${context.facials_list_text}.` : "",
-    context.injectables_list_text ? `Injectables: ${context.injectables_list_text}.` : "",
-    context.laser_list_text ? `Laser services: ${context.laser_list_text}.` : "",
-    context.skin_list_text ? `Skin services: ${context.skin_list_text}.` : "",
-    context.wellness_list_text ? `Wellness services: ${context.wellness_list_text}.` : "",
-    context.body_list_text ? `Body services: ${context.body_list_text}.` : "",
+    `Broad services: ${context.service_menu_spoken_short || context.service_categories_short || context.service_menu_short || "Ask the clinic about available services."}`,
+    context.facials_list_spoken_short ? `Facials: ${context.facials_list_spoken_short}` : "",
+    context.injectables_list_spoken_short ? `Injectables: ${context.injectables_list_spoken_short}` : "",
+    context.laser_list_spoken_short ? `Laser: ${context.laser_list_spoken_short}` : "",
+    context.skin_list_spoken_short ? `Skin: ${context.skin_list_spoken_short}` : "",
+    context.wellness_list_spoken_short ? `Wellness: ${context.wellness_list_spoken_short}` : "",
+    context.body_list_spoken_short ? `Body: ${context.body_list_spoken_short}` : "",
     context.waxing_brows_list_text ? `Waxing and brows: ${context.waxing_brows_list_text}.` : "",
     context.lashes_list_text ? `Lashes: ${context.lashes_list_text}.` : "",
-    context.pricing_lookup_text ? `Known pricing: ${context.pricing_lookup_text}.` : "",
-    context.services_with_pricing_and_deposits_text ? `Bookable service deposits: ${context.services_with_pricing_and_deposits_text}.` : "",
+    context.exact_service_pricing_text || context.services_with_pricing_and_deposits_text
+      ? `Specific pricing only: ${context.exact_service_pricing_text || context.services_with_pricing_and_deposits_text}.`
+      : "",
     context.deposit_policy_text ? `Deposit policy: ${context.deposit_policy_text}` : "",
-    "Use this safely: list service names only. Do not explain medical benefits, outcomes, risks, or suitability. For details, say a licensed provider can explain during consultation.",
+    "Safety: list services only; route clinical details to a licensed provider.",
     `Booking CTA: ${context.booking_cta}`,
   ].filter(Boolean).join("\n");
 }
@@ -248,20 +280,29 @@ export function parseVoiceContextCompact(value: unknown): VoiceContextCompact | 
     phone_e164: cleanText(record.phone_e164),
     service_categories_short: cleanText(record.service_categories_short),
     service_menu_short: serviceMenuShort,
+    service_menu_spoken_short: cleanText(record.service_menu_spoken_short) || serviceMenuShort,
     services_by_category_text: cleanText(record.services_by_category_text),
     safe_service_names: safeServiceNames,
     safe_service_names_text: cleanText(record.safe_service_names_text) || safeServiceNames.join(", "),
     category_lists: categoryLists,
     facials_list_text: cleanText(record.facials_list_text) || categoryLists.facials_list_text || "",
+    facials_list_spoken_short: cleanText(record.facials_list_spoken_short) || spokenShortList(cleanText(record.facials_list_text) || categoryLists.facials_list_text || ""),
     injectables_list_text: cleanText(record.injectables_list_text) || categoryLists.injectables_list_text || "",
+    injectables_list_spoken_short: cleanText(record.injectables_list_spoken_short) || spokenShortList(cleanText(record.injectables_list_text) || categoryLists.injectables_list_text || ""),
     laser_list_text: cleanText(record.laser_list_text) || categoryLists.laser_list_text || "",
+    laser_list_spoken_short: cleanText(record.laser_list_spoken_short) || spokenShortList(cleanText(record.laser_list_text) || categoryLists.laser_list_text || ""),
     skin_list_text: cleanText(record.skin_list_text) || categoryLists.skin_list_text || "",
+    skin_list_spoken_short: cleanText(record.skin_list_spoken_short) || spokenShortList(cleanText(record.skin_list_text) || categoryLists.skin_list_text || ""),
     wellness_list_text: cleanText(record.wellness_list_text) || categoryLists.wellness_list_text || "",
+    wellness_list_spoken_short: cleanText(record.wellness_list_spoken_short) || spokenShortList(cleanText(record.wellness_list_text) || categoryLists.wellness_list_text || ""),
     body_list_text: cleanText(record.body_list_text) || categoryLists.body_list_text || "",
+    body_list_spoken_short: cleanText(record.body_list_spoken_short) || spokenShortList(cleanText(record.body_list_text) || categoryLists.body_list_text || ""),
     waxing_brows_list_text: cleanText(record.waxing_brows_list_text) || categoryLists.waxing_brows_list_text || "",
     lashes_list_text: cleanText(record.lashes_list_text) || categoryLists.lashes_list_text || "",
     pricing_lookup_text: cleanText(record.pricing_lookup_text),
     services_with_pricing_and_deposits_text: cleanText(record.services_with_pricing_and_deposits_text),
+    bookable_services_with_deposits_text: cleanText(record.bookable_services_with_deposits_text) || cleanText(record.services_with_pricing_and_deposits_text),
+    exact_service_pricing_text: cleanText(record.exact_service_pricing_text) || cleanText(record.services_with_pricing_and_deposits_text),
     deposit_policy_text: cleanText(record.deposit_policy_text),
     voice_quality_score: typeof record.voice_quality_score === "number" ? record.voice_quality_score : Number(record.voice_quality_score ?? 0) || 0,
     voice_context_warnings: cleanText(record.voice_context_warnings),

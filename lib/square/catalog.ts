@@ -10,6 +10,7 @@ import {
 
 export type SquareServiceMapping = {
   organizationId: string;
+  clinicId: string | null;
   internalServiceName: string;
   square_location_id: string;
   square_team_member_id: string;
@@ -44,6 +45,7 @@ export type SquareCatalogService = {
 
 export type ResolvedSquareServiceForBooking = {
   organizationId: string;
+  clinicId: string | null;
   serviceName: string;
   locationId: string;
   teamMemberId: string;
@@ -71,6 +73,7 @@ export type ResolveServiceForBookingInput = GetSquareServiceMappingInput & {
 
 type ClinicServicesSquareMapRow = {
   organization_id?: string;
+  clinic_id?: string | null;
   internal_service_name?: string;
   square_location_id?: string;
   square_team_member_id?: string;
@@ -139,6 +142,7 @@ export async function getSquareServiceMapping(
     .select(
       [
         "organization_id",
+        "clinic_id",
         "internal_service_name",
         "square_location_id",
         "square_team_member_id",
@@ -179,6 +183,7 @@ export async function resolveServiceForBooking(
 
   return {
     organizationId: mapping.organizationId,
+    clinicId: mapping.clinicId,
     serviceName: mapping.internalServiceName,
     locationId: mapping.square_location_id,
     teamMemberId: mapping.square_team_member_id,
@@ -238,6 +243,7 @@ function normalizeServiceMapping(row: ClinicServicesSquareMapRow): SquareService
 
   return {
     organizationId: requireString(row.organization_id, "organization_id"),
+    clinicId: optionalString(row.clinic_id),
     internalServiceName: requireString(row.internal_service_name, "internal_service_name"),
     square_location_id: requireString(row.square_location_id, "square_location_id"),
     square_team_member_id: requireString(row.square_team_member_id, "square_team_member_id"),
@@ -290,6 +296,10 @@ function requireString(value: unknown, fieldName: string) {
   }
 
   return value.trim();
+}
+
+function optionalString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function requirePositiveInteger(value: unknown, fieldName: string) {

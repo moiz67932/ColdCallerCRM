@@ -8,6 +8,7 @@ const e164PhoneSchema = z
   .regex(/^\+[1-9]\d{7,14}$/, "Phone number must be E.164 format, for example +13103318914.");
 
 const optionalTextSchema = z.string().trim().min(1).max(500).optional();
+const optionalDateSchema = z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be YYYY-MM-DD.").optional();
 const squareIdSchema = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/, "Square ID has an invalid format.");
 const currencySchema = z
   .string()
@@ -52,8 +53,11 @@ export const CreatePaidAppointmentIntentSchema = z.object({
   caller_phone_e164: e164PhoneSchema.optional(),
   caller_email: z.string().trim().email().optional(),
   service_name: z.string().trim().min(1, "Service name is required.").max(160),
-  selected_start_at: z.string().trim().datetime({ offset: true }),
+  preferred_date: optionalDateSchema,
+  preferred_time: optionalTextSchema,
+  selected_start_at: z.string().trim().datetime({ offset: true }).optional(),
   selected_timezone: optionalTextSchema,
+  clinic_timezone: optionalTextSchema,
   selected_time_display: optionalTextSchema,
   notes: z.string().trim().min(1).max(2000).optional(),
   deposit_amount_cents: z.coerce.number().int().min(0).optional(),
@@ -62,7 +66,13 @@ export const CreatePaidAppointmentIntentSchema = z.object({
   square_team_member_id: squareIdSchema.optional(),
   square_service_variation_id: squareIdSchema.optional(),
   square_service_variation_version: z.coerce.number().int().positive().optional(),
-});
+}).refine(
+  (value) => Boolean(value.selected_start_at || (value.preferred_date && value.preferred_time)),
+  {
+    message: "Either selected_start_at or both preferred_date and preferred_time are required.",
+    path: ["selected_start_at"],
+  },
+);
 
 export const CreatePaymentLinkSchema = z.object({
   appointment_intent_id: AppointmentIntentIdSchema,

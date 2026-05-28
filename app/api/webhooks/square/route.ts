@@ -1094,7 +1094,6 @@ async function sendManualReviewMessageSafely(
         failureEventName: "square.webhook.message_event_insert_failed",
       },
     );
-    await safeUpdateLastError(supabase, appointmentIntentId, message);
   }
 }
 

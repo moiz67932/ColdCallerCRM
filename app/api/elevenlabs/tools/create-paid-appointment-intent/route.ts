@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { ZodError } from "zod";
 
 import { createAppointmentPaymentLink } from "@/lib/square/payments";
+import { findExactAvailableSlot, searchSquareAvailability } from "@/lib/square/bookings";
 import { resolveServiceForBooking } from "@/lib/square/catalog";
 import { SquareApiError } from "@/lib/square/client";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
@@ -32,6 +33,9 @@ import {
 } from "@/lib/category7-db";
 
 export const runtime = "nodejs";
+
+const SQUARE_AVAILABILITY_TIMEOUT_MS = 8_000;
+type NormalizedPaidAppointmentIntentInput = CreatePaidAppointmentIntentInput & { selected_start_at: string };
 
 function toolError(errorCode: string, step: string, say: string, status = 400, debugId?: string) {
   return failJson({ errorCode, step, message: say, debugId, say }, { status });
@@ -114,15 +118,29 @@ export async function POST(request: NextRequest) {
       serviceName: input.service_name,
     });
     const selectedTimezone =
+      input.clinic_timezone ??
       input.selected_timezone ??
       (await resolveBusinessTimezone({
         supabase,
         organizationId: resolvedContext.organizationId,
-        clinicId: resolvedContext.clinicId,
+        clinicId: input.clinic_id ?? service.clinicId ?? resolvedContext.clinicId,
         squareLocationId: service.locationId,
       }));
+    const timeNormalization = normalizeAppointmentStartAt({
+      input,
+      clinicTimezone: selectedTimezone,
+      organizationId: resolvedContext.organizationId,
+      serviceName: service.serviceName,
+      debugId,
+    });
+    const normalizedInput: NormalizedPaidAppointmentIntentInput = {
+      ...input,
+      selected_start_at: timeNormalization.selectedStartAt,
+      selected_timezone: selectedTimezone,
+      clinic_timezone: selectedTimezone,
+    };
     const selectedTimeDisplay =
-      input.selected_time_display ?? formatSelectedTimeDisplay(input.selected_start_at, selectedTimezone);
+      input.selected_time_display ?? formatSelectedTimeDisplay(normalizedInput.selected_start_at, selectedTimezone);
     const pricingDetails = buildDepositPricingDetails({
       serviceName: service.serviceName,
       servicePriceCents: service.servicePriceCents,
@@ -130,25 +148,54 @@ export async function POST(request: NextRequest) {
       depositAmountCents: service.depositAmountCents,
       currency: service.currency,
     });
-    logWorkflowInfo("paid_appointment_intent.availability_search_skipped", {
+    logWorkflowInfo("paid_appointment_intent.availability_search_start", {
       debug_id: debugId,
       operation: "create_paid_appointment_intent",
       step: "check_square_availability",
-      selected_start_at: input.selected_start_at,
+      selected_start_at: normalizedInput.selected_start_at,
       selected_timezone: selectedTimezone,
       selected_time_display: selectedTimeDisplay,
       duration_minutes: service.durationMinutes,
       square_location_id: service.locationId,
       square_team_member_id: service.teamMemberId,
       square_service_variation_id: service.serviceVariationId,
-      safe_message: "Skipping Square availability search because selected_start_at is already provided for payment intent creation.",
+      timeout_ms: SQUARE_AVAILABILITY_TIMEOUT_MS,
+    });
+    const availability = await searchSquareAvailability({
+      locationId: service.locationId,
+      teamMemberId: service.teamMemberId,
+      serviceVariationId: service.serviceVariationId,
+      startAt: normalizedInput.selected_start_at,
+      endAt: addMinutes(normalizedInput.selected_start_at, service.durationMinutes + 15),
+      selectedStartAt: normalizedInput.selected_start_at,
+      timezone: selectedTimezone,
+      timeoutMs: SQUARE_AVAILABILITY_TIMEOUT_MS,
+    });
+    const slot = findExactAvailableSlot({ desiredStartAt: normalizedInput.selected_start_at, availability });
+    logWorkflowInfo("paid_appointment_intent.availability_search_complete", {
+      debug_id: debugId,
+      operation: "create_paid_appointment_intent",
+      step: "check_square_availability",
+      selected_start_at: normalizedInput.selected_start_at,
+      selected_timezone: selectedTimezone,
+      availability_count: availability.length,
+      exact_slot_found: Boolean(slot),
     });
 
+    if (!slot) {
+      throw new PaidAppointmentIntentError({
+        errorCode: "SLOT_UNAVAILABLE",
+        step: "check_square_availability",
+        say: "That appointment time is no longer available, so I did not send a deposit link. Please choose another time.",
+        status: 409,
+      });
+    }
+
     const appointmentIntent = await insertAppointmentIntent({
-      input,
+      input: normalizedInput,
       supabase,
       organizationId: resolvedContext.organizationId,
-      clinicId: resolvedContext.clinicId,
+      clinicId: input.clinic_id ?? service.clinicId ?? resolvedContext.clinicId,
       callerPhoneE164,
       service,
       selectedTimezone,
@@ -166,7 +213,7 @@ export async function POST(request: NextRequest) {
       conversation_id: input.conversation_id,
       caller_phone_e164_masked: maskPhone(callerPhoneE164),
       service_name: input.service_name,
-      selected_start_at: input.selected_start_at,
+      selected_start_at: normalizedInput.selected_start_at,
       selected_timezone: selectedTimezone,
       selected_time_display: selectedTimeDisplay,
       payment_status: getString(appointmentIntent, "payment_status"),
@@ -193,7 +240,7 @@ export async function POST(request: NextRequest) {
       amountCents: pricingDetails.deposit_amount_cents ?? service.depositAmountCents,
       currency: service.currency,
       depositPercentText: pricingDetails.deposit_percent_text,
-      selectedStartAt: input.selected_start_at,
+      selectedStartAt: normalizedInput.selected_start_at,
       idempotencyKey: buildPaymentLinkIdempotencyKey(appointmentIntentId),
     });
     const payToken = createPayToken({ appointmentIntentId, expiresInMinutes: 60 * 24 * 14 });
@@ -332,7 +379,7 @@ export async function POST(request: NextRequest) {
         message: "Secure deposit button sent to WhatsApp.",
         debugId,
         appointmentIntentId,
-        say: buildPaymentLinkSentSay(pricingDetails.deposit_amount_text),
+        say: buildPaymentLinkSentSay(),
       },
     );
   } catch (error) {
@@ -466,6 +513,175 @@ export async function POST(request: NextRequest) {
   }
 }
 
+function normalizeAppointmentStartAt(args: {
+  input: CreatePaidAppointmentIntentInput;
+  clinicTimezone: string;
+  organizationId: string;
+  serviceName: string;
+  debugId: string;
+}) {
+  const { input, clinicTimezone, organizationId, serviceName, debugId } = args;
+  const selectedStartAtReceived = input.selected_start_at ?? null;
+  let selectedStartAtNormalized = selectedStartAtReceived;
+
+  if (input.preferred_date && input.preferred_time) {
+    selectedStartAtNormalized = selectedStartAtFromPreferredDateTime({
+      preferredDate: input.preferred_date,
+      preferredTime: input.preferred_time,
+      timezone: clinicTimezone,
+    });
+  }
+
+  if (!selectedStartAtNormalized) {
+    throw new PaidAppointmentIntentError({
+      errorCode: "MISSING_APPOINTMENT_TIME",
+      step: "normalize_appointment_time",
+      say: "I need the appointment date and time before I can send the deposit link.",
+      status: 400,
+    });
+  }
+
+  const mismatch = Boolean(
+    selectedStartAtReceived &&
+    input.preferred_date &&
+    input.preferred_time &&
+    Math.abs(new Date(selectedStartAtNormalized).getTime() - new Date(selectedStartAtReceived).getTime()) > 60_000,
+  );
+
+  logWorkflowInfo("paid_appointment_intent.time_normalized", {
+    debug_id: debugId,
+    operation: "create_paid_appointment_intent",
+    step: "normalize_appointment_time",
+    preferred_date: input.preferred_date ?? null,
+    preferred_time: input.preferred_time ?? null,
+    clinic_timezone: clinicTimezone,
+    selected_start_at_received: selectedStartAtReceived,
+    selected_start_at_normalized: selectedStartAtNormalized,
+    service_name: serviceName,
+    organization_id: organizationId,
+    selected_start_at_mismatch: mismatch,
+  });
+
+  if (mismatch) {
+    logWarn("paid_appointment_intent.selected_start_at_mismatch_normalized", {
+      debug_id: debugId,
+      preferred_date: input.preferred_date,
+      preferred_time: input.preferred_time,
+      clinic_timezone: clinicTimezone,
+      selected_start_at_received: selectedStartAtReceived,
+      selected_start_at_normalized: selectedStartAtNormalized,
+      service_name: serviceName,
+      organization_id: organizationId,
+    });
+  }
+
+  return { selectedStartAt: selectedStartAtNormalized };
+}
+
+function selectedStartAtFromPreferredDateTime(input: {
+  preferredDate: string;
+  preferredTime: string;
+  timezone: string;
+}) {
+  const dateParts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input.preferredDate);
+  const timeParts = parsePreferredTime(input.preferredTime);
+
+  if (!dateParts || !timeParts) {
+    throw new PaidAppointmentIntentError({
+      errorCode: "INVALID_APPOINTMENT_TIME",
+      step: "normalize_appointment_time",
+      say: "I need a clear appointment date and time before I can send the deposit link.",
+      status: 400,
+    });
+  }
+
+  const [, year, month, day] = dateParts;
+  return zonedLocalTimeToUtcIso({
+    year: Number(year),
+    month: Number(month),
+    day: Number(day),
+    hour: timeParts.hour,
+    minute: timeParts.minute,
+    timezone: input.timezone,
+  });
+}
+
+function parsePreferredTime(value: string) {
+  const match = value.trim().toLowerCase().match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (!match) return null;
+
+  let hour = Number(match[1]);
+  const minute = Number(match[2] ?? "0");
+  const period = match[3];
+
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+  if (period) {
+    if (hour < 1 || hour > 12) return null;
+    if (period === "am" && hour === 12) hour = 0;
+    if (period === "pm" && hour < 12) hour += 12;
+  } else if (hour > 23) {
+    return null;
+  }
+
+  return { hour, minute };
+}
+
+function zonedLocalTimeToUtcIso(input: {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  timezone: string;
+}) {
+  let formatter: Intl.DateTimeFormat;
+
+  try {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: input.timezone,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch {
+    throw new PaidAppointmentIntentError({
+      errorCode: "INVALID_CLINIC_TIMEZONE",
+      step: "normalize_appointment_time",
+      say: "I need the clinic timezone before I can send the deposit link.",
+      status: 400,
+    });
+  }
+  let candidate = new Date(Date.UTC(input.year, input.month - 1, input.day, input.hour, input.minute, 0));
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const actual = zonedParts(formatter, candidate);
+    const targetUtcMs = Date.UTC(input.year, input.month - 1, input.day, input.hour, input.minute, 0);
+    const actualUtcMs = Date.UTC(actual.year, actual.month - 1, actual.day, actual.hour, actual.minute, actual.second);
+    const diffMs = targetUtcMs - actualUtcMs;
+
+    if (diffMs === 0) break;
+    candidate = new Date(candidate.getTime() + diffMs);
+  }
+
+  return candidate.toISOString();
+}
+
+function zonedParts(formatter: Intl.DateTimeFormat, date: Date) {
+  const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    second: Number(parts.second),
+  };
+}
+
 async function resolveOrganizationContext(input: CreatePaidAppointmentIntentInput, supabase: ReturnType<typeof getSupabaseAdmin>) {
   if (input.organization_id) {
     return {
@@ -579,8 +795,12 @@ function formatSelectedTimeDisplay(selectedStartAt: string, timezone: string) {
   }).format(date);
 }
 
+function addMinutes(isoDate: string, minutes: number) {
+  return new Date(new Date(isoDate).getTime() + minutes * 60_000).toISOString();
+}
+
 async function insertAppointmentIntent(args: {
-  input: CreatePaidAppointmentIntentInput;
+  input: NormalizedPaidAppointmentIntentInput;
   supabase: ReturnType<typeof getSupabaseAdmin>;
   organizationId: string;
   clinicId: string | null;
@@ -593,6 +813,7 @@ async function insertAppointmentIntent(args: {
     serviceVariationId: string;
     serviceVariationVersion: number;
     durationMinutes: number;
+    clinicId: string | null;
     servicePriceCents: number | null;
     depositPercentBps: number;
     depositAmountCents: number;
@@ -633,6 +854,8 @@ async function insertAppointmentIntent(args: {
       appointment_status: "details_collected",
       raw_booking_details: {
         notes: input.notes,
+        preferred_date: input.preferred_date,
+        preferred_time: input.preferred_time,
         selected_start_at: input.selected_start_at,
         selected_timezone: selectedTimezone,
         selected_time_display: selectedTimeDisplay,
@@ -744,12 +967,8 @@ function getPublicAppUrl() {
   return (process.env.PUBLIC_APP_URL ?? process.env.APP_BASE_URL ?? "http://localhost:3000").replace(/\/+$/, "");
 }
 
-function buildPaymentLinkSentSay(depositAmountText: string | null) {
-  if (depositAmountText) {
-    return `I've sent the secure deposit link to your WhatsApp for the ${depositAmountText} deposit. Once completed, your appointment will be confirmed.`;
-  }
-
-  return "I've sent the secure deposit link to your WhatsApp. The link will show the deposit before you pay. Once completed, your appointment will be confirmed.";
+function buildPaymentLinkSentSay() {
+  return "Done, I sent it to your WhatsApp. You can review it there before paying.";
 }
 
 class PaidAppointmentIntentError extends Error {

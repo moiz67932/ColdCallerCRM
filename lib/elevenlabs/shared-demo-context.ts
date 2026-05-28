@@ -46,6 +46,23 @@ export const PORTIVE_CLINIC_NAME = "Portive Clinic";
 export const PORTIVE_LOCATION = "Newport Beach, CA";
 export const PORTIVE_HOURS = "Mon-Fri 9:00 AM-6:00 PM, Sat 10:00 AM-3:00 PM, Sun closed";
 export const PORTIVE_BOOKING_CTA = "Would you like to book a consultation at Portive Clinic?";
+export const PORTIVE_SERVICE_MENU_SPOKEN_SHORT = "Injectables, facials, skin treatments, laser services, body treatments, and wellness.";
+export const PORTIVE_FACIALS_SPOKEN_SHORT = "Hydrafacial and Custom Medical Facial.";
+export const PORTIVE_INJECTABLES_SPOKEN_SHORT = "Botox Consultation, Botox and Dysport, Dermal Fillers, Lip Filler, and Kybella.";
+export const PORTIVE_LASER_SPOKEN_SHORT = "Laser Hair Removal Consultation, Laser Hair Removal, IPL Photofacial, and RF Skin Tightening.";
+export const PORTIVE_SKIN_SPOKEN_SHORT = "Chemical Peel Consultation, Microneedling Consultation, and PRP Consultation.";
+export const PORTIVE_WELLNESS_SPOKEN_SHORT = "IV Therapy Consultation, Wellness Shot, and GLP-1 Weight Wellness Consultation.";
+export const PORTIVE_BODY_SPOKEN_SHORT = "Body Contouring.";
+const PORTIVE_CANONICAL_BOOKABLE_SERVICE_NAMES = new Set([
+  "Botox Consultation",
+  "Chemical Peel Consultation",
+  "Custom Medical Facial",
+  "Hydrafacial",
+  "IV Therapy Consultation",
+  "Laser Hair Removal Consultation",
+  "Microneedling Consultation",
+  "PRP Consultation",
+]);
 
 export const PORTIVE_DEMO_PAID_SERVICES: DemoServicePricing[] = [
   {
@@ -239,7 +256,7 @@ function categoryForPricedService(serviceName: string) {
 }
 
 function serviceDetail(service: PortiveService) {
-  return `${service.name} (${service.duration}, ${service.price})`;
+  return `${service.name} (${service.duration})`;
 }
 
 function categoryDetail(category: string) {
@@ -263,7 +280,7 @@ export function portivePolicyText() {
 }
 
 export function servicesWithPricingAndDepositsText(services: DemoServicePricing[]) {
-  return services.map((service) => {
+  return services.filter(isCanonicalBookablePricedService).map((service) => {
     const pricing = buildDepositPricingDetails({
       serviceName: service.name,
       servicePriceCents: service.servicePriceCents,
@@ -283,6 +300,14 @@ export function servicesWithPricingAndDepositsText(services: DemoServicePricing[
 
     return `${service.name}: ${durationText}, pricing incomplete`;
   }).join(". ");
+}
+
+function isCanonicalBookablePricedService(service: DemoServicePricing) {
+  return (
+    PORTIVE_CANONICAL_BOOKABLE_SERVICE_NAMES.has(service.name) &&
+    service.servicePriceCents !== null &&
+    service.depositAmountCents !== null
+  );
 }
 
 function pricedServiceDetail(service: DemoServicePricing) {
@@ -365,7 +390,6 @@ export async function getSharedDemoVoiceContextWithBackendPricing(): Promise<Voi
 export function getSharedDemoVoiceContext(servicePricing: DemoServicePricing[] = PORTIVE_DEMO_PAID_SERVICES): VoiceContextCompact {
   const phone = env.ELEVENLABS_PHONE_E164 ?? env.DEMO_TELNYX_PHONE_E164 ?? "";
   const categories = [...new Set(PORTIVE_SERVICES.map((service) => service.category))];
-  const pricing = PORTIVE_SERVICES.map((service) => `${service.name}: ${service.price}`).join("; ");
   const servicesWithPricingText = servicesWithPricingAndDepositsText(servicePricing);
   const servicesByCategoryText = mergedServicesByCategoryText(servicePricing) || portiveCategoryDetailsText();
   const depositPolicyText = buildDepositPolicyText();
@@ -383,7 +407,8 @@ export function getSharedDemoVoiceContext(servicePricing: DemoServicePricing[] =
     binding_id: null,
     phone_e164: phone,
     service_categories_short: listForSpeech(categories),
-    service_menu_short: `The menu includes ${servicesByCategoryText}.`,
+    service_menu_short: PORTIVE_SERVICE_MENU_SPOKEN_SHORT,
+    service_menu_spoken_short: PORTIVE_SERVICE_MENU_SPOKEN_SHORT,
     services_by_category_text: servicesByCategoryText,
     safe_service_names: safeServiceNames,
     safe_service_names_text: safeServiceNames.join(", "),
@@ -396,15 +421,23 @@ export function getSharedDemoVoiceContext(servicePricing: DemoServicePricing[] =
       body_list_text: bodyListText,
     },
     facials_list_text: facialsListText,
+    facials_list_spoken_short: PORTIVE_FACIALS_SPOKEN_SHORT,
     injectables_list_text: injectablesListText,
+    injectables_list_spoken_short: PORTIVE_INJECTABLES_SPOKEN_SHORT,
     laser_list_text: laserListText,
+    laser_list_spoken_short: PORTIVE_LASER_SPOKEN_SHORT,
     skin_list_text: skinListText,
+    skin_list_spoken_short: PORTIVE_SKIN_SPOKEN_SHORT,
     wellness_list_text: wellnessListText,
+    wellness_list_spoken_short: PORTIVE_WELLNESS_SPOKEN_SHORT,
     body_list_text: bodyListText,
+    body_list_spoken_short: PORTIVE_BODY_SPOKEN_SHORT,
     waxing_brows_list_text: "",
     lashes_list_text: "",
-    pricing_lookup_text: pricing,
+    pricing_lookup_text: servicesWithPricingText,
     services_with_pricing_and_deposits_text: servicesWithPricingText,
+    bookable_services_with_deposits_text: servicesWithPricingText,
+    exact_service_pricing_text: servicesWithPricingText,
     deposit_policy_text: depositPolicyText,
     voice_quality_score: 100,
     voice_context_warnings: "",

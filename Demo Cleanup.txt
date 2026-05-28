@@ -1,0 +1,16 @@
+Use this one-liner to cancel all active Square bookings for demo range
+
+This cancels all ACCEPTED/PENDING bookings for your Square location between May 28 and June 10, without filtering by team member.
+
+$SquareToken="EAAAlwkcoCbPAIvJHvdyVmn2M_Hi2XgVU20BKbQSreSnzby-GfJw9hk5aiGrjKrn"; $BaseUrl="https://connect.squareupsandbox.com"; $SquareVersion="2026-05-20"; $LocationId="L43CNC7VJFKGD"; $StartAtMinRaw="2026-05-28T00:00:00Z"; $StartAtMaxRaw="2026-06-10T23:59:59Z"; $Cancelled=0; $Cursor=$null; do { $StartAtMin=[uri]::EscapeDataString($StartAtMinRaw); $StartAtMax=[uri]::EscapeDataString($StartAtMaxRaw); $Url="$BaseUrl/v2/bookings?limit=100&location_id=$LocationId&start_at_min=$StartAtMin&start_at_max=$StartAtMax"; if($Cursor){$Url="$Url&cursor=$([uri]::EscapeDataString($Cursor))"}; $Resp=Invoke-RestMethod -Uri $Url -Method GET -Headers @{"Authorization"="Bearer $SquareToken";"Square-Version"=$SquareVersion;"Content-Type"="application/json"}; foreach($B in @($Resp.bookings)){ if($B -and ($B.status -in @("ACCEPTED","PENDING"))){ $Body=@{idempotency_key=("cancel-demo-"+$B.id+"-"+[guid]::NewGuid().ToString()); booking_version=$B.version} | ConvertTo-Json -Depth 10; Write-Host "Cancelling $($B.id) $($B.start_at) status=$($B.status) version=$($B.version)"; Invoke-RestMethod -Uri "$BaseUrl/v2/bookings/$($B.id)/cancel" -Method POST -Headers @{"Authorization"="Bearer $SquareToken";"Square-Version"=$SquareVersion;"Content-Type"="application/json"} -Body $Body | Out-Null; $Cancelled++ }}; $Cursor=$Resp.cursor } while($Cursor); Write-Host "Done. Cancelled $Cancelled active bookings."
+
+
+
+
+Verify no active bookings remain
+
+
+
+$SquareToken="EAAAlwkcoCbPAIvJHvdyVmn2M_Hi2XgVU20BKbQSreSnzby-GfJw9hk5aiGrjKrn"; $BaseUrl="https://connect.squareupsandbox.com"; $SquareVersion="2026-05-20"; $LocationId="L43CNC7VJFKGD"; $StartAtMinRaw="2026-05-28T00:00:00Z"; $StartAtMaxRaw="2026-06-10T23:59:59Z"; $StartAtMin=[uri]::EscapeDataString($StartAtMinRaw); $StartAtMax=[uri]::EscapeDataString($StartAtMaxRaw); $Url="$BaseUrl/v2/bookings?limit=100&location_id=$LocationId&start_at_min=$StartAtMin&start_at_max=$StartAtMax"; (Invoke-RestMethod -Uri $Url -Method GET -Headers @{"Authorization"="Bearer $SquareToken";"Square-Version"=$SquareVersion;"Content-Type"="application/json"}).bookings | Where-Object {$_.status -in @("ACCEPTED","PENDING")} | Select-Object id,start_at,status,version | Format-Table -AutoSize
+
+If this returns nothing, Square has no active bookings in that range.
