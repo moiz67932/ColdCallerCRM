@@ -1,5 +1,6 @@
 import "server-only";
 
+import { env } from "@/lib/env";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { squareRequest } from "@/lib/square/client";
 import {
@@ -67,9 +68,25 @@ export type GetSquareServiceMappingInput = {
   serviceName: string;
 };
 
+export type ListBookableSquareServiceMappingsInput = {
+  organizationId: string;
+};
+
 export type ResolveServiceForBookingInput = GetSquareServiceMappingInput & {
   locationId?: string;
 };
+
+export class SquareServiceNotBookableError extends Error {
+  serviceName: string;
+  organizationId: string;
+
+  constructor(input: GetSquareServiceMappingInput) {
+    super(`No Square service mapping found for service "${input.serviceName}" in organization ${input.organizationId}.`);
+    this.name = "SquareServiceNotBookableError";
+    this.serviceName = input.serviceName;
+    this.organizationId = input.organizationId;
+  }
+}
 
 type ClinicServicesSquareMapRow = {
   organization_id?: string;
@@ -157,7 +174,12 @@ export async function getSquareServiceMapping(
       ].join(","),
     )
     .eq("organization_id", input.organizationId.trim())
+    .eq("square_environment", env.SQUARE_ENV)
+    .eq("is_active", true)
     .ilike("internal_service_name", input.serviceName.trim())
+    .not("square_location_id", "is", null)
+    .not("square_team_member_id", "is", null)
+    .not("square_service_variation_id", "is", null)
     .limit(1)
     .maybeSingle();
 
@@ -168,6 +190,30 @@ export async function getSquareServiceMapping(
   return data ? normalizeServiceMapping(data as ClinicServicesSquareMapRow) : null;
 }
 
+export async function listBookableSquareServiceNames(input: ListBookableSquareServiceMappingsInput): Promise<string[]> {
+  if (!input.organizationId.trim()) {
+    throw new Error("Missing organization ID for Square service mapping lookup.");
+  }
+
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("clinic_services_square_map")
+    .select("internal_service_name")
+    .eq("organization_id", input.organizationId.trim())
+    .eq("square_environment", env.SQUARE_ENV)
+    .eq("is_active", true)
+    .not("square_location_id", "is", null)
+    .not("square_team_member_id", "is", null)
+    .not("square_service_variation_id", "is", null)
+    .order("internal_service_name", { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to read Square service mappings: ${error.message}`);
+  }
+
+  return [...new Set((data ?? []).map((row) => optionalString((row as ClinicServicesSquareMapRow).internal_service_name)).filter((name): name is string => Boolean(name)))];
+}
+
 export async function resolveServiceForBooking(
   input: ResolveServiceForBookingInput,
 ): Promise<ResolvedSquareServiceForBooking> {
@@ -176,9 +222,7 @@ export async function resolveServiceForBooking(
   if (!mapping) {
     // MVP behavior is intentionally mapping-first. Catalog search can surface
     // candidates, but it should not silently choose booking/payment settings.
-    throw new Error(
-      `No Square service mapping found for service "${input.serviceName}" in organization ${input.organizationId}.`,
-    );
+    throw new SquareServiceNotBookableError(input);
   }
 
   return {

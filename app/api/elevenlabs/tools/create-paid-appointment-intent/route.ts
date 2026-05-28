@@ -3,7 +3,7 @@ import { ZodError } from "zod";
 
 import { createAppointmentPaymentLink } from "@/lib/square/payments";
 import { findExactAvailableSlot, searchSquareAvailability } from "@/lib/square/bookings";
-import { resolveServiceForBooking } from "@/lib/square/catalog";
+import { listBookableSquareServiceNames, resolveServiceForBooking, SquareServiceNotBookableError } from "@/lib/square/catalog";
 import { SquareApiError } from "@/lib/square/client";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { hasValidElevenLabsToolBearerAuth } from "@/lib/elevenlabs/tool-auth";
@@ -124,6 +124,25 @@ export async function POST(request: NextRequest) {
     const service = await resolveServiceForBooking({
       organizationId: resolvedContext.organizationId,
       serviceName: input.service_name,
+    }).catch(async (error) => {
+      if (error instanceof SquareServiceNotBookableError) {
+        const bookableServiceNames = await listBookableSquareServiceNames({ organizationId: resolvedContext.organizationId }).catch(() => []);
+        throw new PaidAppointmentIntentError({
+          errorCode: "SERVICE_NOT_BOOKABLE",
+          step: "service_not_bookable",
+          say: "I do not have that listed for booking right now, but I can help with one of the available consultation options.",
+          status: 200,
+          safeDetails: {
+            service_name: input.service_name,
+            organization_id: resolvedContext.organizationId,
+            bookable_service_count: bookableServiceNames.length,
+            bookable_service_names: bookableServiceNames,
+            source_used: "clinic_services_square_map",
+          },
+        });
+      }
+
+      throw error;
     });
     const backendTimezone = await resolveBusinessTimezone({
       supabase,

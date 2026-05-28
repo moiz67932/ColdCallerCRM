@@ -26,6 +26,7 @@ export async function GET(request: NextRequest) {
     body_list_spoken_short: context.body_list_spoken_short,
     services_with_pricing_and_deposits_text: context.services_with_pricing_and_deposits_text,
     bookable_services_with_deposits_text: context.bookable_services_with_deposits_text,
+    bookable_service_names_text: context.bookable_service_names_text,
     exact_service_pricing_text: context.exact_service_pricing_text,
     pricing_lookup_text: context.pricing_lookup_text,
     deposit_policy_text: context.deposit_policy_text,

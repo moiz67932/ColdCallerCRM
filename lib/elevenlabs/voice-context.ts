@@ -11,6 +11,7 @@ export type VoiceContextCompact = {
   services_by_category_text: string;
   safe_service_names: string[];
   safe_service_names_text: string;
+  bookable_service_names_text: string;
   category_lists: Record<string, string>;
   facials_list_text: string;
   facials_list_spoken_short: string;
@@ -211,6 +212,7 @@ export function buildVoiceContextCompact(input: {
     services_by_category_text: "",
     safe_service_names: safeServiceNames,
     safe_service_names_text: safeServiceNames.join(", "),
+    bookable_service_names_text: "",
     category_lists: {},
     facials_list_text: categoryLists.facials_list_text ?? "",
     facials_list_spoken_short: spokenShortList(categoryLists.facials_list_text ?? ""),
@@ -284,6 +286,7 @@ export function parseVoiceContextCompact(value: unknown): VoiceContextCompact | 
     services_by_category_text: cleanText(record.services_by_category_text),
     safe_service_names: safeServiceNames,
     safe_service_names_text: cleanText(record.safe_service_names_text) || safeServiceNames.join(", "),
+    bookable_service_names_text: cleanText(record.bookable_service_names_text) || cleanText(record.safe_service_names_text) || safeServiceNames.join(", "),
     category_lists: categoryLists,
     facials_list_text: cleanText(record.facials_list_text) || categoryLists.facials_list_text || "",
     facials_list_spoken_short: cleanText(record.facials_list_spoken_short) || spokenShortList(cleanText(record.facials_list_text) || categoryLists.facials_list_text || ""),
