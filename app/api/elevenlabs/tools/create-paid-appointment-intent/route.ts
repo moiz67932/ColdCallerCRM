@@ -8,6 +8,7 @@ import { SquareApiError } from "@/lib/square/client";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { hasValidElevenLabsToolBearerAuth } from "@/lib/elevenlabs/tool-auth";
 import { logError, logInfo, logWarn } from "@/lib/logger";
+import { normalizeHumanAppointmentDateTime } from "@/lib/appointments/datetime-normalization";
 import { buildPaymentLinkIdempotencyKey } from "@/lib/appointments/idempotency";
 import { insertAppointmentWorkflowEvent } from "@/lib/appointments/workflow-events";
 import { insertTelnyxMessageEvent } from "@/lib/appointments/message-events";
@@ -582,7 +583,12 @@ function paidAppointmentDebugFields(args: {
   clinicTimezone?: string | null;
   selectedStartAtReceived?: string | null;
   selectedStartAtNormalized?: string | null;
-  validationError?: string;
+  preferredDateRaw?: string | null;
+  preferredDateNormalized?: string | null;
+  preferredTimeRaw?: string | null;
+  preferredTimeNormalized?: string | null;
+  fallbackUsed?: string | null;
+  validationError?: string | null;
   service?: {
     locationId?: string | null;
     teamMemberId?: string | null;
@@ -609,6 +615,11 @@ function paidAppointmentDebugFields(args: {
       stringValue(input.selected_start_at) ??
       getString(record, "selected_start_at"),
     selected_start_at_normalized: args.selectedStartAtNormalized ?? null,
+    preferred_date_raw: args.preferredDateRaw ?? getString(record, "preferred_date") ?? stringValue(input.preferred_date),
+    preferred_date_normalized: args.preferredDateNormalized ?? null,
+    preferred_time_raw: args.preferredTimeRaw ?? getString(record, "preferred_time") ?? stringValue(input.preferred_time),
+    preferred_time_normalized: args.preferredTimeNormalized ?? null,
+    fallback_used: args.fallbackUsed ?? null,
     validation_error: args.validationError ?? null,
     square_environment: env.SQUARE_ENV,
     square_location_id: args.service?.locationId ?? getString(record, "square_location_id"),
@@ -638,276 +649,70 @@ function normalizeAppointmentStartAt(args: {
   debugId: string;
 }) {
   const { input, clinicTimezone, organizationId, serviceName, service, debugId } = args;
-  const selectedStartAtReceived = input.selected_start_at ?? null;
-  const hasPreferredDateTime = Boolean(input.preferred_date && input.preferred_time);
-  const selectedStartAtReceivedIsValid = selectedStartAtReceived
-    ? Number.isFinite(new Date(selectedStartAtReceived).getTime())
-    : false;
-  let selectedStartAtNormalized = selectedStartAtReceived;
+  const normalized = normalizeHumanAppointmentDateTime({
+    preferredDate: input.preferred_date,
+    preferredTime: input.preferred_time,
+    selectedStartAt: input.selected_start_at,
+    timezone: clinicTimezone,
+  });
+  const debugFields = paidAppointmentDebugFields({
+    input,
+    clinicTimezone,
+    selectedStartAtReceived: normalized.selectedStartAtReceived,
+    selectedStartAtNormalized: normalized.selectedStartAt,
+    preferredDateRaw: normalized.preferredDateRaw,
+    preferredDateNormalized: normalized.preferredDateNormalized,
+    preferredTimeRaw: normalized.preferredTimeRaw,
+    preferredTimeNormalized: normalized.preferredTimeNormalized,
+    fallbackUsed: normalized.fallbackUsed,
+    validationError: normalized.validationError,
+    service,
+  });
 
-  if (!isValidTimeZone(clinicTimezone)) {
+  if (!normalized.selectedStartAt) {
     throw new PaidAppointmentIntentError({
       errorCode: "INVALID_DATETIME",
       step: "invalid_datetime",
       say: "Sorry, I had trouble reading that time. What exact day and time would you prefer?",
       status: 200,
-      safeDetails: paidAppointmentDebugFields({
-        input,
-        clinicTimezone,
-        selectedStartAtReceived,
-        selectedStartAtNormalized: null,
-        validationError: "clinic_timezone is not a valid IANA timezone.",
-        service,
-      }),
+      safeDetails: debugFields,
     });
   }
-
-  if (selectedStartAtReceived && !selectedStartAtReceivedIsValid && !hasPreferredDateTime) {
-    throw new PaidAppointmentIntentError({
-      errorCode: "INVALID_DATETIME",
-      step: "invalid_datetime",
-      say: "Sorry, I had trouble reading that time. What exact day and time would you prefer?",
-      status: 200,
-      safeDetails: paidAppointmentDebugFields({
-        input,
-        clinicTimezone,
-        selectedStartAtReceived,
-        selectedStartAtNormalized: null,
-        validationError: "selected_start_at is not a valid datetime.",
-        service,
-      }),
-    });
-  }
-
-  if (selectedStartAtReceived && !selectedStartAtReceivedIsValid && hasPreferredDateTime) {
-    logWarn("paid_appointment_intent.selected_start_at_invalid_ignored", {
-      debug_id: debugId,
-      operation: "create_paid_appointment_intent",
-      step: "normalize_appointment_time",
-      ...paidAppointmentDebugFields({
-        input,
-        clinicTimezone,
-        selectedStartAtReceived,
-        selectedStartAtNormalized: null,
-        validationError: "selected_start_at is not valid; preferred date/time will be used.",
-        service,
-      }),
-    });
-  }
-
-  if (hasPreferredDateTime) {
-    try {
-      selectedStartAtNormalized = selectedStartAtFromPreferredDateTime({
-        preferredDate: input.preferred_date as string,
-        preferredTime: input.preferred_time as string,
-        timezone: clinicTimezone,
-      });
-    } catch (error) {
-      if (error instanceof PaidAppointmentIntentError) {
-        error.safeDetails = {
-          ...paidAppointmentDebugFields({
-            input,
-            clinicTimezone,
-            selectedStartAtReceived,
-            selectedStartAtNormalized: null,
-            validationError: error.message,
-            service,
-          }),
-          ...error.safeDetails,
-        };
-      }
-      throw error;
-    }
-  }
-
-  if (!selectedStartAtNormalized) {
-    throw new PaidAppointmentIntentError({
-      errorCode: "INVALID_DATETIME",
-      step: "invalid_datetime",
-      say: "Sorry, I had trouble reading that time. What exact day and time would you prefer?",
-      status: 200,
-      safeDetails: paidAppointmentDebugFields({
-        input,
-        clinicTimezone,
-        selectedStartAtReceived,
-        selectedStartAtNormalized,
-        validationError: "missing appointment date/time.",
-        service,
-      }),
-    });
-  }
-
-  const mismatch = Boolean(
-    selectedStartAtReceived &&
-    hasPreferredDateTime &&
-    (!selectedStartAtReceivedIsValid ||
-      Math.abs(new Date(selectedStartAtNormalized).getTime() - new Date(selectedStartAtReceived).getTime()) > 60_000),
-  );
 
   logWorkflowInfo("paid_appointment_intent.time_normalized", {
     debug_id: debugId,
     operation: "create_paid_appointment_intent",
     step: "normalize_appointment_time",
-    preferred_date: input.preferred_date ?? null,
-    preferred_time: input.preferred_time ?? null,
-    clinic_timezone: clinicTimezone,
-    selected_start_at_received: selectedStartAtReceived,
-    selected_start_at_normalized: selectedStartAtNormalized,
-    service_name: serviceName,
     organization_id: organizationId,
-    selected_start_at_mismatch: mismatch,
+    selected_start_at_mismatch: normalized.mismatch,
+    ...debugFields,
+    resolved_service_name: serviceName,
   });
 
-  if (mismatch) {
+  if (normalized.fallbackUsed) {
+    logWarn("paid_appointment_intent.datetime_fallback_used", {
+      debug_id: debugId,
+      operation: "create_paid_appointment_intent",
+      step: "normalize_appointment_time",
+      ...debugFields,
+    });
+  }
+
+  if (normalized.mismatch) {
     logWarn("paid_appointment_intent.selected_start_at_mismatch_normalized", {
       debug_id: debugId,
-      preferred_date: input.preferred_date,
-      preferred_time: input.preferred_time,
-      clinic_timezone: clinicTimezone,
-      selected_start_at_received: selectedStartAtReceived,
-      selected_start_at_normalized: selectedStartAtNormalized,
-      service_name: serviceName,
+      operation: "create_paid_appointment_intent",
+      step: "normalize_appointment_time",
       organization_id: organizationId,
+      ...debugFields,
+      resolved_service_name: serviceName,
     });
   }
 
-  return { selectedStartAt: selectedStartAtNormalized, selectedStartAtReceived, mismatch };
-}
-
-function isValidTimeZone(timezone: string) {
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(new Date());
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function selectedStartAtFromPreferredDateTime(input: {
-  preferredDate: string;
-  preferredTime: string;
-  timezone: string;
-}) {
-  const dateParts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input.preferredDate);
-  const timeParts = parsePreferredTime(input.preferredTime);
-
-  if (!dateParts || !timeParts) {
-    throw new PaidAppointmentIntentError({
-      errorCode: "INVALID_DATETIME",
-      step: "invalid_datetime",
-      say: "Sorry, I had trouble reading that time. What exact day and time would you prefer?",
-      status: 200,
-    });
-  }
-
-  const [, year, month, day] = dateParts;
-  if (!isValidCalendarDate(Number(year), Number(month), Number(day))) {
-    throw new PaidAppointmentIntentError({
-      errorCode: "INVALID_DATETIME",
-      step: "invalid_datetime",
-      say: "Sorry, I had trouble reading that time. What exact day and time would you prefer?",
-      status: 200,
-    });
-  }
-
-  return zonedLocalTimeToUtcIso({
-    year: Number(year),
-    month: Number(month),
-    day: Number(day),
-    hour: timeParts.hour,
-    minute: timeParts.minute,
-    timezone: input.timezone,
-  });
-}
-
-function isValidCalendarDate(year: number, month: number, day: number) {
-  const date = new Date(Date.UTC(year, month - 1, day));
-  return (
-    Number.isInteger(year) &&
-    Number.isInteger(month) &&
-    Number.isInteger(day) &&
-    month >= 1 &&
-    month <= 12 &&
-    day >= 1 &&
-    date.getUTCFullYear() === year &&
-    date.getUTCMonth() === month - 1 &&
-    date.getUTCDate() === day
-  );
-}
-
-function parsePreferredTime(value: string) {
-  const match = value.trim().toLowerCase().match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
-  if (!match) return null;
-
-  let hour = Number(match[1]);
-  const minute = Number(match[2] ?? "0");
-  const period = match[3];
-
-  if (!Number.isInteger(hour) || !Number.isInteger(minute) || minute < 0 || minute > 59) return null;
-  if (period) {
-    if (hour < 1 || hour > 12) return null;
-    if (period === "am" && hour === 12) hour = 0;
-    if (period === "pm" && hour < 12) hour += 12;
-  } else if (hour > 23) {
-    return null;
-  }
-
-  return { hour, minute };
-}
-
-function zonedLocalTimeToUtcIso(input: {
-  year: number;
-  month: number;
-  day: number;
-  hour: number;
-  minute: number;
-  timezone: string;
-}) {
-  let formatter: Intl.DateTimeFormat;
-
-  try {
-    formatter = new Intl.DateTimeFormat("en-US", {
-      timeZone: input.timezone,
-      hourCycle: "h23",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  } catch {
-    throw new PaidAppointmentIntentError({
-      errorCode: "INVALID_DATETIME",
-      step: "invalid_datetime",
-      say: "Sorry, I had trouble reading that time. What exact day and time would you prefer?",
-      status: 200,
-    });
-  }
-  let candidate = new Date(Date.UTC(input.year, input.month - 1, input.day, input.hour, input.minute, 0));
-
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const actual = zonedParts(formatter, candidate);
-    const targetUtcMs = Date.UTC(input.year, input.month - 1, input.day, input.hour, input.minute, 0);
-    const actualUtcMs = Date.UTC(actual.year, actual.month - 1, actual.day, actual.hour, actual.minute, actual.second);
-    const diffMs = targetUtcMs - actualUtcMs;
-
-    if (diffMs === 0) break;
-    candidate = new Date(candidate.getTime() + diffMs);
-  }
-
-  return candidate.toISOString();
-}
-
-function zonedParts(formatter: Intl.DateTimeFormat, date: Date) {
-  const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
   return {
-    year: Number(parts.year),
-    month: Number(parts.month),
-    day: Number(parts.day),
-    hour: Number(parts.hour),
-    minute: Number(parts.minute),
-    second: Number(parts.second),
+    selectedStartAt: normalized.selectedStartAt,
+    selectedStartAtReceived: normalized.selectedStartAtReceived,
+    mismatch: normalized.mismatch,
   };
 }
 
