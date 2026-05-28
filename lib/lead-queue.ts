@@ -21,11 +21,37 @@ type LeadWithRelations = Lead & {
   followUps: FollowUp[];
 };
 
+const outcomeTagLabels: Record<string, string> = {
+  answered: "answered",
+  voicemail: "voicemail",
+  no_answer: "no answer",
+  not_interested: "not interested",
+  callback: "callback",
+  gatekeeper: "gatekeeper",
+  bad_number: "bad number",
+  interested: "interested",
+  demo_requested: "demo requested",
+};
+
+const derivedStatusTagLabels: Record<string, string> = {
+  follow_up: "follow up",
+  interested: "interested",
+  closed_lost: "not interested",
+  bad_number: "bad number",
+  demo_requested: "demo requested",
+};
+
 type RankedLead = {
   lead: LeadWithRelations;
   score: number;
   callbackDueAt?: Date;
 };
+
+function addTag(tags: string[], tag?: string) {
+  if (tag && !tags.includes(tag)) {
+    tags.push(tag);
+  }
+}
 
 function getLatestCallAttempt(lead: LeadWithRelations) {
   return [...lead.callAttempts].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
@@ -97,20 +123,20 @@ export function getLeadTags(lead: LeadWithRelations) {
   const tags: string[] = [];
 
   if (!lead.website) {
-    tags.push("no website");
+    addTag(tags, "no website");
   } else {
-    tags.push("has website");
+    addTag(tags, "has website");
   }
 
   const callbackDueAt = getOpenCallbackDueAt(lead);
 
   if (callbackDueAt && callbackDueAt.getTime() <= Date.now()) {
-    tags.push("callback due");
+    addTag(tags, "callback due");
   }
 
-  if (lead.derivedStatus === "bad_number") {
-    tags.push("bad number");
-  }
+  const latestAttempt = getLatestCallAttempt(lead);
+  addTag(tags, latestAttempt?.outcome ? outcomeTagLabels[latestAttempt.outcome] : undefined);
+  addTag(tags, derivedStatusTagLabels[lead.derivedStatus]);
 
   return tags;
 }

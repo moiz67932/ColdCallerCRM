@@ -51,27 +51,50 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
           orderBy: { createdAt: "desc" },
         });
 
-    if (!callAttempt || callAttempt.leadId !== leadId) {
+    if (payload.callAttemptId && !callAttempt) {
+      return jsonError("Call attempt not found for this lead", 404);
+    }
+
+    if (callAttempt && callAttempt.leadId !== leadId) {
       return jsonError("Call attempt not found for this lead", 404);
     }
 
     const callbackAt = payload.callbackAt ? new Date(payload.callbackAt) : null;
 
-    const updatedAttempt = await prisma.callAttempt.update({
-      where: { id: callAttempt.id },
-      data: {
-        outcome: payload.outcome,
-        operatorNotes: payload.operatorNotes ?? callAttempt.operatorNotes,
-        callbackAt,
-        nextAction: payload.nextAction ?? callAttempt.nextAction,
-      },
-    });
+    const now = new Date();
+    const updatedAttempt = callAttempt
+      ? await prisma.callAttempt.update({
+          where: { id: callAttempt.id },
+          data: {
+            outcome: payload.outcome,
+            operatorNotes: payload.operatorNotes ?? callAttempt.operatorNotes,
+            callbackAt,
+            nextAction: payload.nextAction ?? callAttempt.nextAction,
+          },
+        })
+      : await prisma.callAttempt.create({
+          data: {
+            leadId,
+            status: "completed",
+            outcome: payload.outcome,
+            operatorNotes: payload.operatorNotes,
+            callbackAt,
+            nextAction: payload.nextAction,
+            startedAt: now,
+            endedAt: now,
+            durationSeconds: 0,
+            rawSummaryJson: {
+              source: "manual_outcome",
+              outcome: payload.outcome,
+            },
+          },
+        });
 
     if (payload.outcome === "callback" && callbackAt) {
       await prisma.followUp.create({
         data: {
           leadId,
-          callAttemptId: callAttempt.id,
+          callAttemptId: updatedAttempt.id,
           dueAt: callbackAt,
           status: "open",
           channel: "call",
@@ -87,7 +110,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       },
     });
 
-    await computeAttemptSummary(callAttempt.id);
+    await computeAttemptSummary(updatedAttempt.id);
 
     return NextResponse.json({ attempt: updatedAttempt });
   } catch (error) {

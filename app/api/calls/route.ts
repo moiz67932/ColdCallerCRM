@@ -4,6 +4,24 @@ import { CallOutcome } from "@/lib/db-types";
 import { requireApiAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/workstation-db";
 
+function containsInsensitive(value: unknown, query: string) {
+  return typeof value === "string" && value.toLowerCase().includes(query.toLowerCase());
+}
+
+function dateFilterValue(value: string, boundary: "start" | "end") {
+  const date = new Date(value);
+
+  if (!Number.isFinite(date.getTime())) {
+    return undefined;
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    date.setHours(boundary === "start" ? 0 : 23, boundary === "start" ? 0 : 59, boundary === "start" ? 0 : 59, boundary === "start" ? 0 : 999);
+  }
+
+  return date;
+}
+
 export async function GET(request: NextRequest) {
   const authError = await requireApiAuth(request);
 
@@ -24,26 +42,18 @@ export async function GET(request: NextRequest) {
   const normalizedOutcome = outcome && Object.values(CallOutcome).includes(outcome as CallOutcome)
     ? (outcome as CallOutcome)
     : undefined;
+  const from = fromDate ? dateFilterValue(fromDate, "start") : undefined;
+  const to = toDate ? dateFilterValue(toDate, "end") : undefined;
+  const limit = Number.isNaN(take) ? 100 : Math.min(500, take);
 
   const calls = await prisma.callAttempt.findMany({
     where: {
       outcome: normalizedOutcome,
-      lead: {
-        leadListId,
-        niche: niche ? { contains: niche, mode: "insensitive" } : undefined,
-        OR: query
-          ? [
-              { businessName: { contains: query, mode: "insensitive" } },
-              { contactName: { contains: query, mode: "insensitive" } },
-              { phoneNumber: { contains: query, mode: "insensitive" } },
-            ]
-          : undefined,
-      },
       createdAt:
-        fromDate || toDate
+        from || to
           ? {
-              gte: fromDate ? new Date(fromDate) : undefined,
-              lte: toDate ? new Date(toDate) : undefined,
+              gte: from,
+              lte: to,
             }
           : undefined,
     },
@@ -57,8 +67,34 @@ export async function GET(request: NextRequest) {
       transcript: true,
     },
     orderBy: { createdAt: "desc" },
-    take: Number.isNaN(take) ? 100 : Math.min(500, take),
   });
 
-  return NextResponse.json({ calls });
+  const filteredCalls = calls
+    .filter((call: { lead?: { leadListId?: string; niche?: string | null; businessName?: string | null; contactName?: string | null; phoneNumber?: string | null } | null }) => {
+      const lead = call.lead;
+
+      if (!lead) {
+        return false;
+      }
+
+      if (leadListId && lead.leadListId !== leadListId) {
+        return false;
+      }
+
+      if (niche && !containsInsensitive(lead.niche, niche)) {
+        return false;
+      }
+
+      if (
+        query &&
+        ![lead.businessName, lead.contactName, lead.phoneNumber].some((value) => containsInsensitive(value, query))
+      ) {
+        return false;
+      }
+
+      return true;
+    })
+    .slice(0, limit);
+
+  return NextResponse.json({ calls: filteredCalls });
 }
