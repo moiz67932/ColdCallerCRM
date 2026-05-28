@@ -8,7 +8,7 @@ const e164PhoneSchema = z
   .regex(/^\+[1-9]\d{7,14}$/, "Phone number must be E.164 format, for example +13103318914.");
 
 const optionalTextSchema = z.string().trim().min(1).max(500).optional();
-const optionalDateSchema = z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be YYYY-MM-DD.").optional();
+const optionalDateSchema = z.string().trim().min(1).max(80).optional();
 const squareIdSchema = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/, "Square ID has an invalid format.");
 const currencySchema = z
   .string()
@@ -55,7 +55,7 @@ export const CreatePaidAppointmentIntentSchema = z.object({
   service_name: z.string().trim().min(1, "Service name is required.").max(160),
   preferred_date: optionalDateSchema,
   preferred_time: optionalTextSchema,
-  selected_start_at: z.string().trim().datetime({ offset: true }).optional(),
+  selected_start_at: optionalTextSchema,
   selected_timezone: optionalTextSchema,
   clinic_timezone: optionalTextSchema,
   selected_time_display: optionalTextSchema,

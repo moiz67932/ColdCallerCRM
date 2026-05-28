@@ -19,7 +19,7 @@ import {
 } from "@/lib/logging/workflow-logger";
 import { markPaymentLinkCreated, markPaymentLinkSent } from "@/lib/appointments/status-machine";
 import { normalizePhoneNumber } from "@/lib/phone";
-import { getMissingPaidAppointmentEnvNames, requireEnv } from "@/lib/env";
+import { env, getMissingPaidAppointmentEnvNames, requireEnv } from "@/lib/env";
 import { sendPaymentLinkWhatsApp } from "@/lib/messaging/send-whatsapp";
 import { createPayToken } from "@/lib/payments/pay-token";
 import { buildDepositPricingDetails } from "@/lib/payments/deposit-pricing";
@@ -27,6 +27,7 @@ import { getSupabaseRuntimeFingerprint } from "@/lib/runtime-env-debug";
 import {
   CreatePaidAppointmentIntentSchema,
   type CreatePaidAppointmentIntentInput,
+  formatZodFieldErrors,
 } from "@/lib/validation/paid-appointment";
 import {
   type SupabaseRow,
@@ -37,8 +38,8 @@ export const runtime = "nodejs";
 const SQUARE_AVAILABILITY_TIMEOUT_MS = 8_000;
 type NormalizedPaidAppointmentIntentInput = CreatePaidAppointmentIntentInput & { selected_start_at: string };
 
-function toolError(errorCode: string, step: string, say: string, status = 400, debugId?: string) {
-  return failJson({ errorCode, step, message: say, debugId, say }, { status });
+function toolError(errorCode: string, step: string, say: string, status = 400, debugId?: string, safeDetails?: Record<string, unknown>) {
+  return failJson({ errorCode, step, message: say, debugId, say, safeDetails }, { status });
 }
 
 export async function POST(request: NextRequest) {
@@ -46,6 +47,7 @@ export async function POST(request: NextRequest) {
   let supabaseForFailure: ReturnType<typeof getSupabaseAdmin> | null = null;
   let createdAppointmentIntentId: string | null = null;
   let resolvedOrganizationIdForFailure: string | null = null;
+  let requestBody: unknown = null;
 
   logWorkflowInfo("paid_appointment_intent.request_start", {
     debug_id: debugId,
@@ -95,8 +97,8 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body = await request.json();
-    const input = CreatePaidAppointmentIntentSchema.parse(body);
+    requestBody = await request.json();
+    const input = CreatePaidAppointmentIntentSchema.parse(requestBody);
     const supabase = getSupabaseAdmin();
     supabaseForFailure = supabase;
     const resolvedContext = await resolveOrganizationContext(input, supabase);
@@ -104,6 +106,11 @@ export async function POST(request: NextRequest) {
     const callerPhoneE164 = resolveCallerPhoneE164(input.caller_phone);
 
     if (!callerPhoneE164) {
+      logPaidAppointment400("paid_appointment_intent.invalid_caller_phone_details", {
+        debugId,
+        requestBody,
+        validationError: "caller_phone could not be normalized to E.164.",
+      });
       return toolError(
         "INVALID_CALLER_PHONE",
         "validate_request",
@@ -117,20 +124,19 @@ export async function POST(request: NextRequest) {
       organizationId: resolvedContext.organizationId,
       serviceName: input.service_name,
     });
-    const selectedTimezone =
-      input.clinic_timezone ??
-      input.selected_timezone ??
-      (await resolveBusinessTimezone({
-        supabase,
-        organizationId: resolvedContext.organizationId,
-        clinicId: input.clinic_id ?? service.clinicId ?? resolvedContext.clinicId,
-        squareLocationId: service.locationId,
-      }));
+    const backendTimezone = await resolveBusinessTimezone({
+      supabase,
+      organizationId: resolvedContext.organizationId,
+      clinicId: input.clinic_id ?? service.clinicId ?? resolvedContext.clinicId,
+      squareLocationId: service.locationId,
+    });
+    const selectedTimezone = backendTimezone ?? input.clinic_timezone ?? input.selected_timezone ?? "UTC";
     const timeNormalization = normalizeAppointmentStartAt({
       input,
       clinicTimezone: selectedTimezone,
       organizationId: resolvedContext.organizationId,
       serviceName: service.serviceName,
+      service,
       debugId,
     });
     const normalizedInput: NormalizedPaidAppointmentIntentInput = {
@@ -140,7 +146,9 @@ export async function POST(request: NextRequest) {
       clinic_timezone: selectedTimezone,
     };
     const selectedTimeDisplay =
-      input.selected_time_display ?? formatSelectedTimeDisplay(normalizedInput.selected_start_at, selectedTimezone);
+      timeNormalization.mismatch
+        ? formatSelectedTimeDisplay(normalizedInput.selected_start_at, selectedTimezone)
+        : input.selected_time_display ?? formatSelectedTimeDisplay(normalizedInput.selected_start_at, selectedTimezone);
     const pricingDetails = buildDepositPricingDetails({
       serviceName: service.serviceName,
       servicePriceCents: service.servicePriceCents,
@@ -185,9 +193,17 @@ export async function POST(request: NextRequest) {
     if (!slot) {
       throw new PaidAppointmentIntentError({
         errorCode: "SLOT_UNAVAILABLE",
-        step: "check_square_availability",
-        say: "That appointment time is no longer available, so I did not send a deposit link. Please choose another time.",
-        status: 409,
+        step: "slot_unavailable",
+        say: "Sorry, that time is not available. What other time would work for you?",
+        status: 200,
+        safeDetails: paidAppointmentDebugFields({
+          input: normalizedInput,
+          clinicTimezone: selectedTimezone,
+          selectedStartAtReceived: timeNormalization.selectedStartAtReceived,
+          selectedStartAtNormalized: timeNormalization.selectedStartAt,
+          validationError: "slot_unavailable",
+          service,
+        }),
       });
     }
 
@@ -384,12 +400,21 @@ export async function POST(request: NextRequest) {
     );
   } catch (error) {
     if (error instanceof ZodError) {
+      logPaidAppointment400("paid_appointment_intent.invalid_request_details", {
+        debugId,
+        requestBody,
+        validationError: formatZodValidationError(error),
+      });
       logWorkflowError("paid_appointment_intent.invalid_request", {
         debug_id: debugId,
         operation: "create_paid_appointment_intent",
         step: "validate_request",
         error_code: "INVALID_REQUEST",
         status: 400,
+        ...paidAppointmentDebugFields({
+          requestBody,
+          validationError: formatZodValidationError(error),
+        }),
       });
       return validationFailJson({
         step: "validate_request",
@@ -401,12 +426,21 @@ export async function POST(request: NextRequest) {
     }
 
     if (error instanceof SyntaxError) {
+      logPaidAppointment400("paid_appointment_intent.invalid_json_details", {
+        debugId,
+        requestBody,
+        validationError: "Invalid JSON payload.",
+      });
       logWorkflowError("paid_appointment_intent.invalid_json", {
         debug_id: debugId,
         operation: "create_paid_appointment_intent",
         step: "parse_request",
         error_code: "VALIDATION_FAILED",
         status: 400,
+        ...paidAppointmentDebugFields({
+          requestBody,
+          validationError: "Invalid JSON payload.",
+        }),
       });
       return failJson(
         {
@@ -439,8 +473,21 @@ export async function POST(request: NextRequest) {
         error_code: error.errorCode,
         status: error.status,
         safe_message: error.say,
+        ...error.safeDetails,
       });
-      return toolError(error.errorCode, error.step, error.say, error.status, debugId);
+      if (error.status === 400) {
+        logWarn("paid_appointment_intent.returning_400_details", {
+          debug_id: debugId,
+          operation: "create_paid_appointment_intent",
+          status: 400,
+          ...paidAppointmentDebugFields({
+            requestBody,
+            validationError: error.say,
+          }),
+          ...error.safeDetails,
+        });
+      }
+      return toolError(error.errorCode, error.step, error.say, error.status, debugId, error.safeDetails);
     }
 
     if (error instanceof SquareApiError) {
@@ -513,39 +560,188 @@ export async function POST(request: NextRequest) {
   }
 }
 
+function logPaidAppointment400(eventName: string, args: {
+  debugId: string;
+  requestBody: unknown;
+  validationError: string;
+}) {
+  logWarn(eventName, {
+    debug_id: args.debugId,
+    operation: "create_paid_appointment_intent",
+    status: 400,
+    ...paidAppointmentDebugFields({
+      requestBody: args.requestBody,
+      validationError: args.validationError,
+    }),
+  });
+}
+
+function paidAppointmentDebugFields(args: {
+  input?: Partial<CreatePaidAppointmentIntentInput>;
+  requestBody?: unknown;
+  clinicTimezone?: string | null;
+  selectedStartAtReceived?: string | null;
+  selectedStartAtNormalized?: string | null;
+  validationError?: string;
+  service?: {
+    locationId?: string | null;
+    teamMemberId?: string | null;
+    serviceVariationId?: string | null;
+  };
+}) {
+  const record = args.requestBody && typeof args.requestBody === "object" && !Array.isArray(args.requestBody)
+    ? args.requestBody as Record<string, unknown>
+    : {};
+  const input = args.input ?? {};
+
+  return {
+    service_name: stringValue(input.service_name) ?? getString(record, "service_name"),
+    preferred_date: stringValue(input.preferred_date) ?? getString(record, "preferred_date"),
+    preferred_time: stringValue(input.preferred_time) ?? getString(record, "preferred_time"),
+    clinic_timezone:
+      args.clinicTimezone ??
+      stringValue(input.clinic_timezone) ??
+      getString(record, "clinic_timezone") ??
+      stringValue(input.selected_timezone) ??
+      getString(record, "selected_timezone"),
+    selected_start_at_received:
+      args.selectedStartAtReceived ??
+      stringValue(input.selected_start_at) ??
+      getString(record, "selected_start_at"),
+    selected_start_at_normalized: args.selectedStartAtNormalized ?? null,
+    validation_error: args.validationError ?? null,
+    square_environment: env.SQUARE_ENV,
+    square_location_id: args.service?.locationId ?? getString(record, "square_location_id"),
+    square_team_member_id: args.service?.teamMemberId ?? getString(record, "square_team_member_id"),
+    square_service_variation_id: args.service?.serviceVariationId ?? getString(record, "square_service_variation_id"),
+  };
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function formatZodValidationError(error: ZodError) {
+  return formatZodFieldErrors(error).map((fieldError) => `${fieldError.field}: ${fieldError.message}`).join("; ");
+}
+
 function normalizeAppointmentStartAt(args: {
   input: CreatePaidAppointmentIntentInput;
   clinicTimezone: string;
   organizationId: string;
   serviceName: string;
+  service: {
+    locationId: string;
+    teamMemberId: string;
+    serviceVariationId: string;
+  };
   debugId: string;
 }) {
-  const { input, clinicTimezone, organizationId, serviceName, debugId } = args;
+  const { input, clinicTimezone, organizationId, serviceName, service, debugId } = args;
   const selectedStartAtReceived = input.selected_start_at ?? null;
+  const hasPreferredDateTime = Boolean(input.preferred_date && input.preferred_time);
+  const selectedStartAtReceivedIsValid = selectedStartAtReceived
+    ? Number.isFinite(new Date(selectedStartAtReceived).getTime())
+    : false;
   let selectedStartAtNormalized = selectedStartAtReceived;
 
-  if (input.preferred_date && input.preferred_time) {
-    selectedStartAtNormalized = selectedStartAtFromPreferredDateTime({
-      preferredDate: input.preferred_date,
-      preferredTime: input.preferred_time,
-      timezone: clinicTimezone,
+  if (!isValidTimeZone(clinicTimezone)) {
+    throw new PaidAppointmentIntentError({
+      errorCode: "INVALID_DATETIME",
+      step: "invalid_datetime",
+      say: "Sorry, I had trouble reading that time. What exact day and time would you prefer?",
+      status: 200,
+      safeDetails: paidAppointmentDebugFields({
+        input,
+        clinicTimezone,
+        selectedStartAtReceived,
+        selectedStartAtNormalized: null,
+        validationError: "clinic_timezone is not a valid IANA timezone.",
+        service,
+      }),
     });
+  }
+
+  if (selectedStartAtReceived && !selectedStartAtReceivedIsValid && !hasPreferredDateTime) {
+    throw new PaidAppointmentIntentError({
+      errorCode: "INVALID_DATETIME",
+      step: "invalid_datetime",
+      say: "Sorry, I had trouble reading that time. What exact day and time would you prefer?",
+      status: 200,
+      safeDetails: paidAppointmentDebugFields({
+        input,
+        clinicTimezone,
+        selectedStartAtReceived,
+        selectedStartAtNormalized: null,
+        validationError: "selected_start_at is not a valid datetime.",
+        service,
+      }),
+    });
+  }
+
+  if (selectedStartAtReceived && !selectedStartAtReceivedIsValid && hasPreferredDateTime) {
+    logWarn("paid_appointment_intent.selected_start_at_invalid_ignored", {
+      debug_id: debugId,
+      operation: "create_paid_appointment_intent",
+      step: "normalize_appointment_time",
+      ...paidAppointmentDebugFields({
+        input,
+        clinicTimezone,
+        selectedStartAtReceived,
+        selectedStartAtNormalized: null,
+        validationError: "selected_start_at is not valid; preferred date/time will be used.",
+        service,
+      }),
+    });
+  }
+
+  if (hasPreferredDateTime) {
+    try {
+      selectedStartAtNormalized = selectedStartAtFromPreferredDateTime({
+        preferredDate: input.preferred_date as string,
+        preferredTime: input.preferred_time as string,
+        timezone: clinicTimezone,
+      });
+    } catch (error) {
+      if (error instanceof PaidAppointmentIntentError) {
+        error.safeDetails = {
+          ...paidAppointmentDebugFields({
+            input,
+            clinicTimezone,
+            selectedStartAtReceived,
+            selectedStartAtNormalized: null,
+            validationError: error.message,
+            service,
+          }),
+          ...error.safeDetails,
+        };
+      }
+      throw error;
+    }
   }
 
   if (!selectedStartAtNormalized) {
     throw new PaidAppointmentIntentError({
-      errorCode: "MISSING_APPOINTMENT_TIME",
-      step: "normalize_appointment_time",
-      say: "I need the appointment date and time before I can send the deposit link.",
-      status: 400,
+      errorCode: "INVALID_DATETIME",
+      step: "invalid_datetime",
+      say: "Sorry, I had trouble reading that time. What exact day and time would you prefer?",
+      status: 200,
+      safeDetails: paidAppointmentDebugFields({
+        input,
+        clinicTimezone,
+        selectedStartAtReceived,
+        selectedStartAtNormalized,
+        validationError: "missing appointment date/time.",
+        service,
+      }),
     });
   }
 
   const mismatch = Boolean(
     selectedStartAtReceived &&
-    input.preferred_date &&
-    input.preferred_time &&
-    Math.abs(new Date(selectedStartAtNormalized).getTime() - new Date(selectedStartAtReceived).getTime()) > 60_000,
+    hasPreferredDateTime &&
+    (!selectedStartAtReceivedIsValid ||
+      Math.abs(new Date(selectedStartAtNormalized).getTime() - new Date(selectedStartAtReceived).getTime()) > 60_000),
   );
 
   logWorkflowInfo("paid_appointment_intent.time_normalized", {
@@ -575,7 +771,16 @@ function normalizeAppointmentStartAt(args: {
     });
   }
 
-  return { selectedStartAt: selectedStartAtNormalized };
+  return { selectedStartAt: selectedStartAtNormalized, selectedStartAtReceived, mismatch };
+}
+
+function isValidTimeZone(timezone: string) {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(new Date());
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function selectedStartAtFromPreferredDateTime(input: {
@@ -588,14 +793,23 @@ function selectedStartAtFromPreferredDateTime(input: {
 
   if (!dateParts || !timeParts) {
     throw new PaidAppointmentIntentError({
-      errorCode: "INVALID_APPOINTMENT_TIME",
-      step: "normalize_appointment_time",
-      say: "I need a clear appointment date and time before I can send the deposit link.",
-      status: 400,
+      errorCode: "INVALID_DATETIME",
+      step: "invalid_datetime",
+      say: "Sorry, I had trouble reading that time. What exact day and time would you prefer?",
+      status: 200,
     });
   }
 
   const [, year, month, day] = dateParts;
+  if (!isValidCalendarDate(Number(year), Number(month), Number(day))) {
+    throw new PaidAppointmentIntentError({
+      errorCode: "INVALID_DATETIME",
+      step: "invalid_datetime",
+      say: "Sorry, I had trouble reading that time. What exact day and time would you prefer?",
+      status: 200,
+    });
+  }
+
   return zonedLocalTimeToUtcIso({
     year: Number(year),
     month: Number(month),
@@ -604,6 +818,21 @@ function selectedStartAtFromPreferredDateTime(input: {
     minute: timeParts.minute,
     timezone: input.timezone,
   });
+}
+
+function isValidCalendarDate(year: number, month: number, day: number) {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    Number.isInteger(year) &&
+    Number.isInteger(month) &&
+    Number.isInteger(day) &&
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
 }
 
 function parsePreferredTime(value: string) {
@@ -649,10 +878,10 @@ function zonedLocalTimeToUtcIso(input: {
     });
   } catch {
     throw new PaidAppointmentIntentError({
-      errorCode: "INVALID_CLINIC_TIMEZONE",
-      step: "normalize_appointment_time",
-      say: "I need the clinic timezone before I can send the deposit link.",
-      status: 400,
+      errorCode: "INVALID_DATETIME",
+      step: "invalid_datetime",
+      say: "Sorry, I had trouble reading that time. What exact day and time would you prefer?",
+      status: 200,
     });
   }
   let candidate = new Date(Date.UTC(input.year, input.month - 1, input.day, input.hour, input.minute, 0));
@@ -773,7 +1002,7 @@ async function resolveBusinessTimezone(input: {
     if (timezone) return timezone;
   }
 
-  return "UTC";
+  return null;
 }
 
 function formatSelectedTimeDisplay(selectedStartAt: string, timezone: string) {
@@ -976,13 +1205,15 @@ class PaidAppointmentIntentError extends Error {
   step: string;
   say: string;
   status: number;
+  safeDetails?: Record<string, unknown>;
 
-  constructor(args: { errorCode: string; step: string; say: string; status: number }) {
+  constructor(args: { errorCode: string; step: string; say: string; status: number; safeDetails?: Record<string, unknown> }) {
     super(args.errorCode);
     this.name = "PaidAppointmentIntentError";
     this.errorCode = args.errorCode;
     this.step = args.step;
     this.say = args.say;
     this.status = args.status;
+    this.safeDetails = args.safeDetails;
   }
 }
