@@ -2,7 +2,7 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 
 import { addDays, format } from "date-fns";
-import { ExternalLink, PhoneCall, PhoneOff, RefreshCcw } from "lucide-react";
+import { ExternalLink, PhoneCall, PhoneOff, RefreshCcw, Trash2 } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -265,6 +265,7 @@ export default function QueuePage() {
   const [savingOutcome, setSavingOutcome] = useState(false);
   const [savingNote, setSavingNote] = useState(false);
   const [savingScripts, setSavingScripts] = useState(false);
+  const [deletingLeadId, setDeletingLeadId] = useState<string | null>(null);
   const locallyEndedAttemptIdsRef = useRef<Set<string>>(new Set());
   const promptedVoicemailAttemptIdsRef = useRef<Set<string>>(new Set());
   const telnyxClientRef = useRef<TelnyxWebRtcClient | null>(null);
@@ -1241,6 +1242,45 @@ export default function QueuePage() {
     }
   }
 
+  async function deleteSelectedLeadFromWorkspace() {
+    if (!selectedLead) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Remove ${selectedLead.businessName ?? "this lead"} from the workspace? Call history for this lead will remain available.`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingLeadId(selectedLead.id);
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/leads/${selectedLead.id}`, {
+        method: "DELETE",
+      });
+      const payload = (await response.json().catch(() => ({ error: "Could not remove lead" }))) as { error?: string };
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Could not remove lead");
+      }
+
+      const currentIndex = leads.findIndex((lead) => lead.id === selectedLead.id);
+      const remainingLeads = leads.filter((lead) => lead.id !== selectedLead.id);
+      const nextLead = remainingLeads[currentIndex] ?? remainingLeads[currentIndex - 1] ?? null;
+
+      setLeads(remainingLeads);
+      setSelectedLeadId(nextLead?.id ?? null);
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Could not remove lead");
+    } finally {
+      setDeletingLeadId(null);
+    }
+  }
+
   async function saveNote() {
     if (!selectedLead) {
       return;
@@ -1484,6 +1524,15 @@ export default function QueuePage() {
                   >
                     <ExternalLink className="mr-2 h-4 w-4" />
                     Open website
+                  </Button>
+                  <Button
+                    disabled={deletingLeadId === selectedLead.id || (callInProgress && selectedLeadOwnsActiveCall)}
+                    loading={deletingLeadId === selectedLead.id}
+                    onClick={() => void deleteSelectedLeadFromWorkspace()}
+                    variant="destructive"
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Remove lead
                   </Button>
                 </div>
 
