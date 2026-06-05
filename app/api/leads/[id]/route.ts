@@ -42,3 +42,36 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
 
   return NextResponse.json({ lead });
 }
+
+export async function DELETE(request: NextRequest, context: { params: Promise<{ id: string }> }) {
+  const authError = await requireApiAuth(request, { mutation: true });
+
+  if (authError) {
+    return authError;
+  }
+
+  const { id } = await context.params;
+  const lead = await prisma.lead.findUnique({ where: { id } });
+
+  if (!lead) {
+    return NextResponse.json({ error: "Lead not found" }, { status: 404 });
+  }
+
+  const existingCustomFields =
+    lead.customFieldsJson && typeof lead.customFieldsJson === "object" && !Array.isArray(lead.customFieldsJson)
+      ? (lead.customFieldsJson as Record<string, unknown>)
+      : {};
+
+  const updatedLead = await prisma.lead.update({
+    where: { id },
+    data: {
+      customFieldsJson: {
+        ...existingCustomFields,
+        workspaceHidden: true,
+        workspaceHiddenAt: new Date().toISOString(),
+      },
+    },
+  });
+
+  return NextResponse.json({ lead: updatedLead });
+}
