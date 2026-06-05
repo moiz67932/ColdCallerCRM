@@ -31,6 +31,7 @@ const outcomeTagLabels: Record<string, string> = {
   bad_number: "bad number",
   interested: "interested",
   demo_requested: "demo requested",
+  already_have_system: "already have system",
 };
 
 const derivedStatusTagLabels: Record<string, string> = {

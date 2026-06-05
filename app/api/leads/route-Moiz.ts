@@ -5,6 +5,17 @@ import { LeadDerivedStatus } from "@/lib/db-types";
 import { sortLeadsForQueue, getLeadTags } from "@/lib/lead-queue";
 import { prisma } from "@/lib/workstation-db";
 
+function isWorkspaceHidden(lead: { customFieldsJson?: unknown }) {
+  const customFields = lead.customFieldsJson;
+
+  return Boolean(
+    customFields &&
+      typeof customFields === "object" &&
+      !Array.isArray(customFields) &&
+      (customFields as Record<string, unknown>).workspaceHidden === true,
+  );
+}
+
 export async function GET(request: NextRequest) {
   const authError = await requireApiAuth(request);
 
@@ -19,6 +30,7 @@ export async function GET(request: NextRequest) {
   const query = searchParams.get("q") ?? undefined;
   const sortMode = searchParams.get("sort") ?? "queue";
   const take = Number(searchParams.get("take") ?? "200");
+  const requestedTake = Number.isNaN(take) ? 200 : Math.min(500, take);
 
   const derivedStatus = status && Object.values(LeadDerivedStatus).includes(status as LeadDerivedStatus)
     ? (status as LeadDerivedStatus)
@@ -53,11 +65,12 @@ export async function GET(request: NextRequest) {
         orderBy: { dueAt: "asc" },
       },
     },
-    take: Number.isNaN(take) ? 200 : Math.min(500, take),
+    take: 500,
     orderBy: { createdAt: "asc" },
   });
 
-  const sorted = sortMode === "queue" ? sortLeadsForQueue(leads) : leads;
+  const visibleLeads = leads.filter((lead: { customFieldsJson?: unknown }) => !isWorkspaceHidden(lead));
+  const sorted = (sortMode === "queue" ? sortLeadsForQueue(visibleLeads) : visibleLeads).slice(0, requestedTake);
 
   return NextResponse.json({
     leads: sorted.map((lead: Parameters<typeof getLeadTags>[0]) => ({

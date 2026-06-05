@@ -6,14 +6,12 @@ import { ExternalLink, PhoneCall, PhoneOff, RefreshCcw, Trash2 } from "lucide-re
 import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { applyTemplateVariables } from "@/lib/scripts";
 
 type FollowUp = {
   id: string;
@@ -47,10 +45,6 @@ type CallAttempt = {
     telnyxRecordingId?: string;
     downloadUrl?: string | null;
   } | null;
-  transcript?: {
-    status: "pending" | "completed" | "failed";
-    text?: string | null;
-  } | null;
 };
 
 type LeadItem = {
@@ -69,22 +63,11 @@ type LeadItem = {
 };
 
 type SettingsResponse = {
-  settings: {
-    scripts: {
-      opening: string;
-      gatekeeper: string;
-      voicemail: string;
-      callbackConfirmation: string;
-      close: string;
-    };
-  };
   runtimeConfig?: {
     telnyxManualDialFlow?: "browser_first" | "pstn_first";
     telnyxWebrtcCredentialConfigured?: boolean;
   };
 };
-
-type ScriptKey = keyof SettingsResponse["settings"]["scripts"];
 
 type CallBootstrapResponse = {
   attempt?: CallAttempt;
@@ -138,6 +121,8 @@ type WebRtcCall = {
   remoteStream?: MediaStream;
   answer: (params?: { video?: boolean }) => Promise<void> | void;
   hangup: () => Promise<void> | void;
+  dtmf?: (digit: string) => Promise<void> | void;
+  sendDigits?: (digits: string) => Promise<void> | void;
 };
 
 type WebRtcNotification = {
@@ -170,7 +155,10 @@ const outcomeButtons: Array<{ outcome: string; label: string }> = [
   { outcome: "bad_number", label: "Bad Number" },
   { outcome: "interested", label: "Interested" },
   { outcome: "demo_requested", label: "Demo Requested" },
+  { outcome: "already_have_system", label: "Already Have System" },
 ];
+
+const keypadDigits = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
 
 const shortcutOutcomeMap: Record<string, string> = {
   "1": "answered",
@@ -249,22 +237,18 @@ export default function QueuePage() {
   const [error, setError] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [lastSavedNotes, setLastSavedNotes] = useState("");
-  const [settings, setSettings] = useState<SettingsResponse["settings"] | null>(null);
   const [runtimeConfig, setRuntimeConfig] = useState<SettingsResponse["runtimeConfig"] | null>(null);
-  const [scriptDrafts, setScriptDrafts] = useState<SettingsResponse["settings"]["scripts"] | null>(null);
   const [customCallbackAt, setCustomCallbackAt] = useState("");
-  const [showScripts, setShowScripts] = useState(true);
   const [calling, setCalling] = useState(false);
   const [callMessage, setCallMessage] = useState<string | null>(null);
   const [webrtcStatus, setWebrtcStatus] = useState("offline");
   const [micPermission, setMicPermission] = useState("unknown");
   const [manualDialState, setManualDialState] = useState<ManualDialUiState | null>(null);
-  const [debugEvents, setDebugEvents] = useState<DebugEventEntry[]>([]);
-  const [activeWebRtcCallControlId, setActiveWebRtcCallControlId] = useState<string | null>(null);
+  const [, setDebugEvents] = useState<DebugEventEntry[]>([]);
+  const [, setActiveWebRtcCallControlId] = useState<string | null>(null);
   const [pendingAttemptId, setPendingAttemptId] = useState<string | null>(null);
   const [savingOutcome, setSavingOutcome] = useState(false);
   const [savingNote, setSavingNote] = useState(false);
-  const [savingScripts, setSavingScripts] = useState(false);
   const [deletingLeadId, setDeletingLeadId] = useState<string | null>(null);
   const locallyEndedAttemptIdsRef = useRef<Set<string>>(new Set());
   const promptedVoicemailAttemptIdsRef = useRef<Set<string>>(new Set());
@@ -279,7 +263,6 @@ export default function QueuePage() {
   const didInitialLeadLoadRef = useRef(false);
   const didLoadSettingsRef = useRef(false);
   const notesRef = useRef<HTMLTextAreaElement | null>(null);
-  const refreshLeadsRef = useRef<() => Promise<void>>(async () => undefined);
   const pendingAttemptIdRef = useRef<string | null>(null);
   const requestedLeadId = searchParams.get("leadId");
 
@@ -313,10 +296,6 @@ export default function QueuePage() {
       setLoading(false);
     }
   }, [requestedLeadId, selectedLeadId]);
-
-  useEffect(() => {
-    refreshLeadsRef.current = refreshLeads;
-  }, [refreshLeads]);
 
   useEffect(() => {
     pendingAttemptIdRef.current = pendingAttemptId;
@@ -356,9 +335,7 @@ export default function QueuePage() {
       const payload = (await response.json()) as SettingsResponse;
 
       if (response.ok) {
-        setSettings(payload.settings);
         setRuntimeConfig(payload.runtimeConfig ?? null);
-        setScriptDrafts(payload.settings.scripts);
       }
     }
 
@@ -868,32 +845,6 @@ export default function QueuePage() {
     }
   }
 
-  async function saveScriptTemplates() {
-    if (!scriptDrafts) {
-      return;
-    }
-
-    setSavingScripts(true);
-
-    try {
-      const response = await fetch("/api/settings", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          scripts: scriptDrafts,
-        }),
-      });
-
-      if (response.ok) {
-        setSettings((current) => (current ? { ...current, scripts: scriptDrafts } : current));
-      }
-    } finally {
-      setSavingScripts(false);
-    }
-  }
-
   useEffect(() => {
     if (!selectedLead) {
       setNotes("");
@@ -904,22 +855,6 @@ export default function QueuePage() {
     setNotes(selectedLead.notes ?? "");
     setLastSavedNotes(selectedLead.notes ?? "");
   }, [selectedLead]);
-
-  useEffect(() => {
-    if (
-      !latestAttempt ||
-      locallyEndedAttemptIdsRef.current.has(latestAttempt.id) ||
-      !["dialing", "connected"].includes(latestAttempt.status)
-    ) {
-      return;
-    }
-
-    const interval = window.setInterval(() => {
-      void refreshLeadsRef.current();
-    }, 1500);
-
-    return () => window.clearInterval(interval);
-  }, [latestAttempt, latestAttempt?.id, latestAttempt?.status]);
 
   useEffect(() => {
     const progressState = latestAttempt?.rawSummaryJson?.progressState;
@@ -1028,6 +963,12 @@ export default function QueuePage() {
       if (event.key.toLowerCase() === "n") {
         event.preventDefault();
         moveToNextLead();
+        return;
+      }
+
+      if (callInProgress && keypadDigits.includes(event.key)) {
+        event.preventDefault();
+        void sendDtmfDigit(event.key);
         return;
       }
 
@@ -1229,6 +1170,40 @@ export default function QueuePage() {
     }
   }
 
+  async function sendDtmfDigit(digit: string) {
+    const call = webRtcCallRef.current;
+
+    if (!call || !activeManualCallStates.includes((manualDialState ?? "ended") as ManualDialUiState)) {
+      setCallMessage("DTMF is available only while a Telnyx WebRTC call is live.");
+      return;
+    }
+
+    try {
+      if (call.sendDigits) {
+        await call.sendDigits(digit);
+      } else if (call.dtmf) {
+        await call.dtmf(digit);
+      } else {
+        throw new Error("The Telnyx WebRTC SDK did not expose DTMF on this call.");
+      }
+
+      setCallMessage(`Sent DTMF ${digit}`);
+      await logBrowserWebRtcEvent("dtmf_digit_sent", {
+        digit,
+        browserCallControlId: getWebRtcCallControlId(call),
+      });
+    } catch (dtmfError) {
+      const message = dtmfError instanceof Error ? dtmfError.message : "Could not send DTMF digit";
+      setError(message);
+      setCallMessage(message);
+      await logBrowserWebRtcEvent("dtmf_digit_failed", {
+        digit,
+        browserCallControlId: getWebRtcCallControlId(call),
+        error: message,
+      });
+    }
+  }
+
   function moveToNextLead() {
     if (!selectedLead) {
       return;
@@ -1366,14 +1341,6 @@ export default function QueuePage() {
       await setOutcome("callback", date);
     }
   }
-
-  const scriptVariables = {
-    businessName: selectedLead?.businessName ?? "",
-    contactName: selectedLead?.contactName ?? "",
-    city: selectedLead?.city ?? "",
-    state: selectedLead?.state ?? "",
-    niche: selectedLead?.niche ?? "",
-  };
 
   const displayedCallStatus = manualDialState ?? latestAttempt?.rawSummaryJson?.progressState ?? latestAttempt?.status ?? "idle";
   const now = Date.now();
@@ -1536,121 +1503,22 @@ export default function QueuePage() {
                   </Button>
                 </div>
 
-                <Card className="bg-slate-50">
-                  <CardHeader>
-                    <CardTitle className="text-base">Call controls</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-2 text-sm">
-                    <p>
-                      <span className="font-medium">Outbound path:</span>{" "}
-                      {browserFirstFlow ? "Browser-originated Telnyx WebRTC -> PSTN" : "Telnyx Call Control PSTN-first fallback"}
-                    </p>
-                    <p>
-                      <span className="font-medium">Browser WebRTC:</span> {webrtcStatus}
-                    </p>
-                    <p>
-                      <span className="font-medium">Manual dial flow:</span> {getManualDialFlow()}
-                    </p>
-                    <p>
-                      <span className="font-medium">Microphone:</span> {micPermission}
-                    </p>
-                    <p>
-                      <span className="font-medium">Browser Call Control ID:</span> {activeWebRtcCallControlId ?? latestAttempt?.telnyxAgentCallControlId ?? "-"}
-                    </p>
-                    <audio
-                      autoPlay
-                      className="hidden"
-                      id="telnyx-remote-audio"
-                      onLoadedMetadata={() => {
-                        void logBrowserWebRtcEvent("remote_audio_metadata_loaded", {
-                          hasSrcObject: Boolean(remoteAudioRef.current?.srcObject),
-                        });
-                      }}
-                      onPlaying={() => {
-                        void logBrowserWebRtcEvent("remote_audio_playing", {
-                          hasSrcObject: Boolean(remoteAudioRef.current?.srcObject),
-                        });
-                      }}
-                      ref={remoteAudioRef}
-                    />
-                    {callMessage ? <p className="text-xs text-slate-500">{callMessage}</p> : null}
-                    <p>
-                      <span className="font-medium">State:</span> {displayedCallStatus}
-                    </p>
-                    <p>
-                      <span className="font-medium">Started:</span> {latestAttempt?.startedAt ? format(new Date(latestAttempt.startedAt), "PPpp") : "-"}
-                    </p>
-                    <p>
-                      <span className="font-medium">Answered:</span> {latestAttempt?.answeredAt ? format(new Date(latestAttempt.answeredAt), "PPpp") : "-"}
-                    </p>
-                    <p>
-                      <span className="font-medium">Ended:</span> {latestAttempt?.endedAt ? format(new Date(latestAttempt.endedAt), "PPpp") : "-"}
-                    </p>
-                    <p>
-                      <span className="font-medium">Duration:</span> {latestAttempt?.durationSeconds ? `${latestAttempt.durationSeconds}s` : "-"}
-                    </p>
-                    <p>
-                      <span className="font-medium">AMD:</span> {latestAttempt?.amdResult ?? "-"}
-                    </p>
-
-                    <p>
-                      <span className="font-medium">Recording:</span>{" "}
-                      {latestAttempt?.recording?.downloadUrl ? (
-                        <a
-                          className="text-cyan-700 underline"
-                          href={latestAttempt.recording.downloadUrl}
-                          rel="noreferrer"
-                          target="_blank"
-                        >
-                          Open recording
-                        </a>
-                      ) : (
-                        "Pending"
-                      )}
-                    </p>
-                    <p>
-                      <span className="font-medium">Transcript:</span> {latestAttempt?.transcript?.status ?? "Pending"}
-                    </p>
-                    {latestAttempt?.transcript?.text ? (
-                      <p className="rounded-md border border-slate-200 bg-white p-2 text-xs whitespace-pre-wrap">
-                        {latestAttempt.transcript.text}
-                      </p>
-                    ) : null}
-
-                    <Accordion collapsible type="single">
-                      <AccordionItem value="debug">
-                        <AccordionTrigger>Telnyx debug identifiers</AccordionTrigger>
-                        <AccordionContent>
-                          <div className="space-y-1 text-xs">
-                            <p>Connection ID: {latestAttempt?.telnyxConnectionId ?? "-"}</p>
-                            <p>Lead Call Control ID: {latestAttempt?.telnyxCallControlId ?? "-"}</p>
-                            <p>Lead Leg ID: {latestAttempt?.telnyxCallLegId ?? "-"}</p>
-                            <p>Agent Call Control ID: {latestAttempt?.telnyxAgentCallControlId ?? "-"}</p>
-                            <p>Agent Leg ID: {latestAttempt?.telnyxAgentCallLegId ?? "-"}</p>
-                            <p>Session ID: {latestAttempt?.telnyxCallSessionId ?? "-"}</p>
-                          </div>
-                        </AccordionContent>
-                      </AccordionItem>
-                      <AccordionItem value="events">
-                        <AccordionTrigger>Last 20 browser call events</AccordionTrigger>
-                        <AccordionContent>
-                          <div className="space-y-2 text-xs">
-                            {debugEvents.length === 0 ? <p>No browser events captured yet.</p> : null}
-                            {debugEvents.map((entry) => (
-                              <div className="rounded-md border border-slate-200 bg-white p-2" key={entry.id}>
-                                <p className="font-medium">{entry.event}</p>
-                                <p className="text-slate-500">{format(new Date(entry.at), "HH:mm:ss")}</p>
-                                <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-[11px] text-slate-600">
-                                  {JSON.stringify(entry.details, null, 2)}
-                                </pre>
-                              </div>
-                            ))}
-                          </div>
-                        </AccordionContent>
-                      </AccordionItem>
-                    </Accordion>
-                  </CardContent>
-                </Card>
+                <audio
+                  autoPlay
+                  className="hidden"
+                  id="telnyx-remote-audio"
+                  onLoadedMetadata={() => {
+                    void logBrowserWebRtcEvent("remote_audio_metadata_loaded", {
+                      hasSrcObject: Boolean(remoteAudioRef.current?.srcObject),
+                    });
+                  }}
+                  onPlaying={() => {
+                    void logBrowserWebRtcEvent("remote_audio_playing", {
+                      hasSrcObject: Boolean(remoteAudioRef.current?.srcObject),
+                    });
+                  }}
+                  ref={remoteAudioRef}
+                />
 
                 <div>
                   <p className="mb-2 text-sm font-medium">After-call outcomes</p>
@@ -1677,49 +1545,42 @@ export default function QueuePage() {
 
         <Card className="xl:col-span-4">
           <CardHeader>
-            <div className="flex items-center justify-between">
-              <div>
-                <CardTitle>Script + Notes</CardTitle>
-                <CardDescription>Editable operator notes and callback controls.</CardDescription>
-              </div>
-              <Button onClick={() => setShowScripts((value) => !value)} size="sm" variant="secondary">
-                {showScripts ? "Hide scripts" : "Show scripts"}
-              </Button>
-            </div>
+            <CardTitle>Dialer Notepad</CardTitle>
+            <CardDescription>Notes, IVR keypad, callback controls, and call recording.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {showScripts && settings && scriptDrafts ? (
-              <Accordion type="multiple">
-                {(Object.keys(scriptDrafts) as ScriptKey[]).map((key) => (
-                  <AccordionItem key={key} value={key}>
-                    <AccordionTrigger>{key}</AccordionTrigger>
-                    <AccordionContent>
-                      <div className="space-y-2">
-                        <Textarea
-                          value={scriptDrafts[key]}
-                          onChange={(event) =>
-                            setScriptDrafts((prev) =>
-                              prev
-                                ? {
-                                    ...prev,
-                                    [key]: event.target.value,
-                                  }
-                                : prev,
-                            )
-                          }
-                        />
-                        <p className="rounded-md bg-slate-50 p-2 text-xs">
-                          {applyTemplateVariables(scriptDrafts[key], scriptVariables)}
-                        </p>
-                      </div>
-                    </AccordionContent>
-                  </AccordionItem>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <Label>Keypad</Label>
+                <span className="text-xs text-slate-500">State: {displayedCallStatus}</span>
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                {keypadDigits.map((digit) => (
+                  <Button
+                    className="h-12 text-lg font-semibold"
+                    disabled={!callInProgress}
+                    key={digit}
+                    onClick={() => void sendDtmfDigit(digit)}
+                    type="button"
+                    variant="outline"
+                  >
+                    {digit}
+                  </Button>
                 ))}
-                <Button loading={savingScripts} onClick={() => void saveScriptTemplates()} size="sm" variant="outline">
-                  Save scripts
-                </Button>
-              </Accordion>
-            ) : null}
+              </div>
+              {callMessage ? <p className="text-xs text-slate-500">{callMessage}</p> : null}
+            </div>
+
+            <div className="space-y-2">
+              <Label>Recording</Label>
+              {latestAttempt?.recording?.downloadUrl ? (
+                <audio className="w-full" controls src={latestAttempt.recording.downloadUrl} />
+              ) : (
+                <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
+                  Recording pending or unavailable.
+                </p>
+              )}
+            </div>
 
             <div className="space-y-2">
               <Label htmlFor="notes-box">Notes</Label>

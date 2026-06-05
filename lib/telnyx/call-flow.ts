@@ -324,7 +324,6 @@ export async function startAttemptRecording(callAttemptId: string) {
       channels: "single",
       format: "mp3",
       recording_track: "both",
-      transcription: true,
       command_id: `${attempt.id}-recording`,
     });
   } catch (error) {

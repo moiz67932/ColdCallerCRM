@@ -31,6 +31,7 @@ export const CallOutcome = {
   bad_number: "bad_number",
   interested: "interested",
   demo_requested: "demo_requested",
+  already_have_system: "already_have_system",
 } as const;
 
 export type CallOutcome = (typeof CallOutcome)[keyof typeof CallOutcome];

@@ -50,11 +50,6 @@ type CallDetail = {
       channels?: string | null;
       durationMillis?: number | null;
     } | null;
-    transcript?: {
-      id: string;
-      status: "pending" | "completed" | "failed";
-      text?: string | null;
-    } | null;
     smsMessages: Array<{
       id: string;
       createdAt: string;
@@ -109,8 +104,7 @@ export default function CallDetailPage() {
     const shouldPoll =
       ["dialing", "connected"].includes(callAttempt.status) ||
       !callAttempt.endedAt ||
-      (callAttempt.recording == null && callAttempt.transcript == null) ||
-      callAttempt.transcript?.status === "pending";
+      callAttempt.recording == null;
 
     if (!shouldPoll) {
       return;
@@ -268,30 +262,13 @@ export default function CallDetailPage() {
       <div className="grid gap-4 xl:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle>Recording + Transcript</CardTitle>
+            <CardTitle>Recording</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
             {callAttempt.recording?.downloadUrl ? (
               <audio className="w-full" controls src={callAttempt.recording.downloadUrl} />
             ) : (
               <p className="text-sm text-slate-500">Recording pending or unavailable.</p>
-            )}
-
-            {callAttempt.transcript ? (
-              <div className="rounded-md border border-slate-200 p-3">
-                <p className="text-xs uppercase tracking-wide text-slate-500">Transcript status: {callAttempt.transcript.status}</p>
-                <p className="mt-2 whitespace-pre-wrap text-sm">
-                  {callAttempt.transcript.text ??
-                    (callAttempt.transcript.status === "failed"
-                      ? "Transcript failed. Check webhook debug data."
-                      : "Transcript pending...")}
-                </p>
-              </div>
-            ) : (
-              <p className="text-sm text-slate-500">
-                Transcript unavailable. If this call was completed from the browser but no recording or transcript webhook arrived,
-                verify the Telnyx connection webhook URL in Settings.
-              </p>
             )}
           </CardContent>
         </Card>
