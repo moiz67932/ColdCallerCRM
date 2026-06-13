@@ -66,7 +66,7 @@ export async function GET(request: NextRequest) {
       },
     },
     take: 500,
-    orderBy: { createdAt: "asc" },
+    orderBy: { createdAt: "desc" },
   });
 
   const visibleLeads = leads.filter((lead: { customFieldsJson?: unknown }) => !isWorkspaceHidden(lead));

@@ -11,6 +11,7 @@ type FollowUp = {
 };
 
 type Lead = {
+  id: string;
   createdAt: Date;
   website?: string | null;
   derivedStatus: string;
@@ -42,12 +43,6 @@ const derivedStatusTagLabels: Record<string, string> = {
   demo_requested: "demo requested",
 };
 
-type RankedLead = {
-  lead: LeadWithRelations;
-  score: number;
-  callbackDueAt?: Date;
-};
-
 function addTag(tags: string[], tag?: string) {
   if (tag && !tags.includes(tag)) {
     tags.push(tag);
@@ -71,53 +66,29 @@ function getOpenCallbackDueAt(lead: LeadWithRelations) {
   return latestAttempt?.callbackAt ?? undefined;
 }
 
-function rankLead(lead: LeadWithRelations): RankedLead {
-  const now = Date.now();
-  const callbackDueAt = getOpenCallbackDueAt(lead);
-  const hasDueCallback = callbackDueAt ? callbackDueAt.getTime() <= now : false;
-  const hasCalls = lead.callAttempts.length > 0;
-  const hasPastFailedAttempts = lead.callAttempts.some(
-    (attempt) => attempt.status === "failed" || attempt.outcome === "no_answer" || attempt.outcome === "voicemail",
-  );
-
-  if (hasDueCallback) {
-    return { lead, score: 0, callbackDueAt };
-  }
-
-  if (!hasCalls) {
-    return { lead, score: 1 };
-  }
-
-  if (!hasPastFailedAttempts) {
-    return { lead, score: 2 };
-  }
-
-  return { lead, score: 3 };
-}
-
 export function sortLeadsForQueue(leads: LeadWithRelations[]) {
-  return leads
-    .map(rankLead)
-    .sort((a, b) => {
-      if (a.score !== b.score) {
-        return a.score - b.score;
-      }
+  return [...leads].sort((a, b) => {
+    const latestCallA = getLatestCallAttempt(a);
+    const latestCallB = getLatestCallAttempt(b);
 
-      if (a.callbackDueAt && b.callbackDueAt) {
-        return a.callbackDueAt.getTime() - b.callbackDueAt.getTime();
-      }
+    if (!latestCallA && latestCallB) {
+      return -1;
+    }
 
-      if (a.callbackDueAt) {
-        return -1;
-      }
+    if (latestCallA && !latestCallB) {
+      return 1;
+    }
 
-      if (b.callbackDueAt) {
-        return 1;
-      }
+    if (latestCallA && latestCallB) {
+      const callOrder = latestCallA.createdAt.getTime() - latestCallB.createdAt.getTime();
 
-      return a.lead.createdAt.getTime() - b.lead.createdAt.getTime();
-    })
-    .map((entry) => entry.lead);
+      if (callOrder !== 0) {
+        return callOrder;
+      }
+    }
+
+    return b.createdAt.getTime() - a.createdAt.getTime();
+  });
 }
 
 export function getLeadTags(lead: LeadWithRelations) {

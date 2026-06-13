@@ -49,6 +49,7 @@ type CallAttempt = {
 
 type LeadItem = {
   id: string;
+  createdAt: string;
   businessName?: string | null;
   contactName?: string | null;
   phoneNumber: string;
@@ -58,6 +59,10 @@ type LeadItem = {
   website?: string | null;
   notes?: string | null;
   tags: string[];
+  leadList?: {
+    name: string;
+    sourceFileName: string;
+  } | null;
   callAttempts: CallAttempt[];
   followUps: FollowUp[];
 };
@@ -1421,6 +1426,9 @@ export default function QueuePage() {
               >
                 <p className="truncate font-medium">{lead.businessName ?? "Untitled business"}</p>
                 <p className="truncate text-xs opacity-80">{lead.phoneNumber}</p>
+                <p className="truncate text-xs opacity-70">
+                  Added {format(new Date(lead.createdAt), "MMM d, yyyy")} from {lead.leadList?.sourceFileName ?? "unknown file"}
+                </p>
               </button>
             ))}
           </CardContent>
@@ -1445,6 +1453,12 @@ export default function QueuePage() {
                   </p>
                   <p className="md:col-span-2">
                     <span className="font-medium">Website:</span> {selectedLead.website ?? "-"}
+                  </p>
+                  <p>
+                    <span className="font-medium">Added:</span> {format(new Date(selectedLead.createdAt), "MMM d, yyyy 'at' h:mm a")}
+                  </p>
+                  <p>
+                    <span className="font-medium">Source file:</span> {selectedLead.leadList?.sourceFileName ?? "-"}
                   </p>
                 </div>
 
