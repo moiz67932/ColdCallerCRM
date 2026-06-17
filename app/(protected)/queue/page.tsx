@@ -93,6 +93,7 @@ type ManualDialUiState =
   | "busy"
   | "failed"
   | "no_answer"
+  | "lead_hung_up"
   | "ended";
 
 type DebugEventEntry = {
@@ -183,7 +184,22 @@ const activeManualCallStates: ManualDialUiState[] = [
   "browser_answered",
   "bridged",
 ];
-const terminalManualCallStates = new Set<ManualDialUiState>(["busy", "failed", "no_answer", "ended"]);
+const terminalManualCallStates = new Set<ManualDialUiState>(["busy", "failed", "no_answer", "lead_hung_up", "ended"]);
+const callStatusLabels: Record<string, string> = {
+  browser_connecting: "Browser connecting",
+  browser_ready: "Browser ready",
+  dialing_lead: "Dialing lead",
+  lead_ringing: "Lead ringing",
+  lead_answered: "Lead answered",
+  browser_answered: "Browser answered",
+  bridged: "Connected",
+  busy: "Busy",
+  failed: "Failed",
+  no_answer: "No answer",
+  lead_hung_up: "Lead hung up",
+  ended: "Ended",
+  idle: "Idle",
+};
 const activeCallStatusSet = new Set(["dialing", "connected"]);
 const activeAttemptLockWindowMs = 60 * 60 * 1000;
 
@@ -688,6 +704,13 @@ export default function QueuePage() {
     }
 
     if (["hangup", "destroy", "purge", "done"].includes(call.state ?? "")) {
+      const attemptId = pendingAttemptIdRef.current ?? latestAttempt?.id ?? null;
+      const wasLocalHangup = attemptId ? locallyEndedAttemptIdsRef.current.has(attemptId) : false;
+      const wasConnectedToLead =
+        manualDialState === "bridged" ||
+        manualDialState === "lead_answered" ||
+        manualDialState === "browser_answered" ||
+        Boolean(latestAttempt?.answeredAt);
       await logBrowserWebRtcEvent("browser_leg_hangup", {
         browserCallId: call.id ?? null,
         browserCallControlId,
@@ -701,23 +724,28 @@ export default function QueuePage() {
           ? "busy"
           : call.cause === "timeout" || call.cause === "no_answer"
             ? "no_answer"
-            : manualDialState === "bridged" || manualDialState === "lead_answered"
+            : wasLocalHangup
               ? "ended"
-              : "failed";
+              : wasConnectedToLead
+                ? "lead_hung_up"
+                : "failed";
       const finalMessage =
         finalState === "busy"
           ? "Lead was busy."
           : finalState === "no_answer"
             ? "Lead did not answer."
-            : finalState === "ended"
-              ? "Call ended."
+            : finalState === "lead_hung_up"
+              ? "Lead hung up."
+              : finalState === "ended"
+                ? "Call ended."
               : "Call failed before audio was established.";
       setUiCallState(finalState, finalMessage);
       await reportAttemptProgress(finalState, {
         telnyxIds: call.telnyxIDs,
-        status: finalState === "ended" ? "canceled" : "failed",
+        status: finalState === "lead_hung_up" || finalState === "ended" ? undefined : "failed",
         clientError: finalState === "failed" ? (call.sipReason ?? call.cause ?? "Call failed") : undefined,
       });
+      setPendingAttemptId(null);
       setWebrtcStatus(webRtcReadyRef.current ? "ready" : "offline");
       setActiveWebRtcCallControlId(null);
       webRtcCallRef.current = null;
@@ -869,6 +897,9 @@ export default function QueuePage() {
     }
 
     setManualDialState(progressState as ManualDialUiState);
+    if (progressState === "lead_hung_up") {
+      setCallMessage("Lead hung up.");
+    }
   }, [latestAttempt?.id, latestAttempt?.rawSummaryJson?.progressState]);
 
   useEffect(() => {
@@ -879,6 +910,11 @@ export default function QueuePage() {
     setPendingAttemptId(null);
     locallyEndedAttemptIdsRef.current.delete(latestAttempt.id);
     callStartAttemptedRef.current = false;
+
+    if (latestAttempt.rawSummaryJson?.progressState === "lead_hung_up") {
+      setUiCallState("lead_hung_up", "Lead hung up.");
+      return;
+    }
 
     if (latestAttempt.status === "voicemail_detected") {
       setUiCallState("ended", "Voicemail detected. Call ended automatically.");
@@ -1348,6 +1384,7 @@ export default function QueuePage() {
   }
 
   const displayedCallStatus = manualDialState ?? latestAttempt?.rawSummaryJson?.progressState ?? latestAttempt?.status ?? "idle";
+  const displayedCallStatusLabel = callStatusLabels[displayedCallStatus] ?? displayedCallStatus.replaceAll("_", " ");
   const now = Date.now();
   const latestAttemptDismissed = latestAttempt ? locallyEndedAttemptIdsRef.current.has(latestAttempt.id) : false;
   const latestAttemptIsActive = Boolean(latestAttempt && !latestAttemptDismissed && isRecentActiveAttempt(latestAttempt, now));
@@ -1406,6 +1443,11 @@ export default function QueuePage() {
           Lead answered but browser audio was not established cleanly.
         </p>
       ) : null}
+      {manualDialState === "lead_hung_up" ? (
+        <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900">
+          Lead hung up.
+        </p>
+      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-12">
         <Card className="xl:col-span-3">
@@ -1413,7 +1455,7 @@ export default function QueuePage() {
             <CardTitle>Lead list</CardTitle>
             <CardDescription>{loading ? "Loading..." : `${leads.length} leads loaded`}</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-2">
+          <CardContent className="max-h-[calc(100vh-17rem)] space-y-2 overflow-y-auto pr-2">
             {leads.length === 0 ? <p className="text-sm text-slate-500">No leads yet. Import a CSV first.</p> : null}
             {leads.map((lead) => (
               <button
@@ -1566,7 +1608,7 @@ export default function QueuePage() {
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-3">
                 <Label>Keypad</Label>
-                <span className="text-xs text-slate-500">State: {displayedCallStatus}</span>
+                <span className="text-xs text-slate-500">State: {displayedCallStatusLabel}</span>
               </div>
               <div className="grid grid-cols-3 gap-2">
                 {keypadDigits.map((digit) => (
@@ -1582,7 +1624,11 @@ export default function QueuePage() {
                   </Button>
                 ))}
               </div>
-              {callMessage ? <p className="text-xs text-slate-500">{callMessage}</p> : null}
+              {callMessage ? (
+                <p className={`text-xs ${manualDialState === "lead_hung_up" ? "font-semibold text-amber-900" : "text-slate-500"}`}>
+                  {callMessage}
+                </p>
+              ) : null}
             </div>
 
             <div className="space-y-2">

@@ -658,8 +658,10 @@ async function handleHangupEvent(attempt: ExistingCallAttempt, event: TelnyxWebh
       ? "busy"
       : hangupCause === "timeout" || hangupCause === "no_answer"
         ? "no_answer"
-        : syncedAttempt.answeredAt || syncedAttempt.status === "connected"
-          ? "ended"
+        : (syncedAttempt.answeredAt || syncedAttempt.status === "connected") && role === "lead"
+          ? "lead_hung_up"
+          : syncedAttempt.answeredAt || syncedAttempt.status === "connected"
+            ? "ended"
           : "failed";
 
   if (!isBrowserFirstManualDialFlow() && role === "agent" && syncedAttempt.telnyxCallControlId && !syncedAttempt.endedAt) {
