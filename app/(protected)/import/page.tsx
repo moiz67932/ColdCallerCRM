@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Papa from "papaparse";
 
 import { Button } from "@/components/ui/button";
@@ -47,6 +47,8 @@ function guessMapping(headers: string[]): MappingState {
 export default function ImportPage() {
   const [sourceFileName, setSourceFileName] = useState("");
   const [leadListName, setLeadListName] = useState("");
+  const [locations, setLocations] = useState<string[]>([]);
+  const [selectedLocation, setSelectedLocation] = useState("");
   const [csvText, setCsvText] = useState("");
   const [headers, setHeaders] = useState<string[]>([]);
   const [rowsPreview, setRowsPreview] = useState<CsvRow[]>([]);
@@ -70,6 +72,23 @@ export default function ImportPage() {
   const [error, setError] = useState<string | null>(null);
 
   const mappingOptions = useMemo(() => ["", ...headers], [headers]);
+
+  useEffect(() => {
+    async function loadLocations() {
+      const response = await fetch("/api/settings", { cache: "no-store" });
+      const payload = (await response.json()) as { settings?: { locations?: string[] } };
+
+      if (!response.ok) {
+        return;
+      }
+
+      const nextLocations = payload.settings?.locations ?? [];
+      setLocations(nextLocations);
+      setSelectedLocation((current) => current || nextLocations[0] || "");
+    }
+
+    void loadLocations();
+  }, []);
 
   async function handleFileChange(file: File) {
     const text = await file.text();
@@ -111,6 +130,11 @@ export default function ImportPage() {
       return;
     }
 
+    if (!selectedLocation) {
+      setError("Choose a location before importing leads.");
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -121,6 +145,7 @@ export default function ImportPage() {
         },
         body: JSON.stringify({
           leadListName,
+          location: selectedLocation,
           sourceFileName,
           csvText,
           mapping,
@@ -183,6 +208,24 @@ export default function ImportPage() {
             <div className="space-y-2">
               <Label htmlFor="lead-list-name">Lead list name</Label>
               <Input id="lead-list-name" value={leadListName} onChange={(event) => setLeadListName(event.target.value)} />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Location</Label>
+              <Select value={selectedLocation || "__none__"} onValueChange={(value) => setSelectedLocation(value === "__none__" ? "" : value)}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Choose location" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">Choose location</SelectItem>
+                  {locations.map((location) => (
+                    <SelectItem key={location} value={location}>
+                      {location}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {!locations.length ? <p className="text-xs text-amber-700">Add locations in Settings before importing.</p> : null}
             </div>
           </div>
 
@@ -250,7 +293,7 @@ export default function ImportPage() {
           ) : null}
 
           <div className="flex items-center gap-3">
-            <Button disabled={!csvText} loading={loading} onClick={submitImport}>
+            <Button disabled={!csvText || !selectedLocation} loading={loading} onClick={submitImport}>
               {loading ? "Importing..." : "Confirm Import"}
             </Button>
             {error ? <p className="text-sm text-red-700">{error}</p> : null}

@@ -25,6 +25,7 @@ export async function GET(request: NextRequest) {
 
   const searchParams = request.nextUrl.searchParams;
   const leadListId = searchParams.get("leadListId") ?? undefined;
+  const location = searchParams.get("location") ?? undefined;
   const niche = searchParams.get("niche") ?? undefined;
   const status = searchParams.get("status") ?? undefined;
   const query = searchParams.get("q") ?? undefined;
@@ -39,6 +40,7 @@ export async function GET(request: NextRequest) {
   const leads = await prisma.lead.findMany({
     where: {
       leadListId,
+      location,
       niche: niche ? { contains: niche, mode: "insensitive" } : undefined,
       derivedStatus,
       OR: query

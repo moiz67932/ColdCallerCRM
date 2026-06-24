@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 
 type FollowUp = {
@@ -55,6 +56,7 @@ type LeadItem = {
   phoneNumber: string;
   city?: string | null;
   state?: string | null;
+  location?: string | null;
   niche?: string | null;
   website?: string | null;
   notes?: string | null;
@@ -68,6 +70,9 @@ type LeadItem = {
 };
 
 type SettingsResponse = {
+  settings?: {
+    locations?: string[];
+  };
   runtimeConfig?: {
     telnyxManualDialFlow?: "browser_first" | "pstn_first";
     telnyxWebrtcCredentialConfigured?: boolean;
@@ -259,6 +264,8 @@ export default function QueuePage() {
   const [notes, setNotes] = useState("");
   const [lastSavedNotes, setLastSavedNotes] = useState("");
   const [runtimeConfig, setRuntimeConfig] = useState<SettingsResponse["runtimeConfig"] | null>(null);
+  const [locations, setLocations] = useState<string[]>([]);
+  const [selectedLocation, setSelectedLocation] = useState("");
   const [customCallbackAt, setCustomCallbackAt] = useState("");
   const [calling, setCalling] = useState(false);
   const [callMessage, setCallMessage] = useState<string | null>(null);
@@ -290,12 +297,18 @@ export default function QueuePage() {
   const selectedLead = useMemo(() => leads.find((lead) => lead.id === selectedLeadId) ?? null, [leads, selectedLeadId]);
   const latestAttempt = selectedLead?.callAttempts[0] ?? null;
 
-  const refreshLeads = useCallback(async () => {
+  const refreshLeads = useCallback(async (nextLocation = selectedLocation, resetSelection = false) => {
     setLoading(true);
     setError(null);
 
     try {
-      const response = await fetch("/api/leads?sort=queue", { cache: "no-store" });
+      const params = new URLSearchParams({ sort: "queue" });
+
+      if (nextLocation) {
+        params.set("location", nextLocation);
+      }
+
+      const response = await fetch(`/api/leads?${params.toString()}`, { cache: "no-store" });
       const payload = (await response.json()) as { error?: string; leads?: LeadItem[] };
 
       if (!response.ok || !payload.leads) {
@@ -304,8 +317,9 @@ export default function QueuePage() {
 
       setLeads(payload.leads);
 
-      if (!selectedLeadId && payload.leads.length > 0) {
+      if ((resetSelection || !selectedLeadId) && payload.leads.length > 0) {
         setSelectedLeadId(requestedLeadId && payload.leads.some((lead) => lead.id === requestedLeadId) ? requestedLeadId : payload.leads[0].id);
+        return;
       }
 
       if (selectedLeadId && !payload.leads.some((lead) => lead.id === selectedLeadId)) {
@@ -316,7 +330,7 @@ export default function QueuePage() {
     } finally {
       setLoading(false);
     }
-  }, [requestedLeadId, selectedLeadId]);
+  }, [requestedLeadId, selectedLeadId, selectedLocation]);
 
   useEffect(() => {
     pendingAttemptIdRef.current = pendingAttemptId;
@@ -356,6 +370,12 @@ export default function QueuePage() {
       const payload = (await response.json()) as SettingsResponse;
 
       if (response.ok) {
+        const nextLocations = payload.settings?.locations ?? [];
+        setLocations(nextLocations);
+        setSelectedLocation((current) => current || nextLocations[0] || "");
+        if (nextLocations[0]) {
+          void refreshLeads(nextLocations[0], true);
+        }
         setRuntimeConfig(payload.runtimeConfig ?? null);
       }
     }
@@ -367,6 +387,13 @@ export default function QueuePage() {
     didLoadSettingsRef.current = true;
     void loadSettings();
   }, []);
+
+  function selectWorkspaceLocation(value: string) {
+    const nextLocation = value === "__all__" ? "" : value;
+    setSelectedLocation(nextLocation);
+    setSelectedLeadId(null);
+    void refreshLeads(nextLocation, true);
+  }
 
   function appendDebugEvent(event: string, details: Record<string, string | number | boolean | null> = {}) {
     setDebugEvents((current) => [
@@ -1416,10 +1443,27 @@ export default function QueuePage() {
           <h1 className="text-xl font-semibold">Lead Queue / Calling Workspace</h1>
           <p className="text-sm text-slate-600">Shortcuts: C call, N next lead, 1..8 outcomes, / focus notes</p>
         </div>
-        <Button loading={loading} onClick={() => void refreshLeads()} variant="outline">
-          <RefreshCcw className="mr-2 h-4 w-4" />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-3">
+          <div className="w-56">
+            <Select value={selectedLocation || "__all__"} onValueChange={selectWorkspaceLocation}>
+              <SelectTrigger>
+                <SelectValue placeholder="All locations" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All locations</SelectItem>
+                {locations.map((location) => (
+                  <SelectItem key={location} value={location}>
+                    {location}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <Button loading={loading} onClick={() => void refreshLeads()} variant="outline">
+            <RefreshCcw className="mr-2 h-4 w-4" />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {error ? <p className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
@@ -1469,7 +1513,8 @@ export default function QueuePage() {
                 <p className="truncate font-medium">{lead.businessName ?? "Untitled business"}</p>
                 <p className="truncate text-xs opacity-80">{lead.phoneNumber}</p>
                 <p className="truncate text-xs opacity-70">
-                  Added {format(new Date(lead.createdAt), "MMM d, yyyy")} from {lead.leadList?.sourceFileName ?? "unknown file"}
+                  {lead.location ? `${lead.location} - ` : ""}Added {format(new Date(lead.createdAt), "MMM d, yyyy")} from{" "}
+                  {lead.leadList?.sourceFileName ?? "unknown file"}
                 </p>
               </button>
             ))}
@@ -1488,7 +1533,10 @@ export default function QueuePage() {
               <>
                 <div className="grid gap-2 text-sm md:grid-cols-2">
                   <p>
-                    <span className="font-medium">Location:</span> {selectedLead.city ?? "-"}, {selectedLead.state ?? "-"}
+                    <span className="font-medium">Location category:</span> {selectedLead.location ?? "-"}
+                  </p>
+                  <p>
+                    <span className="font-medium">City/state:</span> {selectedLead.city ?? "-"}, {selectedLead.state ?? "-"}
                   </p>
                   <p>
                     <span className="font-medium">Niche:</span> {selectedLead.niche ?? "-"}

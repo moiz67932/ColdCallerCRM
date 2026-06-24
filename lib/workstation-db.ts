@@ -52,6 +52,7 @@ const columnMaps: Record<keyof typeof tableNames, Record<string, string>> = {
     businessName: "business_name",
     contactName: "contact_name",
     phoneNumber: "phone_number",
+    location: "location",
     customFieldsJson: "custom_fields_json",
     derivedStatus: "derived_status",
     createdAt: "created_at",

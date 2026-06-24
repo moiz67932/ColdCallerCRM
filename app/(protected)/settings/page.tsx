@@ -4,12 +4,14 @@ import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 
 type AppSettings = {
   enableRecording: boolean;
+  locations: string[];
   defaultFollowUpSmsTemplate: string;
   scripts: {
     opening: string;
@@ -47,6 +49,7 @@ export default function SettingsPage() {
   const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig | null>(null);
   const [health, setHealth] = useState<HealthCheckResponse | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [newLocation, setNewLocation] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -103,6 +106,35 @@ export default function SettingsPage() {
     }
   }
 
+  function addLocation() {
+    const location = newLocation.trim();
+
+    if (!location) {
+      return;
+    }
+
+    setSettings((prev) =>
+      prev
+        ? {
+            ...prev,
+            locations: Array.from(new Set([...prev.locations, location])),
+          }
+        : prev,
+    );
+    setNewLocation("");
+  }
+
+  function removeLocation(location: string) {
+    setSettings((prev) =>
+      prev
+        ? {
+            ...prev,
+            locations: prev.locations.filter((item) => item !== location),
+          }
+        : prev,
+    );
+  }
+
   if (!settings) {
     return <p className="text-sm text-slate-500">Loading settings...</p>;
   }
@@ -148,6 +180,52 @@ export default function SettingsPage() {
           <div className="rounded-lg border border-slate-200 p-3 text-sm">
             <p className="font-medium">Telnyx Voice Webhook URL</p>
             <p className="mt-2 break-all text-xs text-slate-500">Expected: {runtimeConfig?.telnyxExpectedVoiceWebhookUrl ?? "Not set"}</p>
+          </div>
+
+          <div className="space-y-3 rounded-lg border border-slate-200 p-3">
+            <div>
+              <p className="font-medium">Locations</p>
+              <p className="text-sm text-slate-600">Use these to separate imported leads by state or market.</p>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Input
+                aria-label="New location"
+                placeholder="California"
+                value={newLocation}
+                onChange={(event) => setNewLocation(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    addLocation();
+                  }
+                }}
+              />
+              <Button onClick={addLocation} type="button" variant="outline">
+                Add location
+              </Button>
+            </div>
+            {settings.locations.length ? (
+              <div className="flex flex-wrap gap-2">
+                {settings.locations.map((location) => (
+                  <span
+                    className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm"
+                    key={location}
+                  >
+                    {location}
+                    <button
+                      aria-label={`Remove ${location}`}
+                      className="text-slate-500 hover:text-red-700"
+                      onClick={() => removeLocation(location)}
+                      type="button"
+                    >
+                      x
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-500">No locations added yet.</p>
+            )}
           </div>
 
           <div className="space-y-2">

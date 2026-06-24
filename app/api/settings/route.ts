@@ -9,6 +9,7 @@ import { getVoiceWebhookUrl } from "@/lib/telnyx/helpers";
 
 const updateSettingsSchema = z.object({
   enableRecording: z.boolean().optional(),
+  locations: z.array(z.string()).optional(),
   defaultFollowUpSmsTemplate: z.string().optional(),
   scripts: z
     .object({

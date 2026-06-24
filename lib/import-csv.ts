@@ -17,6 +17,7 @@ export const csvColumnMappingSchema = z.object({
 
 export const importCsvSchema = z.object({
   leadListName: z.string().min(1),
+  location: z.string().trim().min(1),
   sourceFileName: z.string().min(1),
   csvText: z.string().min(1),
   mapping: csvColumnMappingSchema,
@@ -86,6 +87,7 @@ export async function importLeadsFromCsv(input: ImportCsvInput) {
       await prisma.lead.create({
         data: {
           leadListId: leadList.id,
+          location: input.location,
           businessName: input.mapping.businessName ? row[input.mapping.businessName] ?? null : null,
           contactName: input.mapping.contactName ? row[input.mapping.contactName] ?? null : null,
           phoneNumber: normalizedPhone,

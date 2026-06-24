@@ -5,6 +5,10 @@ import { getDefaultScripts, type ScriptTemplates } from "@/lib/scripts";
 
 const appSettingsSchema = z.object({
   enableRecording: z.boolean().default(true),
+  locations: z
+    .array(z.string())
+    .default([])
+    .transform((locations) => Array.from(new Set(locations.map((location) => location.trim()).filter(Boolean)))),
   defaultFollowUpSmsTemplate: z
     .string()
     .default("Hi {{contactName}}, thanks for your time today. I will follow up shortly with next steps."),
@@ -28,6 +32,7 @@ const SETTINGS_KEY = "operator_settings";
 
 const DEFAULT_SETTINGS: AppSettings = {
   enableRecording: true,
+  locations: [],
   defaultFollowUpSmsTemplate:
     "Hi {{contactName}}, thanks for your time today. I will follow up shortly with next steps.",
   scripts: getDefaultScripts(),
