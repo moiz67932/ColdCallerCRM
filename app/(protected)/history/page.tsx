@@ -26,11 +26,18 @@ type HistoryCall = {
   startedAt?: string | null;
   endedAt?: string | null;
   durationSeconds?: number | null;
+  operatorNotes?: string | null;
+  notes?: Array<{
+    id: string;
+    body?: string | null;
+    createdAt: string;
+  }>;
   lead: {
     businessName?: string | null;
     contactName?: string | null;
     phoneNumber: string;
     niche?: string | null;
+    notes?: string | null;
     leadList: {
       id: string;
       name: string;
@@ -48,6 +55,23 @@ function getHistoryOutcomeLabel(call: HistoryCall) {
   }
 
   return call.status;
+}
+
+function getHistoryNote(call: HistoryCall) {
+  return call.lead.notes?.trim() || call.operatorNotes?.trim() || call.notes?.find((note) => note.body?.trim())?.body?.trim() || "-";
+}
+
+function formatHistoryDate(value: string) {
+  const date = new Date(value);
+
+  if (!Number.isFinite(date.getTime())) {
+    return { date: "-", time: "" };
+  }
+
+  return {
+    date: format(date, "MMM d, yyyy"),
+    time: format(date, "h:mm a"),
+  };
 }
 
 export default function HistoryPage() {
@@ -176,27 +200,32 @@ export default function HistoryPage() {
                 <TableHead>Outcome</TableHead>
                 <TableHead>Niche</TableHead>
                 <TableHead>List</TableHead>
-                <TableHead>Duration</TableHead>
+                <TableHead>Notes</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {calls.map((call) => (
-                <TableRow key={call.id}>
-                  <TableCell>
-                    <Link className="underline" href={`/history/${call.id}`}>
-                      {format(new Date(call.createdAt), "PP p")}
-                    </Link>
-                  </TableCell>
-                  <TableCell>{call.lead.businessName ?? "Untitled"}</TableCell>
-                  <TableCell>{call.lead.phoneNumber}</TableCell>
-                  <TableCell>
-                    <Badge variant="secondary">{getHistoryOutcomeLabel(call)}</Badge>
-                  </TableCell>
-                  <TableCell>{call.lead.niche ?? "-"}</TableCell>
-                  <TableCell>{call.lead.leadList.name}</TableCell>
-                  <TableCell>{call.durationSeconds ? `${call.durationSeconds}s` : "-"}</TableCell>
-                </TableRow>
-              ))}
+              {calls.map((call) => {
+                const formattedDate = formatHistoryDate(call.createdAt);
+
+                return (
+                  <TableRow key={call.id}>
+                    <TableCell className="min-w-32">
+                      <Link className="inline-flex flex-col underline" href={`/history/${call.id}`}>
+                        <span className="whitespace-nowrap">{formattedDate.date}</span>
+                        {formattedDate.time ? <span className="whitespace-nowrap">{formattedDate.time}</span> : null}
+                      </Link>
+                    </TableCell>
+                    <TableCell>{call.lead.businessName ?? "Untitled"}</TableCell>
+                    <TableCell>{call.lead.phoneNumber}</TableCell>
+                    <TableCell>
+                      <Badge variant="secondary">{getHistoryOutcomeLabel(call)}</Badge>
+                    </TableCell>
+                    <TableCell>{call.lead.niche ?? "-"}</TableCell>
+                    <TableCell>{call.lead.leadList.name}</TableCell>
+                    <TableCell className="max-w-xs whitespace-pre-wrap break-words">{getHistoryNote(call)}</TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         </CardContent>

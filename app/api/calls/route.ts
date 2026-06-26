@@ -65,6 +65,7 @@ export async function GET(request: NextRequest) {
       },
       recording: true,
       transcript: true,
+      notes: true,
     },
     orderBy: { createdAt: "desc" },
   });
