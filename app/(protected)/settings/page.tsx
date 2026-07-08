@@ -148,44 +148,44 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-4 md:grid-cols-2">
-            <div className="rounded-lg border border-slate-200 p-3 text-sm">
+            <div className="rounded-lg border border-slate-200 p-3 text-sm dark:border-slate-700 dark:bg-slate-950/40">
               <p className="font-medium">TELNYX_CONNECTION_ID</p>
-              <p className="text-slate-600">{runtimeConfig?.telnyxConnectionConfigured ? "Configured" : "Not configured"}</p>
+              <p className="text-slate-600 dark:text-slate-300">{runtimeConfig?.telnyxConnectionConfigured ? "Configured" : "Not configured"}</p>
             </div>
-            <div className="rounded-lg border border-slate-200 p-3 text-sm">
+            <div className="rounded-lg border border-slate-200 p-3 text-sm dark:border-slate-700 dark:bg-slate-950/40">
               <p className="font-medium">TELNYX_FROM_NUMBER</p>
-              <p className="text-slate-600">{runtimeConfig?.telnyxFromNumber ?? "Not configured"}</p>
-              <p className="mt-2 text-xs text-slate-500">Used as caller ID for Telnyx Call Control outbound calls.</p>
+              <p className="text-slate-600 dark:text-slate-300">{runtimeConfig?.telnyxFromNumber ?? "Not configured"}</p>
+              <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Used as caller ID for Telnyx Call Control outbound calls.</p>
             </div>
           </div>
 
           <div className="grid gap-4 md:grid-cols-2">
-            <div className="flex items-center justify-between rounded-lg border border-slate-200 p-3">
+            <div className="flex items-center justify-between rounded-lg border border-slate-200 p-3 dark:border-slate-700 dark:bg-slate-950/40">
               <div>
                 <p className="font-medium">Enable recording</p>
-                <p className="text-sm text-slate-600">Store native Telnyx recordings and transcripts for connected calls</p>
+                <p className="text-sm text-slate-600 dark:text-slate-300">Store native Telnyx recordings and transcripts for connected calls</p>
               </div>
               <Switch
                 checked={settings.enableRecording}
                 onCheckedChange={(checked) => setSettings((prev) => (prev ? { ...prev, enableRecording: checked } : prev))}
               />
             </div>
-            <div className="rounded-lg border border-slate-200 p-3 text-sm">
+            <div className="rounded-lg border border-slate-200 p-3 text-sm dark:border-slate-700 dark:bg-slate-950/40">
               <p className="font-medium">Outbound calling</p>
-              <p className="text-slate-600">Backend Call Control over the configured Telnyx connection.</p>
-              <p className="mt-2 text-xs text-slate-500">Voicemail detection is enabled with `detect_beep`.</p>
+              <p className="text-slate-600 dark:text-slate-300">Backend Call Control over the configured Telnyx connection.</p>
+              <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Voicemail detection is enabled with `detect_beep`.</p>
             </div>
           </div>
 
-          <div className="rounded-lg border border-slate-200 p-3 text-sm">
+          <div className="rounded-lg border border-slate-200 p-3 text-sm dark:border-slate-700 dark:bg-slate-950/40">
             <p className="font-medium">Telnyx Voice Webhook URL</p>
-            <p className="mt-2 break-all text-xs text-slate-500">Expected: {runtimeConfig?.telnyxExpectedVoiceWebhookUrl ?? "Not set"}</p>
+            <p className="mt-2 break-all text-xs text-slate-500 dark:text-slate-400">Expected: {runtimeConfig?.telnyxExpectedVoiceWebhookUrl ?? "Not set"}</p>
           </div>
 
-          <div className="space-y-3 rounded-lg border border-slate-200 p-3">
+          <div className="space-y-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700 dark:bg-slate-950/40">
             <div>
               <p className="font-medium">Locations</p>
-              <p className="text-sm text-slate-600">Use these to separate imported leads by state or market.</p>
+              <p className="text-sm text-slate-600 dark:text-slate-300">Use these to separate imported leads by state or market.</p>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row">
               <Input
@@ -208,13 +208,13 @@ export default function SettingsPage() {
               <div className="flex flex-wrap gap-2">
                 {settings.locations.map((location) => (
                   <span
-                    className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm"
+                    className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-950/70 dark:text-slate-100"
                     key={location}
                   >
                     {location}
                     <button
                       aria-label={`Remove ${location}`}
-                      className="text-slate-500 hover:text-red-700"
+                      className="text-slate-500 hover:text-red-700 dark:text-slate-400 dark:hover:text-red-300"
                       onClick={() => removeLocation(location)}
                       type="button"
                     >
@@ -272,7 +272,7 @@ export default function SettingsPage() {
 
           <div className="flex items-center gap-3">
             <Button loading={saving} onClick={() => void saveSettings()}>Save settings</Button>
-            {statusMessage ? <p className="text-sm text-slate-600">{statusMessage}</p> : null}
+            {statusMessage ? <p className="text-sm text-slate-600 dark:text-slate-300">{statusMessage}</p> : null}
           </div>
         </CardContent>
       </Card>
@@ -301,7 +301,7 @@ export default function SettingsPage() {
             </div>
           ) : null}
 
-          <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+          <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-950/70 dark:text-slate-300">
             Admin password is env-based in v1. To change it, update ADMIN_PASSWORD and restart the app.
           </div>
         </CardContent>
@@ -312,9 +312,9 @@ export default function SettingsPage() {
 
 function StatusRow({ label, ok }: { label: string; ok: boolean }) {
   return (
-    <div className="flex items-center justify-between rounded-md border border-slate-200 px-3 py-2">
+    <div className="flex items-center justify-between rounded-md border border-slate-200 px-3 py-2 dark:border-slate-700 dark:bg-slate-950/40">
       <span>{label}</span>
-      <span className={ok ? "text-emerald-700" : "text-amber-700"}>{ok ? "Ready" : "Needs attention"}</span>
+      <span className={ok ? "text-emerald-700 dark:text-emerald-300" : "text-amber-700 dark:text-amber-300"}>{ok ? "Ready" : "Needs attention"}</span>
     </div>
   );
 }

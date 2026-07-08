@@ -1438,10 +1438,10 @@ export default function QueuePage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3">
+      <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 dark:border-slate-700 dark:bg-slate-900/90 dark:text-slate-100">
         <div>
           <h1 className="text-xl font-semibold">Lead Queue / Calling Workspace</h1>
-          <p className="text-sm text-slate-600">Shortcuts: C call, N next lead, 1..8 outcomes, / focus notes</p>
+          <p className="text-sm text-slate-600 dark:text-slate-300">Shortcuts: C call, N next lead, 1..8 outcomes, / focus notes</p>
         </div>
         <div className="flex items-center gap-3">
           <div className="w-56">
@@ -1503,9 +1503,15 @@ export default function QueuePage() {
             {leads.length === 0 ? <p className="text-sm text-slate-500">No leads yet. Import a CSV first.</p> : null}
             {leads.map((lead) => (
               <button
-                className={`w-full rounded-md border px-3 py-2 text-left ${
-                  selectedLeadId === lead.id ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white hover:bg-slate-50"
-                } ${activeCallLeadId === lead.id && selectedLeadId !== lead.id ? "border-cyan-500 bg-cyan-50" : ""}`}
+                className={`w-full rounded-md border px-3 py-2 text-left transition-colors ${
+                  selectedLeadId === lead.id
+                    ? "border-slate-900 bg-slate-900 text-white dark:border-cyan-400 dark:bg-cyan-400 dark:text-slate-950"
+                    : "border-slate-200 bg-white text-slate-900 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-950/70 dark:text-slate-100 dark:hover:bg-slate-800"
+                } ${
+                  activeCallLeadId === lead.id && selectedLeadId !== lead.id
+                    ? "border-cyan-500 bg-cyan-50 dark:border-cyan-400 dark:bg-cyan-950/50"
+                    : ""
+                }`}
                 key={lead.id}
                 onClick={() => setSelectedLeadId(lead.id)}
                 type="button"
@@ -1673,7 +1679,7 @@ export default function QueuePage() {
                 ))}
               </div>
               {callMessage ? (
-                <p className={`text-xs ${manualDialState === "lead_hung_up" ? "font-semibold text-amber-900" : "text-slate-500"}`}>
+                <p className={`text-xs ${manualDialState === "lead_hung_up" ? "font-semibold text-amber-900 dark:text-amber-300" : "text-slate-500 dark:text-slate-400"}`}>
                   {callMessage}
                 </p>
               ) : null}
@@ -1684,7 +1690,7 @@ export default function QueuePage() {
               {latestAttempt?.recording?.downloadUrl ? (
                 <audio className="w-full" controls src={latestAttempt.recording.downloadUrl} />
               ) : (
-                <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
+                <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-950/70 dark:text-slate-300">
                   Recording pending or unavailable.
                 </p>
               )}

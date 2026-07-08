@@ -43,48 +43,51 @@ body {
   scrollbar-color: #475569 transparent;
 }
 
-@layer base {
-  .dark .text-slate-950,
+@layer utilities {
   .dark .text-slate-900,
   .dark .text-slate-800 {
-    color: #e2e8f0;
+    color: #e2e8f0 !important;
   }
 
   .dark .text-slate-700,
   .dark .text-slate-600 {
-    color: #cbd5e1;
+    color: #cbd5e1 !important;
   }
 
   .dark .text-slate-500,
   .dark .text-slate-400 {
-    color: #94a3b8;
+    color: #94a3b8 !important;
   }
 
   .dark .text-cyan-700 {
-    color: #67e8f9;
+    color: #67e8f9 !important;
   }
 
   .dark .bg-white,
   .dark .bg-white\/90,
   .dark .bg-white\/95 {
-    background-color: rgb(15 23 42 / 0.92);
+    background-color: rgb(15 23 42 / 0.92) !important;
   }
 
   .dark .bg-slate-50,
   .dark .bg-slate-50\/50,
   .dark .bg-slate-100 {
-    background-color: rgb(30 41 59 / 0.74);
+    background-color: rgb(30 41 59 / 0.74) !important;
   }
 
   .dark .border-slate-100,
   .dark .border-slate-200,
   .dark .border-slate-300 {
-    border-color: rgb(51 65 85 / 0.9);
+    border-color: rgb(51 65 85 / 0.9) !important;
   }
 
   .dark .hover\:bg-slate-50:hover,
   .dark .hover\:bg-slate-100:hover,
   .dark .hover\:bg-slate-200:hover {
-    background-color: rgb(51 65 85 / 0.74);
+    background-color: rgb(51 65 85 / 0.74) !important;
+  }
+
+  .dark .placeholder\:text-slate-500::placeholder {
+    color: #64748b !important;
   }
 }

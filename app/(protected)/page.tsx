@@ -93,10 +93,10 @@ export default async function DashboardPage() {
 
   return (
     <div className="space-y-4">
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <p className="text-xs uppercase tracking-[0.2em] text-cyan-700">Today</p>
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900/90 dark:text-slate-100 dark:shadow-slate-950/40">
+        <p className="text-xs uppercase tracking-[0.2em] text-cyan-700 dark:text-cyan-300">Today</p>
         <h2 className="text-2xl font-semibold tracking-tight">Outbound Calling Snapshot</h2>
-        <p className="mt-1 text-sm text-slate-600">Focused stats for your single-operator cold calling desk.</p>
+        <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">Focused stats for your single-operator cold calling desk.</p>
       </section>
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
@@ -121,17 +121,17 @@ export default async function DashboardPage() {
                 <Link
                   key={call.id}
                   href={`/history/${call.id}`}
-                  className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 hover:bg-slate-50"
+                  className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-950/40 dark:hover:bg-slate-800/80"
                 >
                   <div>
                     <p className="font-medium">
-                      {call.lead.businessName ?? "Untitled business"} <span className="text-slate-500">({call.lead.phoneNumber})</span>
+                      {call.lead.businessName ?? "Untitled business"} <span className="text-slate-500 dark:text-slate-400">({call.lead.phoneNumber})</span>
                     </p>
-                    <p className="text-xs text-slate-500">{call.lead.leadList.name}</p>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">{call.lead.leadList.name}</p>
                   </div>
                   <div className="text-right">
                     <Badge variant="secondary">{call.outcome ?? call.status}</Badge>
-                    <p className="mt-1 text-xs text-slate-500">{formatDistanceToNowStrict(call.createdAt, { addSuffix: true })}</p>
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{formatDistanceToNowStrict(call.createdAt, { addSuffix: true })}</p>
                   </div>
                 </Link>
               ))
@@ -145,16 +145,16 @@ export default async function DashboardPage() {
             <CardDescription>Jump straight into the next action.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2 text-sm">
-            <Link className="block rounded-md bg-slate-900 px-3 py-2 text-white" href="/queue">
+            <Link className="block rounded-md bg-slate-900 px-3 py-2 text-white transition-colors hover:bg-slate-800 dark:bg-cyan-400 dark:text-slate-950 dark:hover:bg-cyan-300" href="/queue">
               Open Calling Workspace
             </Link>
-            <Link className="block rounded-md bg-slate-100 px-3 py-2" href="/history?outcome=interested">
+            <Link className="block rounded-md bg-slate-100 px-3 py-2 text-slate-900 transition-colors hover:bg-slate-200 dark:bg-slate-950/70 dark:text-slate-100 dark:hover:bg-slate-800" href="/history?outcome=interested">
               View Interested Calls
             </Link>
-            <Link className="block rounded-md bg-slate-100 px-3 py-2" href="/history?outcome=callback">
+            <Link className="block rounded-md bg-slate-100 px-3 py-2 text-slate-900 transition-colors hover:bg-slate-200 dark:bg-slate-950/70 dark:text-slate-100 dark:hover:bg-slate-800" href="/history?outcome=callback">
               View Callback Outcomes
             </Link>
-            <Link className="block rounded-md bg-slate-100 px-3 py-2" href="/import">
+            <Link className="block rounded-md bg-slate-100 px-3 py-2 text-slate-900 transition-colors hover:bg-slate-200 dark:bg-slate-950/70 dark:text-slate-100 dark:hover:bg-slate-800" href="/import">
               Import New Lead List
             </Link>
           </CardContent>
