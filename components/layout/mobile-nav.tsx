@@ -18,13 +18,16 @@ export function MobileNav() {
   const pathname = usePathname();
 
   return (
-    <nav className="fixed inset-x-3 bottom-3 z-40 grid grid-cols-6 rounded-xl border border-slate-200 bg-white p-1 text-center text-[11px] shadow-lg md:hidden">
+    <nav className="fixed inset-x-3 bottom-3 z-40 grid grid-cols-6 rounded-xl border border-slate-200 bg-white p-1 text-center text-[11px] shadow-lg dark:border-slate-700 dark:bg-slate-950/95 dark:shadow-slate-950/50 md:hidden">
       {items.map((item) => {
         const active = pathname === item.href || (item.href !== "/" && pathname.startsWith(item.href));
 
         return (
           <Link
-            className={cn("rounded-lg px-2 py-2 text-slate-600", active && "bg-slate-900 text-white")}
+            className={cn(
+              "rounded-lg px-2 py-2 text-slate-600 dark:text-slate-300",
+              active && "bg-slate-900 text-white dark:bg-cyan-400 dark:text-slate-950",
+            )}
             href={item.href}
             key={item.href}
           >
