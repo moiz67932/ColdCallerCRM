@@ -13,6 +13,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  normalizeAndValidateSmsNumber,
+  renderSmsTemplate,
+  smsTemplates,
+  type SmsTemplateKey,
+} from "@/lib/messaging/sms";
 
 type FollowUp = {
   id: string;
@@ -60,6 +66,7 @@ type LeadItem = {
   niche?: string | null;
   website?: string | null;
   notes?: string | null;
+  customFieldsJson?: Record<string, unknown> | null;
   tags: string[];
   leadList?: {
     name: string;
@@ -76,6 +83,8 @@ type SettingsResponse = {
   runtimeConfig?: {
     telnyxManualDialFlow?: "browser_first" | "pstn_first";
     telnyxWebrtcCredentialConfigured?: boolean;
+    portiveDemoNumber?: string | null;
+    portiveBookingLink?: string | null;
   };
 };
 
@@ -171,6 +180,11 @@ const outcomeButtons: Array<{ outcome: string; label: string }> = [
 
 const keypadDigits = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
 
+type SmsSendStatus = {
+  tone: "neutral" | "success" | "error";
+  message: string;
+};
+
 const shortcutOutcomeMap: Record<string, string> = {
   "1": "answered",
   "2": "voicemail",
@@ -255,6 +269,31 @@ function getCallbackDate(preset: "today_later" | "tomorrow_morning" | "tomorrow_
   return tomorrow;
 }
 
+function getCustomLeadString(lead: LeadItem | null, keys: string[]) {
+  if (!lead?.customFieldsJson) {
+    return "";
+  }
+
+  for (const key of keys) {
+    const value = lead.customFieldsJson[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return "";
+}
+
+function getLeadSmsName(lead: LeadItem | null) {
+  return (
+    lead?.contactName?.trim() ||
+    getCustomLeadString(lead, ["owner_name", "ownerName", "name", "contact_name", "contactName"]) ||
+    lead?.businessName?.trim() ||
+    getCustomLeadString(lead, ["clinic_name", "clinicName", "business_name", "businessName"]) ||
+    ""
+  );
+}
+
 export default function QueuePage() {
   const searchParams = useSearchParams();
   const [leads, setLeads] = useState<LeadItem[]>([]);
@@ -278,6 +317,14 @@ export default function QueuePage() {
   const [savingOutcome, setSavingOutcome] = useState(false);
   const [savingNote, setSavingNote] = useState(false);
   const [deletingLeadId, setDeletingLeadId] = useState<string | null>(null);
+  const [smsTo, setSmsTo] = useState("");
+  const [smsName, setSmsName] = useState("");
+  const [smsTemplateKey, setSmsTemplateKey] = useState<SmsTemplateKey>("live_demo_number");
+  const [smsBody, setSmsBody] = useState("");
+  const [smsBodyEdited, setSmsBodyEdited] = useState(false);
+  const [smsConsent, setSmsConsent] = useState(false);
+  const [sendingSms, setSendingSms] = useState(false);
+  const [smsSendStatus, setSmsSendStatus] = useState<SmsSendStatus | null>(null);
   const locallyEndedAttemptIdsRef = useRef<Set<string>>(new Set());
   const promptedVoicemailAttemptIdsRef = useRef<Set<string>>(new Set());
   const telnyxClientRef = useRef<TelnyxWebRtcClient | null>(null);
@@ -296,6 +343,25 @@ export default function QueuePage() {
 
   const selectedLead = useMemo(() => leads.find((lead) => lead.id === selectedLeadId) ?? null, [leads, selectedLeadId]);
   const latestAttempt = selectedLead?.callAttempts[0] ?? null;
+
+  const selectedSmsLeadSeed = useMemo(
+    () => ({
+      id: selectedLead?.id ?? null,
+      phoneNumber: selectedLead?.phoneNumber ?? "",
+      name: getLeadSmsName(selectedLead),
+      clinicName: selectedLead?.businessName ?? getCustomLeadString(selectedLead, ["clinic_name", "clinicName"]),
+    }),
+    [selectedLead],
+  );
+  const smsTemplateValues = useMemo(
+    () => ({
+      name: smsName,
+      clinic_name: selectedSmsLeadSeed.clinicName,
+      demo_number: runtimeConfig?.portiveDemoNumber ?? "",
+      booking_link: runtimeConfig?.portiveBookingLink ?? "",
+    }),
+    [runtimeConfig?.portiveBookingLink, runtimeConfig?.portiveDemoNumber, selectedSmsLeadSeed.clinicName, smsName],
+  );
 
   const refreshLeads = useCallback(async (nextLocation = selectedLocation, resetSelection = false) => {
     setLoading(true);
@@ -387,6 +453,35 @@ export default function QueuePage() {
     didLoadSettingsRef.current = true;
     void loadSettings();
   }, []);
+
+  useEffect(() => {
+    const nextTemplateKey: SmsTemplateKey = "live_demo_number";
+
+    setSmsTo(selectedSmsLeadSeed.phoneNumber);
+    setSmsName(selectedSmsLeadSeed.name);
+    setSmsTemplateKey(nextTemplateKey);
+    setSmsBody(
+      selectedSmsLeadSeed.id
+        ? renderSmsTemplate(nextTemplateKey, {
+            name: selectedSmsLeadSeed.name,
+            clinic_name: selectedSmsLeadSeed.clinicName,
+            demo_number: runtimeConfig?.portiveDemoNumber ?? "",
+            booking_link: runtimeConfig?.portiveBookingLink ?? "",
+          })
+        : "",
+    );
+    setSmsBodyEdited(false);
+    setSmsConsent(false);
+    setSmsSendStatus(null);
+  }, [runtimeConfig?.portiveBookingLink, runtimeConfig?.portiveDemoNumber, selectedSmsLeadSeed]);
+
+  useEffect(() => {
+    if (smsTemplateKey === "custom" || smsBodyEdited) {
+      return;
+    }
+
+    setSmsBody(renderSmsTemplate(smsTemplateKey, smsTemplateValues));
+  }, [smsBodyEdited, smsTemplateKey, smsTemplateValues]);
 
   function selectWorkspaceLocation(value: string) {
     const nextLocation = value === "__all__" ? "" : value;
@@ -1410,6 +1505,88 @@ export default function QueuePage() {
     }
   }
 
+  function resetSmsTemplate(nextTemplateKey = smsTemplateKey, nextName = smsName) {
+    setSmsBody(renderSmsTemplate(nextTemplateKey, { ...smsTemplateValues, name: nextName }));
+    setSmsBodyEdited(false);
+    setSmsSendStatus(null);
+  }
+
+  function selectSmsTemplate(value: string) {
+    const nextTemplateKey = value as SmsTemplateKey;
+    setSmsTemplateKey(nextTemplateKey);
+    setSmsSendStatus(null);
+
+    if (nextTemplateKey !== "custom") {
+      setSmsBody(renderSmsTemplate(nextTemplateKey, smsTemplateValues));
+      setSmsBodyEdited(false);
+    }
+  }
+
+  async function sendSms() {
+    if (!selectedLead || sendingSms) {
+      return;
+    }
+
+    if (!smsConsent) {
+      setSmsSendStatus({ tone: "error", message: "Confirm permission to text this number before sending." });
+      return;
+    }
+
+    const normalizedTo = normalizeAndValidateSmsNumber(smsTo, "US");
+
+    if (!normalizedTo.ok) {
+      setSmsSendStatus({ tone: "error", message: normalizedTo.error });
+      return;
+    }
+
+    if (!smsBody.trim()) {
+      setSmsSendStatus({ tone: "error", message: "Enter a message before sending." });
+      return;
+    }
+
+    setSendingSms(true);
+    setSmsSendStatus({ tone: "neutral", message: "Sending SMS..." });
+
+    try {
+      const response = await fetch("/api/messages/sms/send", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          leadId: selectedLead.id,
+          to: normalizedTo.number,
+          body: smsBody,
+          templateKey: smsTemplateKey,
+          consentSource: "verbal_phone_call",
+          consentNote: "User checked permission box in calling workspace",
+        }),
+      });
+      const payload = (await response.json().catch(() => ({ error: "Could not send SMS" }))) as {
+        error?: string;
+        to?: string;
+        status?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Could not send SMS");
+      }
+
+      const sentTo = payload.to ?? normalizedTo.number;
+      setSmsTo(sentTo);
+      setSmsConsent(false);
+      setSmsSendStatus({ tone: "success", message: `SMS sent to ${sentTo}` });
+      await refreshLeads();
+    } catch (sendError) {
+      setSmsSendStatus({
+        tone: "error",
+        message: sendError instanceof Error ? sendError.message : "Could not send SMS",
+      });
+    } finally {
+      setSendingSms(false);
+    }
+  }
+
   const displayedCallStatus = manualDialState ?? latestAttempt?.rawSummaryJson?.progressState ?? latestAttempt?.status ?? "idle";
   const displayedCallStatusLabel = callStatusLabels[displayedCallStatus] ?? displayedCallStatus.replaceAll("_", " ");
   const now = Date.now();
@@ -1435,6 +1612,7 @@ export default function QueuePage() {
     !selectedLead ||
     !selectedLeadOwnsActiveCall ||
     (browserFirstFlow && (!softphoneReady || !runtimeConfig?.telnyxWebrtcCredentialConfigured));
+  const smsSendDisabled = sendingSms || !selectedLead || !smsConsent || !smsTo.trim() || !smsBody.trim();
 
   return (
     <div className="space-y-4">
@@ -1736,6 +1914,110 @@ export default function QueuePage() {
                   size="sm"
                 >
                   Set
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-700 dark:bg-slate-950/70">
+              <div className="flex items-center justify-between gap-2">
+                <Label className="text-sm font-semibold">Send SMS</Label>
+                <Button disabled={smsTemplateKey === "custom"} onClick={() => resetSmsTemplate()} size="sm" type="button" variant="ghost">
+                  Reset template
+                </Button>
+              </div>
+              <div className="grid gap-2">
+                <div className="grid gap-1.5">
+                  <Label className="text-xs" htmlFor="sms-to-number">
+                    To
+                  </Label>
+                  <Input
+                    id="sms-to-number"
+                    onChange={(event) => {
+                      setSmsTo(event.target.value);
+                      setSmsSendStatus(null);
+                    }}
+                    placeholder="+1 mobile number"
+                    value={smsTo}
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs" htmlFor="sms-template-name">
+                    Name
+                  </Label>
+                  <Input
+                    id="sms-template-name"
+                    onChange={(event) => {
+                      const nextName = event.target.value;
+                      setSmsName(nextName);
+                      setSmsSendStatus(null);
+                      if (!smsBodyEdited && smsTemplateKey !== "custom") {
+                        setSmsBody(renderSmsTemplate(smsTemplateKey, { ...smsTemplateValues, name: nextName }));
+                      }
+                    }}
+                    placeholder="Name for template"
+                    value={smsName}
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs">Template</Label>
+                  <Select value={smsTemplateKey} onValueChange={selectSmsTemplate}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Choose template" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {smsTemplates.map((template) => (
+                        <SelectItem key={template.key} value={template.key}>
+                          {template.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs" htmlFor="sms-message-body">
+                    Message
+                  </Label>
+                  <Textarea
+                    className="min-h-32"
+                    id="sms-message-body"
+                    maxLength={1600}
+                    onChange={(event) => {
+                      setSmsBody(event.target.value);
+                      setSmsBodyEdited(true);
+                      setSmsSendStatus(null);
+                    }}
+                    value={smsBody}
+                  />
+                  <div className="flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
+                    <span>{smsBody.length}/1600 characters</span>
+                    <span>{smsTemplateKey === "custom" ? "Custom message" : smsBodyEdited ? "Edited" : "Template ready"}</span>
+                  </div>
+                </div>
+              </div>
+              <label className="flex items-start gap-2 text-xs text-slate-700 dark:text-slate-300">
+                <input
+                  checked={smsConsent}
+                  className="mt-0.5 h-4 w-4 rounded border-slate-300"
+                  onChange={(event) => setSmsConsent(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>I got permission to text this number on the call.</span>
+              </label>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Use only after the person agrees to receive the demo link by text.</p>
+              <div className="flex items-center justify-between gap-3">
+                <p
+                  className={`min-h-4 flex-1 text-xs ${
+                    smsSendStatus?.tone === "success"
+                      ? "text-emerald-600 dark:text-emerald-400"
+                      : smsSendStatus?.tone === "error"
+                        ? "text-red-600 dark:text-red-400"
+                        : "text-slate-500 dark:text-slate-400"
+                  }`}
+                >
+                  {smsSendStatus?.message ?? "Ready after permission is checked."}
+                </p>
+                <Button disabled={smsSendDisabled} loading={sendingSms} onClick={() => void sendSms()} size="sm" type="button">
+                  {sendingSms ? "Sending..." : smsSendStatus?.tone === "success" ? "Sent" : "Send SMS"}
                 </Button>
               </div>
             </div>

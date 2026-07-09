@@ -38,8 +38,10 @@ export async function GET(request: NextRequest) {
       telnyxConnectionConfigured: Boolean(env.TELNYX_CONNECTION_ID),
       telnyxWebrtcCredentialConfigured: Boolean(env.TELNYX_TELEPHONY_CREDENTIAL_ID),
       telnyxFromNumber: env.TELNYX_FROM_NUMBER ? `${env.TELNYX_FROM_NUMBER.slice(0, 5)}...` : null,
-      telnyxMessagingFromConfigured: Boolean(env.TELNYX_MESSAGING_FROM_NUMBER),
+      telnyxMessagingFromConfigured: Boolean(env.TELNYX_SMS_FROM_NUMBER || env.TELNYX_MESSAGING_FROM_NUMBER),
       telnyxManualDialFlow: env.TELNYX_MANUAL_DIAL_FLOW,
+      portiveDemoNumber: env.PORTIVE_DEMO_NUMBER ?? env.VITE_PORTIVE_DEMO_NUMBER ?? null,
+      portiveBookingLink: env.PORTIVE_BOOKING_LINK ?? env.VITE_PORTIVE_BOOKING_LINK ?? null,
       signatureVerificationConfigured:
         Boolean(env.TELNYX_PUBLIC_KEY) || env.TELNYX_SKIP_SIGNATURE_VERIFICATION === "true",
       telnyxExpectedVoiceWebhookUrl: expectedVoiceWebhookUrl,
