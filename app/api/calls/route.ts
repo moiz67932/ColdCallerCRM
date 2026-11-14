@@ -33,6 +33,7 @@ export async function GET(request: NextRequest) {
 
   const query = searchParams.get("q") ?? undefined;
   const outcome = searchParams.get("outcome") ?? undefined;
+  const technicalState = searchParams.get("technicalState") ?? undefined;
   const leadListId = searchParams.get("leadListId") ?? undefined;
   const niche = searchParams.get("niche") ?? undefined;
   const fromDate = searchParams.get("from") ?? undefined;
@@ -49,6 +50,7 @@ export async function GET(request: NextRequest) {
   const calls = await prisma.callAttempt.findMany({
     where: {
       outcome: normalizedOutcome,
+      technicalState: technicalState || undefined,
       createdAt:
         from || to
           ? {

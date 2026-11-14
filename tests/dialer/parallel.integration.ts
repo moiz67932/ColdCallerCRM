@@ -35,7 +35,7 @@ function invoke(action: string, session: string | null = null, extra: Record<str
 function setup() {
   fixture(); sql(`insert into public.leads(id,lead_list_id,phone_number,business_name,created_at) values('fourth','list','+12125550104','Fourth',now()-interval '3 days');
     insert into public.dialer_provider_verifications(id,config_fingerprint,connection_id,profile_id,account_channels,overflow_slots,rate_ceiling_cents,evidence,expires_at)
-    values('${verificationId}','controlled-fixture','connection','profile',9,3,1,'{"suite":"portive-parallel-v1","passed":true}',now()+interval '1 day') on conflict(id) do nothing;`);
+    values('${verificationId}','controlled-fixture','connection','profile',5,0,1,'{"suite":"portive-parallel-v1","passed":true}',now()+interval '1 day') on conflict(id) do nothing;`);
 }
 function start(extra: Record<string,unknown> = {}) {
   const s = invoke("start",null,extra);
@@ -54,11 +54,21 @@ function answer(s: string, id: string, result = "human_business") {
   event(s,id,"lead","call.machine.premium.detection.ended",{result});
 }
 
-test("new parallel migration applies on top of the Power schema", () => {
+test("parallel migrations apply on top of the Power schema and rerun without losing records", () => {
   sql(`create database ${dbName}`,"postgres");
-  for (const file of ["202604260001_colcaller_workstation.sql","202606240001_lead_locations.sql","202611130001_dial_sessions.sql","202611130002_parallel_engine.sql"]) {
+  for (const file of ["202604260001_colcaller_workstation.sql","202606240001_lead_locations.sql","202611130001_dial_sessions.sql","202611130002_parallel_engine.sql","202611140001_single_operator_collisions.sql"]) {
     sql(readFileSync(`supabase/migrations/${file}`,"utf8"));
   }
+  sql(`insert into public.dialer_provider_verifications(id,config_fingerprint,connection_id,profile_id,account_channels,overflow_slots,rate_ceiling_cents,evidence,expires_at)
+    values('44444444-4444-4444-8444-444444444444','rerun-marker','connection','profile',5,3,1,'{"suite":"portive-parallel-v1","passed":true}',now()+interval '1 day');
+    alter table public.dialer_provider_verifications drop constraint dialer_provider_verifications_overflow_slots_check;
+    alter table public.dialer_provider_verifications add constraint dialer_provider_verifications_overflow_slots_check check(overflow_slots >= 3)`);
+  for (const file of ["202611130002_parallel_engine.sql","202611140001_single_operator_collisions.sql"]) {
+    sql(readFileSync(`supabase/migrations/${file}`,"utf8"));
+  }
+  assert.equal(sql("select count(*) from public.dialer_provider_verifications where config_fingerprint='rerun-marker'"),"1");
+  sql("update public.dialer_provider_verifications set overflow_slots=0 where config_fingerprint='rerun-marker'");
+  sql("delete from public.dialer_provider_verifications where config_fingerprint='rerun-marker'");
 });
 test("no prospects are reserved until both provider answer and browser media acknowledgement", () => {
   setup(); const s=invoke("start").id; invoke("tick",s); assert.equal(sql("select count(*) from public.call_attempts"),"0");
@@ -76,21 +86,40 @@ test("first human selects one operator and cancels only ringing siblings", () =>
   assert.equal(sql("select count(*) from public.dial_commands where action='bridge'"),"1");
   assert.equal(sql("select count(*) from public.call_attempts where technical_state='canceled_after_winner'"),"3");
 });
+test("canceled leads are not dialed twice in-session and recycle in existing priority order next session", () => {
+  setup(); const s=start(), a=attempts(s); answer(s,a[0].id); event(s,a[0].id,"lead","call.bridged");
+  for (const sibling of a.slice(1)) event(s,sibling.id,"lead","call.hangup",{hangup_cause:"normal_clearing"});
+  event(s,a[0].id,"lead","call.hangup",{hangup_cause:"normal_clearing"});
+  sql(`select public.portive_save_disposition('${a[0].id}','${a[0].lead_id}','gatekeeper','Talked to receptionist',null,null)`);
+  invoke("tick",s); assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),"stopping");
+  event(s,null,"operator","call.hangup"); invoke("tick",s);
+  assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),"stopped");
+  sql("update public.app_settings set value_json=jsonb_build_object('at',now()) where key='dialer_watchdog_heartbeat'");
+  assert.equal(sql(`select count(*) from public.call_attempts where dial_session_id='${s}'`),"4");
+  assert.equal(sql(`select count(*) from public.call_attempts where dial_session_id='${s}' and technical_state='canceled_after_winner' and outcome is null`),"3");
+  const next=start();
+  assert.deepEqual(new Set(attempts(next).map((item: { lead_id: string })=>item.lead_id)),new Set(a.map((item: { lead_id: string })=>item.lead_id)));
+  assert.equal(sql(`select count(*) from public.call_attempts where lead_id in (${a.slice(1).map((item: { lead_id: string })=>`'${item.lead_id}'`).join(",")})`),"6");
+});
 test("carrier answer and voicemail never claim the primary operator", () => {
   setup(); const s=start(); const a=attempts(s); answer(s,a[0].id,"machine");
   assert.equal(sql(`select active_call_id is null from public.dial_sessions where id='${s}'`),"t");
   assert.equal(sql(`select outcome from public.call_attempts where id='${a[0].id}'`),"voicemail");
   answer(s,a[1].id); assert.equal(sql(`select active_call_id from public.dial_sessions where id='${s}'`),a[1].id);
 });
-test("two near-simultaneous human events produce exactly one bridge and staffed collision handling", async () => {
+test("two near-simultaneous answers produce one bridge and automatically hang up the collision", async () => {
   setup(); const s=start(); const a=attempts(s);
   for (const item of a.slice(0,2)) event(s,item.id,"lead","call.answered",{call_control_id:item.id});
   const run=promisify(execFile);
   await Promise.all(a.slice(0,2).map((item: { id: string }) => run("docker",["exec",container,"psql","-X","-qAt","-U","postgres","-d",dbName,"-v","ON_ERROR_STOP=1","-c",
     `select public.portive_parallel_event('${s}','${item.id}','lead','call.machine.premium.detection.ended','{"result":"human_business"}',now(),'${crypto.randomUUID()}')`])));
   assert.equal(sql("select count(*) from public.dial_commands where action='bridge'"),"1");
-  assert.equal(sql("select count(*) from public.dial_commands where action='overflow'"),"1");
+  assert.equal(sql(`select count(*) from public.dial_commands where action='hangup' and attempt_id in ('${a[0].id}','${a[1].id}')`),"1");
   assert.equal(sql("select count(*) from public.call_attempts where technical_state='answer_collision'"),"1");
+  const winner=sql(`select active_call_id from public.dial_sessions where id='${s}'`);
+  assert([a[0].id,a[1].id].includes(winner));
+  assert.equal(sql(`select ended_at is null from public.call_attempts where id='${winner}'`),"t");
+  assert.equal(sql(`select count(*) from public.dial_commands where action='hangup' and attempt_id='${winner}'`),"0");
 });
 test("duplicate human events do not duplicate bridge commands", () => {
   setup(); const s=start(), a=attempts(s); answer(s,a[0].id); const key=crypto.randomUUID();
@@ -98,15 +127,17 @@ test("duplicate human events do not duplicate bridge commands", () => {
   event(s,a[0].id,"lead","call.machine.premium.detection.ended",{result:"human_business"},key);
   assert.equal(sql("select count(*) from public.dial_commands where action='bridge'"),"1");
 });
-test("unknown AMD routes to overflow immediately without inventing human or voicemail", () => {
+test("unknown AMD ends the answered call and pauses without inventing a disposition", () => {
   setup(); const s=start(), a=attempts(s); answer(s,a[0].id,"not_sure");
   const row=attempts(s)[0]; assert.equal(row.answer_classification,"unknown"); assert.equal(row.outcome,null);
-  assert.equal(row.overflow_state,"requested");
+  assert.equal(row.technical_state,"answer_unknown");
+  assert.equal(sql(`select count(*) from public.dial_commands where action='hangup' and attempt_id='${a[0].id}'`),"1");
 });
-test("classification deadline is enforced by the server worker", () => {
+test("classification deadline ends an unknown answer and pauses the session", () => {
   setup(); const s=start(), a=attempts(s); event(s,a[0].id,"lead","call.answered",{call_control_id:a[0].id});
   sql(`update public.call_attempts set classification_deadline_at=now()-interval '1 second' where id='${a[0].id}'`); invoke("tick",s);
-  assert.equal(sql(`select overflow_state from public.call_attempts where id='${a[0].id}'`),"requested");
+  assert.equal(sql(`select technical_state from public.call_attempts where id='${a[0].id}'`),"answer_unknown");
+  assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),"paused");
 });
 test("no answer on all four advances to another eligible batch", () => {
   setup(); const s=start(); sql("insert into public.leads(id,lead_list_id,phone_number,business_name) values('next','list','+12125550105','Next')");
@@ -136,14 +167,15 @@ test("late terminal events cannot reactivate a completed call", () => {
   setup(); const s=start(), a=attempts(s); event(s,a[0].id,"lead","call.hangup",{hangup_cause:"timeout"});
   event(s,a[0].id,"lead","call.ringing"); assert.equal(attempts(s)[0].technical_state,"no_answer");
 });
-test("late human evidence on a canceled non-winner is audited as a collision", () => {
+test("late human evidence on a canceled non-winner is audited without interrupting the winner", () => {
   setup(); const s=start(), a=attempts(s); answer(s,a[0].id); event(s,a[1].id,"lead","call.hangup");
   event(s,a[1].id,"lead","call.answered"); assert.equal(attempts(s)[1].technical_state,"answer_collision");
-  assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),"unsafe");
+  assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),"running");
 });
-test("browser expiry stops new reservations and routes answered legs to overflow", () => {
+test("browser expiry stops new reservations and ends the active prospect safely", () => {
   setup(); const s=start(), a=attempts(s); answer(s,a[0].id); sql(`update public.dial_sessions set heartbeat_at=now()-interval '11 seconds' where id='${s}'`); invoke("tick",s);
   assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),"unsafe"); assert.equal(attempts(s).length,4);
+  assert.equal(sql(`select count(*) from public.dial_commands where action='hangup' and attempt_id='${a[0].id}'`),"1");
 });
 test("one known business cannot occupy multiple concurrent lines", () => {
   setup(); sql("update public.leads set website='https://same-company.example/location' where id in ('first','second')");
@@ -153,9 +185,12 @@ test("suppression and future callbacks exclude destinations", () => {
   setup(); sql("insert into public.dial_suppressions values('+12125550101','DNC',now()); insert into public.follow_ups(lead_id,due_at,status,channel) values('second',now()+interval '1 day','open','call')");
   assert.equal(attempts(start()).length,2);
 });
-test("verified channel and spend limits are enforced inside the database", () => {
-  setup(); sql(`update public.dialer_provider_verifications set account_channels=5 where id='${verificationId}'`);
-  assert.throws(() => invoke("start"),/capacity/); sql(`update public.dialer_provider_verifications set account_channels=9 where id='${verificationId}'`);
+test("five provider channels cover four prospects and the operator without overflow staffing", () => {
+  setup(); assert.equal(sql(`select account_channels from public.dialer_provider_verifications where id='${verificationId}'`),"5");
+  assert.equal(attempts(start()).length,4);
+});
+test("spend ceiling remains enforced inside the database", () => {
+  setup();
   const s=start({maxSpendCents:31}); assert.equal(attempts(s),null);
 });
 test("two workers claim each provider command at most once", async () => {
@@ -214,21 +249,13 @@ test("a delayed machine result cannot hang up a human already claiming the opera
   assert.equal(sql(`select count(*) from public.dial_commands where action='hangup' and attempt_id='${a[0].id}'`),"0");
 });
 
-test("failed transfer leg never falsely ends the original answered leg", () => {
-  setup(); const s=start(),a=attempts(s); answer(s,a[0].id,"not_sure");
-  event(s,a[0].id,"overflow","call.hangup",{hangup_cause:"user_busy"});
-  assert.equal(sql(`select ended_at is null from public.call_attempts where id='${a[0].id}'`),"t");
-  assert.equal(sql("select count(*) from public.dial_commands where action='failure_playback'"),"1");
-  event(s,a[0].id,"lead","call.playback.ended");
-  assert.equal(sql(`select count(*) from public.dial_commands where command_key='${a[0].id}:failure-cleanup'`),"1");
-});
-test("overflow failure pauses further dialing while preserving the primary conversation", () => {
+test("answered collision hangup does not interrupt the primary conversation", () => {
   setup(); const s=start(),a=attempts(s);
   event(s,a[1].id,"lead","call.answered",{call_control_id:a[1].id});
   answer(s,a[0].id);event(s,a[0].id,"lead","call.bridged");
-  event(s,a[1].id,"overflow","call.hangup",{hangup_cause:"timeout"});invoke("tick",s);
+  event(s,a[1].id,"lead","call.hangup",{hangup_cause:"user_busy"});invoke("tick",s);
   assert.equal(sql(`select overflow_state is null from public.call_attempts where id='${a[0].id}'`),"t");
-  assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),"unsafe");
+  assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),"running");
 });
 test("Realtime failure pauses the scheduler without interrupting healthy operator audio", () => {
   setup();const s=start(),a=attempts(s);answer(s,a[0].id);event(s,a[0].id,"lead","call.bridged");

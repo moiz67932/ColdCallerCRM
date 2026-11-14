@@ -12,7 +12,7 @@ try {
     id:`lead-${index}`,leadListId:"list",businessName,phoneNumber:`+1212555010${index+1}`,createdAt:new Date().toISOString(),notes:`Notes for ${businessName}`,tags:[],followUps:[],callAttempts:[],leadList:{name:"Controlled list",sourceFileName:"fixture.csv"},
   }));
   let attempts=leads.map((lead,index)=>({id:`attempt-${index}`,lead_id:lead.id,status:"dialing",technical_state:"ringing",answer_classification:"unknown",started_at:new Date().toISOString(),ringing_at:new Date().toISOString(),ended_at:null,outcome:null,parallel_batch:1,was_bridged_to_operator:false,overflow_state:null,leads:{business_name:lead.businessName,phone_number:lead.phoneNumber,lead_lists:{name:"Controlled list"}}}));
-  const writes=[];const errors=[];
+  const writes=[];const errors=[];let historyUrl="";
   const page=await context.newPage();page.on("pageerror",error=>errors.push(error.message));
   await page.addInitScript(({controller})=>{
     sessionStorage.setItem("portive-controller",controller);
@@ -28,6 +28,7 @@ try {
       if(request.method()==="POST") { const data=request.postDataJSON();writes.push({path,...data}); if(data.action==="stop") session={...session,status:"stopping"};result={session,dispatch:false}; }
       else result={session,lists:[{id:"list",name:"Controlled list"}],capabilities:{parallel:true,parallelBlockers:[]}};
     } else if(path==="/api/leads") result={leads};
+    else if(path==="/api/calls") {historyUrl=request.url();result={calls:[{id:"attempt-0",status:"canceled",technicalState:"canceled_after_winner",outcome:null,createdAt:new Date().toISOString(),lead:{id:"lead-0",businessName:leads[0].businessName,phoneNumber:leads[0].phoneNumber,niche:"Aesthetics",leadList:{id:"list",name:"Controlled list"}}}]};}
     else if(/^\/api\/calls\//.test(path)) {
       const attempt=attempts.find(item=>item.id===path.split("/").pop());result={callAttempt:{...attempt,leadId:attempt.lead_id,rawSummaryJson:{progressState:attempt.was_bridged_to_operator?"bridged":"lead_ringing"}}};
       if(request.method()!=="GET") writes.push({path,...request.postDataJSON()});
@@ -44,7 +45,7 @@ try {
   assert.equal(await page.locator("[data-attempt-id]").count(),4);
   session={...session,active_call_id:"attempt-2",operator_leg_state:"bridged"};
   attempts=attempts.map((item,index)=>index===2?{...item,status:"connected",technical_state:"connected_to_operator",answer_classification:"human",was_bridged_to_operator:true}:item);
-  await emit(); await page.locator('[data-attempt-id="attempt-2"]').getByText(/CONNECTED/).waitFor();
+  await emit(); await page.locator('[data-attempt-id="attempt-2"]').getByText(/Connected to Operator/).waitFor();
   await page.waitForFunction(()=>document.querySelector("#notes-box")?.value==="Notes for Bella Injectables");
   await page.locator("#notes-box").fill("Manager Sara will call back");await page.getByRole("button",{name:"Save note",exact:true}).click();
   assert(writes.some(item=>item.path==="/api/leads/lead-2/notes"&&item.callAttemptId==="attempt-2"));
@@ -54,7 +55,13 @@ try {
   await page.getByRole("button",{name:"Stop Session",exact:true}).click();
   assert(writes.some(item=>item.action==="stop"));
   assert(!writes.some(item=>item.path==="/api/calls/attempt-2"));
+  await page.goto("/history");
+  await page.getByRole("combobox").nth(0).click();
+  await page.getByRole("option",{name:"Canceled After Winner"}).click();
+  await page.getByRole("link",{name:"Sunset Aesthetics"}).waitFor();
+  assert(historyUrl.includes("technicalState=canceled_after_winner"));
+  assert.equal(await page.getByRole("link",{name:"Sunset Aesthetics"}).getAttribute("href"),"/queue?leadId=lead-0");
   assert.deepEqual(errors,[]);
   await page.screenshot({path:"/tmp/portive-parallel-cards.png",fullPage:true});
-  console.log("PASS: four SSE-fed cards; only winner connected; matching lead/notes selected; notes and live callback use winner ID; Stop does not send prospect hangup; zero page errors. No real telephony tested.");
+  console.log("PASS: four SSE-fed cards; only winner connected; winner focus, notes and callback use its lead ID; Stop preserves the prospect; Canceled After Winner filter links back to its lead; zero page errors. No real telephony tested.");
 } finally {await context.close();await browser.close();}

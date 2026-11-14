@@ -2,6 +2,19 @@
 import { useEffect, useState } from "react";
 import type { ParallelAttempt } from "@/lib/dialer/types";
 
+export function parallelStatusLabel(state: string, connected: boolean) {
+  if (connected) return "Connected to Operator";
+  if (state === "ringing" || state === "initiating" || state === "reserved") return "Ringing";
+  if (state === "carrier_answered") return "Classifying Answer";
+  if (state === "human_detected" || state === "bridging") return "Human Answered";
+  if (state === "machine_detected") return "Voicemail";
+  if (state === "no_answer") return "No Answer";
+  if (state === "canceled_after_winner") return "Canceled After Winner";
+  if (state === "answer_collision") return "Answer Collision";
+  if (state === "completed") return "Completed";
+  return state.replaceAll("_", " ");
+}
+
 export function ParallelLines({ attempts, winner, metrics }: { attempts: ParallelAttempt[]; winner?: string | null; metrics?: Record<string, number | null> }) {
   const [now, setNow] = useState(0);
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 250); return () => clearInterval(timer); }, []);
@@ -16,7 +29,7 @@ export function ParallelLines({ attempts, winner, metrics }: { attempts: Paralle
         return <div key={attempt.id} data-attempt-id={attempt.id} className={`min-w-0 rounded border p-2 text-xs ${connected ? "border-green-500 bg-green-500/10" : review ? "border-orange-500 bg-orange-500/10" : attempt.technical_state === "failed" ? "border-red-500" : attempt.ended_at ? "border-slate-500 opacity-70" : "border-blue-400"}`}>
           <p className="truncate font-semibold">LINE {index + 1} · {attempt.leads.business_name ?? "Business"}</p>
           <p>{attempt.leads.phone_number}</p><p className="truncate">{attempt.leads.lead_lists.name}</p>
-          <p className="mt-1 font-medium">{connected ? "CONNECTED" : attempt.technical_state.replaceAll("_", " ")} · {Math.floor(seconds / 60).toString().padStart(2,"0")}:{(seconds % 60).toString().padStart(2,"0")}</p>
+          <p className="mt-1 font-medium">{parallelStatusLabel(attempt.technical_state, connected)} · {Math.floor(seconds / 60).toString().padStart(2,"0")}:{(seconds % 60).toString().padStart(2,"0")}</p>
           <p>Classification: {attempt.answer_classification} {attempt.overflow_state ? `· Overflow: ${attempt.overflow_state}` : ""}</p>
           {attempt.outcome ? <p>Disposition: {attempt.outcome}</p> : null}
         </div>;

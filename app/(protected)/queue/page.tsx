@@ -476,6 +476,12 @@ export default function QueuePage() {
   }, [leads, requestedLeadId, dialSession?.active_call_id]);
 
   useEffect(() => {
+    if (!dialSession?.active_call_id) return;
+    const winner = parallelAttempts.find((attempt) => attempt.id === dialSession.active_call_id);
+    if (winner?.lead_id && leads.some((lead) => lead.id === winner.lead_id)) setSelectedLeadId(winner.lead_id);
+  }, [dialSession?.active_call_id, parallelAttempts, leads]);
+
+  useEffect(() => {
     if (didInitialLeadLoadRef.current) {
       return;
     }

@@ -80,7 +80,7 @@ The watchdog calls the authenticated internal sweep endpoint every five seconds.
 
 ## 6. Parallel status and remaining technical work
 
-**Live Parallel Mode is not implemented or production-ready.** The selector, 2/3/4-line setting, session/attempt schema and server/database release rejection exist. `DIALER_PARALLEL_ENABLED=true` cannot override the database gate. There is no pretend four-request batch, frontend microphone multiplexing, or automatic hangup of a second answered person.
+**Superseded status note:** the next migration, `202611140001_single_operator_collisions.sql`, implements automatic hangup and classification of a second answered call without requiring overflow staffing. Four-line dispatch, atomic winner selection and a single parked operator leg are implemented. Real Telnyx collision timing, media, and carrier behavior still require controlled provider verification before production use.
 
 The user's legal approval was accepted as supplied. The remaining release blockers are technical and campaign operational requirements:
 
@@ -142,7 +142,7 @@ Use only controlled, consenting test endpoints after applying the migration/conf
 4. Pause/resume during ringing and conversation; Stop Session must prohibit new attempts and retain reservations until provider termination. Refresh/disconnect the browser; check recovery and watchdog audit records, with no repeat dialing.
 5. Suppress a number, including a copy under another list; verify it is excluded. Check a future callback, invalid destination and out-of-hours lead. Replay duplicate/late webhooks in a controlled environment.
 6. Toggle Silent Ringback; confirm live conversation and microphone audio stay unchanged. Carrier early media may still be heard.
-7. Verify Parallel cannot start for 2, 3 or 4 lines through either the UI or authenticated API/database command.
+7. On a controlled list, verify Parallel starts four prospect legs plus one operator leg without overflow configuration. Verify second human answers are immediately classified as collisions and disconnected, the first call stays bridged, and canceled leads recycle in a later session.
 
 Live PSTN calling, real recording delivery, carrier early media, real device reconnection and actual human/machine routing remain unverified until these checks run against the configured account.
 

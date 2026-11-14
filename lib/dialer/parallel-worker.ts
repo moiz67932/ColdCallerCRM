@@ -100,10 +100,11 @@ async function execute(command: ParallelCommand) {
       response = await client.calls.actions.startPlayback(leg, { audio_url: session.parallel_options.failureAudioUrl, command_id: command.id, loop: 1 });
     } else if (command.action === "hangup" || command.action === "hangup_operator") {
       if (command.parameters.force !== "true" && command.action === "hangup" && !attempt?.ended_at && attempt?.answered_at && attempt.answer_classification !== "machine" && attempt.termination_reason) {
-        const { error: routeError } = await db.rpc("portive_overflow", { p_session: session.id, p_attempt: attempt.id, p_collision: attempt.answer_classification === "human" });
-        if (routeError) throw new Error(routeError.message);
-        await db.from("dial_commands").update({ state: "canceled" }).eq("id", command.id);
-        return;
+        const { error: collisionError } = await db.rpc("portive_answer_collision", { p_session: session.id, p_attempt: attempt.id });
+        if (collisionError) throw new Error(collisionError.message);
+        command.parameters.force = "true";
+        const { error: saveError } = await db.from("dial_commands").update({ parameters: command.parameters }).eq("id", command.id);
+        if (saveError) throw new Error(saveError.message);
       }
       const target = command.action === "hangup_operator" ? session.operator_call_control_id : leg;
       if (attempt?.ended_at) response = { alreadyEnded: true };
@@ -125,7 +126,10 @@ async function execute(command: ParallelCommand) {
       await db.from("call_attempts").update({ status: "failed", technical_state: "failed", ended_at: new Date().toISOString(), termination_reason: `provider_${status}: ${reason}` }).eq("id", command.attempt_id);
     }
     if (command.action === "bridge" && rejected && command.attempt_id) {
-      await db.rpc("portive_overflow", { p_session: command.session_id, p_attempt: command.attempt_id, p_collision: false });
+      const { data: failedAttempt } = await db.from("call_attempts").select("telnyx_call_control_id").eq("id", command.attempt_id).maybeSingle();
+      if (failedAttempt?.telnyx_call_control_id) {
+        try { await getTelnyxClient().calls.actions.hangup(failedAttempt.telnyx_call_control_id, { command_id: `${command.id}:bridge-failure-hangup` }); } catch { /* Unsafe session state below prevents new dialing. */ }
+      }
     }
     if (command.action === "overflow" && rejected && command.attempt_id) {
       await db.rpc("portive_failure_playback", { p_session: command.session_id, p_attempt: command.attempt_id, p_reason: reason });

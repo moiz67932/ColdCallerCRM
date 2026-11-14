@@ -39,6 +39,7 @@ type HistoryCall = {
     createdAt: string;
   }>;
   lead: {
+    id: string;
     businessName?: string | null;
     contactName?: string | null;
     phoneNumber: string;
@@ -76,6 +77,7 @@ export default function HistoryPage() {
   const [calls, setCalls] = useState<HistoryCall[]>([]);
   const [search, setSearch] = useState("");
   const [outcome, setOutcome] = useState("all");
+  const [technicalState, setTechnicalState] = useState("all");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [leadListId, setLeadListId] = useState("all");
@@ -103,6 +105,8 @@ export default function HistoryPage() {
     if (outcome !== "all") {
       searchParams.set("outcome", outcome);
     }
+
+    if (technicalState !== "all") searchParams.set("technicalState", technicalState);
 
     if (fromDate) {
       searchParams.set("from", fromDate);
@@ -133,7 +137,7 @@ export default function HistoryPage() {
     } finally {
       setLoading(false);
     }
-  }, [search, outcome, fromDate, toDate, leadListId, niche]);
+  }, [search, outcome, technicalState, fromDate, toDate, leadListId, niche]);
 
   useEffect(() => {
     void loadCalls();
@@ -147,8 +151,16 @@ export default function HistoryPage() {
           <CardDescription>Filter by date, outcome, lead list, and niche. Open any row for full call detail.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
             <Input placeholder="Search lead / phone" value={search} onChange={(event) => setSearch(event.target.value)} />
+            <Select value={technicalState} onValueChange={setTechnicalState}>
+              <SelectTrigger><SelectValue placeholder="Call state" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All call states</SelectItem>
+                <SelectItem value="canceled_after_winner">Canceled After Winner</SelectItem>
+                <SelectItem value="answer_collision">Answer Collision</SelectItem>
+              </SelectContent>
+            </Select>
             <Select value={outcome} onValueChange={setOutcome}>
               <SelectTrigger>
                 <SelectValue placeholder="Outcome" />
@@ -214,7 +226,7 @@ export default function HistoryPage() {
                         {formattedDate.time ? <span className="whitespace-nowrap">{formattedDate.time}</span> : null}
                       </Link>
                     </TableCell>
-                    <TableCell>{call.lead.businessName ?? "Untitled"}</TableCell>
+                    <TableCell><Link className="underline" href={`/queue?leadId=${encodeURIComponent(call.lead.id)}`}>{call.lead.businessName ?? "Untitled"}</Link></TableCell>
                     <TableCell>{call.lead.phoneNumber}</TableCell>
                     <TableCell>
                       <Badge variant="secondary">{getHistoryOutcomeLabel(call)}</Badge>

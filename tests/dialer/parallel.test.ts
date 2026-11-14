@@ -24,13 +24,13 @@ test("a feature flag alone cannot satisfy controlled-provider verification", () 
   assert(evidenceBlockers(null).length);
   assert(evidenceBlockers({suite:"portive-parallel-v1",passed:true}).length);
 });
-test("verification requires every audio, collision, and recovery scenario plus measured latency", () => {
-  const evidence={suite:"portive-parallel-v1",passed:true,scenarios:Object.fromEntries(controlledScenarios.map((key)=>[key,true])),max_answer_to_audio_ms:1000,provider_call_ids:["one","two","three","four"],failure_audio_sha256:"a".repeat(64),failure_audio_seconds:3};
+test("verification requires first-answer, collision-hangup, and recovery scenarios plus measured audio latency", () => {
+  const evidence={suite:"portive-parallel-v1",passed:true,scenarios:Object.fromEntries(controlledScenarios.map((key)=>[key,true])),max_answer_to_audio_ms:1000,provider_call_ids:["one","two","three","four"]};
   assert.deepEqual(evidenceBlockers(evidence),[]);
   assert(evidenceBlockers({...evidence,max_answer_to_audio_ms:2000}).length);
   assert(evidenceBlockers({...evidence,scenarios:{}}).length);
 });
-test("verification binds to caller, connection, credential and overflow configuration", () => {
-  assert.equal(parallelFingerprint({connection:"a",overflow:"b"}),parallelFingerprint({overflow:"b",connection:"a"}));
+test("verification binds to caller, connection, credential and webhook configuration", () => {
+  assert.equal(parallelFingerprint({connection:"a",caller:"b"}),parallelFingerprint({caller:"b",connection:"a"}));
   assert.notEqual(parallelFingerprint({connection:"a"}),parallelFingerprint({connection:"b"}));
 });

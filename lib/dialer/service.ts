@@ -4,7 +4,6 @@ import { getOutboundCallerId, getTelnyxManualDialFlow } from "@/lib/telnyx/helpe
 import { hangupAttemptLegs } from "@/lib/telnyx/call-flow";
 import type { DialSession, SessionCommandResult } from "./types";
 import { parallelReadiness } from "./parallel-readiness";
-import { parallelConfiguration } from "./parallel-readiness";
 import type { ParallelOptions } from "./parallel-policy";
 
 export function dialerCapabilities() {
@@ -27,15 +26,14 @@ export async function sessionCommand(input: {
     const starting = input.action === "start" || input.action === "resume";
     const readiness = starting ? await parallelReadiness(true) : null;
     if (readiness && !readiness.enabled) throw new Error(readiness.blockers.join(" "));
-    if (starting && readiness!.channels < 2 * (input.maxLines ?? existing?.max_lines ?? 4) + 1) throw new Error("Verified channels must cover prospect, operator and overflow transfer legs");
+    if (starting && readiness!.channels < (input.maxLines ?? existing?.max_lines ?? 4) + 1) throw new Error("Verified channels must cover each prospect line and the operator leg");
     if (starting && readiness!.availableCreditCents < (input.options?.maxSpendCents ?? (Number(existing?.parallel_options?.maxSpendCents) || 5000))) throw new Error("Requested session spend exceeds provider available credit");
     const { data, error } = await getSupabaseAdmin().rpc("portive_parallel_command", {
       p_session: input.sessionId ?? null, p_controller: input.controllerId, p_action: input.action,
       p_ready: input.ready, p_list: input.listId ?? null, p_location: input.location ?? null,
       p_lines: input.maxLines ?? 4, p_timezone: input.timeZone ?? null, p_reviewed: input.reviewed ?? false,
       p_options: { ...input.options, verificationId: readiness?.verification?.id, fingerprint: readiness?.fingerprint,
-        operatorSipUri: readiness?.sipUri, callControlId: input.callControlId, transportReady: input.transportReady ?? true,
-        overflowDestination: parallelConfiguration().overflow, failureAudioUrl: parallelConfiguration().failureAudio },
+        operatorSipUri: readiness?.sipUri, callControlId: input.callControlId, transportReady: input.transportReady ?? true },
     });
     if (error) throw new Error(error.message);
     return { session: data, dispatch: false } as SessionCommandResult;

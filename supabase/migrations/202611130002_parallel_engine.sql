@@ -1,11 +1,11 @@
 begin;
-create table public.dialer_provider_verifications (
+create table if not exists public.dialer_provider_verifications (
   id uuid primary key default gen_random_uuid(),
   config_fingerprint text not null,
   connection_id text not null,
   profile_id text not null,
   account_channels integer not null check(account_channels >= 5),
-  overflow_slots integer not null check(overflow_slots >= 3),
+  overflow_slots integer not null check(overflow_slots >= 0),
   rate_ceiling_cents integer not null check(rate_ceiling_cents > 0),
   evidence jsonb not null,
   verified_at timestamptz not null default now(),
@@ -13,33 +13,38 @@ create table public.dialer_provider_verifications (
   check(evidence->>'suite' = 'portive-parallel-v1' and evidence->>'passed' = 'true'),
   check(expires_at > verified_at)
 );
+-- Refresh the original overflow constraint when upgrading an already-installed table.
+alter table public.dialer_provider_verifications
+  drop constraint if exists dialer_provider_verifications_overflow_slots_check;
+alter table public.dialer_provider_verifications
+  add constraint dialer_provider_verifications_overflow_slots_check check(overflow_slots >= 0);
 alter table public.dialer_provider_verifications enable row level security;
 revoke all on public.dialer_provider_verifications from anon,authenticated;
 grant all on public.dialer_provider_verifications to service_role;
 
 alter table public.dial_sessions
-  add column operator_call_control_id text,
-  add column operator_terminal_at timestamptz,
-  add column operator_leg_state text not null default 'disconnected',
-  add column browser_media_ready boolean not null default false,
-  add column parallel_batch integer not null default 0,
-  add column next_batch_at timestamptz not null default now(),
-  add column parallel_options jsonb not null default '{}',
-  add column verification_id uuid references public.dialer_provider_verifications(id),
-  add column reserved_cost_cents integer not null default 0;
+  add column if not exists operator_call_control_id text,
+  add column if not exists operator_terminal_at timestamptz,
+  add column if not exists operator_leg_state text not null default 'disconnected',
+  add column if not exists browser_media_ready boolean not null default false,
+  add column if not exists parallel_batch integer not null default 0,
+  add column if not exists next_batch_at timestamptz not null default now(),
+  add column if not exists parallel_options jsonb not null default '{}',
+  add column if not exists verification_id uuid references public.dialer_provider_verifications(id),
+  add column if not exists reserved_cost_cents integer not null default 0;
 alter table public.call_attempts
-  add column parallel_batch integer,
-  add column bridged_at timestamptz,
-  add column ringing_at timestamptz,
-  add column classification_deadline_at timestamptz,
-  add column overflow_call_control_id text,
-  add column overflow_state text,
-  add column failure_deadline_at timestamptz,
-  add column provider_billable_cost numeric,
-  add column provider_billable_seconds numeric;
-create index call_attempts_dial_session on public.call_attempts(dial_session_id,parallel_batch);
+  add column if not exists parallel_batch integer,
+  add column if not exists bridged_at timestamptz,
+  add column if not exists ringing_at timestamptz,
+  add column if not exists classification_deadline_at timestamptz,
+  add column if not exists overflow_call_control_id text,
+  add column if not exists overflow_state text,
+  add column if not exists failure_deadline_at timestamptz,
+  add column if not exists provider_billable_cost numeric,
+  add column if not exists provider_billable_seconds numeric;
+create index if not exists call_attempts_dial_session on public.call_attempts(dial_session_id,parallel_batch);
 
-create table public.dial_commands (
+create table if not exists public.dial_commands (
   id uuid primary key default gen_random_uuid(),
   command_key text not null unique,
   session_id text not null references public.dial_sessions(id),
@@ -110,13 +115,13 @@ begin
   return new;
 end $$;
 
-create function public.portive_enqueue(p_session text,p_attempt text,p_action text,p_key text,p_parameters jsonb default '{}')
+create or replace function public.portive_enqueue(p_session text,p_attempt text,p_action text,p_key text,p_parameters jsonb default '{}')
 returns void language sql set search_path=public as $$
   insert into public.dial_commands(session_id,attempt_id,action,command_key,parameters)
   values(p_session,p_attempt,p_action,p_key,p_parameters) on conflict(command_key) do nothing
 $$;
 
-create function public.portive_overflow(p_session text,p_attempt text,p_collision boolean)
+create or replace function public.portive_overflow(p_session text,p_attempt text,p_collision boolean)
 returns void language plpgsql set search_path=public as $$
 begin
   update public.call_attempts set technical_state=case when p_collision then 'answer_collision' else 'answer_unknown' end,
@@ -129,7 +134,20 @@ begin
   end if;
 end $$;
 
-create function public.portive_failure_playback(p_session text,p_attempt text,p_reason text) returns void language plpgsql set search_path=public as $$
+create or replace function public.portive_answer_collision(p_session text,p_attempt text)
+returns void language plpgsql set search_path=public as $$
+begin
+  update public.call_attempts set answer_classification='human',technical_state='answer_collision',
+    lost_race_or_abandoned=true,termination_reason=coalesce(termination_reason,'answer_collision'),
+    answered_at=coalesce(answered_at,now()),classification_deadline_at=null
+    where id=p_attempt and dial_session_id=p_session and ended_at is null;
+  if found then
+    perform public.portive_enqueue(p_session,p_attempt,'hangup',p_attempt||':cancel');
+    insert into public.dial_audit_events(session_id,attempt_id,event_type) values(p_session,p_attempt,'answer_collision_hangup');
+  end if;
+end $$;
+
+create or replace function public.portive_failure_playback(p_session text,p_attempt text,p_reason text) returns void language plpgsql set search_path=public as $$
 begin
   update public.call_attempts set overflow_state='failure_playback',failure_deadline_at=now()+interval '10 seconds',
     lost_race_or_abandoned=true,termination_reason='overflow_failed: '||p_reason where id=p_attempt and dial_session_id=p_session and ended_at is null and overflow_state<>'failure_playback';
@@ -142,14 +160,19 @@ end $$;
 revoke all on function public.portive_failure_playback(text,text,text) from public,anon,authenticated;
 grant execute on function public.portive_failure_playback(text,text,text) to service_role;
 
-create function public.portive_cancel_parallel(p_session text,p_reason text)
+create or replace function public.portive_cancel_parallel(p_session text,p_reason text)
 returns void language plpgsql set search_path=public as $$
 declare a public.call_attempts; s public.dial_sessions;
 begin
   select * into s from public.dial_sessions where id=p_session for update;
   for a in select * from public.call_attempts where dial_session_id=s.id and id is distinct from s.active_call_id and ended_at is null for update loop
-    if a.answered_at is not null and a.answer_classification <> 'machine' then
-      perform public.portive_overflow(s.id,a.id,a.answer_classification='human');
+    if a.answered_at is not null and a.answer_classification='human' and s.active_call_id is not null then
+      perform public.portive_answer_collision(s.id,a.id);
+    elsif a.answered_at is not null and a.answer_classification='unknown' and s.active_call_id is not null then
+      null; -- Wait briefly for AMD; the winner is already reserved and no new batch can start.
+    elsif a.answered_at is not null and a.answer_classification <> 'machine' then
+      update public.call_attempts set answer_classification='unknown',technical_state='answer_unknown',termination_reason=p_reason where id=a.id;
+      perform public.portive_enqueue(s.id,a.id,'hangup',a.id||':unknown-answer-hangup','{"force":"true"}');
     else
       update public.call_attempts set termination_reason=p_reason,
         technical_state=case when p_reason='winner_selected' then 'canceled_after_winner' else 'canceled_before_answer' end where id=a.id;
@@ -158,7 +181,7 @@ begin
   end loop;
 end $$;
 
-create function public.portive_parallel_command(
+create or replace function public.portive_parallel_command(
   p_session text,p_controller uuid,p_action text,p_ready boolean default false,
   p_list text default null,p_location text default null,p_lines integer default 4,p_timezone text default null,
   p_reviewed boolean default false,p_options jsonb default '{}'
@@ -170,8 +193,8 @@ begin
   if p_action='start' then
     select * into v from public.dialer_provider_verifications where id=(p_options->>'verificationId')::uuid and expires_at>now();
     if v.id is null or v.config_fingerprint is distinct from p_options->>'fingerprint' then raise exception 'Current provider verification evidence is missing'; end if;
-    if p_lines not between 2 and 4 or v.account_channels < 2*p_lines+1 or v.overflow_slots < p_lines-1 then
-      raise exception 'Verified provider/overflow capacity insufficient for prospect, operator and transfer legs'; end if;
+    if p_lines not between 2 and 4 or v.account_channels < p_lines+1 then
+      raise exception 'Verified provider capacity must cover prospect lines plus the operator leg'; end if;
     if not p_ready or not p_reviewed or p_timezone is null then raise exception 'Softphone, list review and timezone are required'; end if;
     perform now() at time zone p_timezone;
     if not exists(select 1 from public.app_settings where key='dialer_watchdog_heartbeat' and (value_json->>'at')::timestamptz>now()-interval '3 seconds') then
@@ -236,13 +259,16 @@ begin
     perform public.portive_cancel_parallel(s.id,'media_or_provider_failure');
     -- Failed media cannot preserve a usable operator conversation: route to staffed overflow.
     if s.active_call_id is not null and (not s.browser_media_ready or s.operator_terminal_at is not null) and exists(select 1 from public.call_attempts where id=s.active_call_id and ended_at is null) then
-      perform public.portive_overflow(s.id,s.active_call_id,false);
+      update public.dial_sessions set status='unsafe',reason='Operator media was lost; active prospect call is being ended safely' where id=s.id;
+      perform public.portive_enqueue(s.id,s.active_call_id,'hangup',s.active_call_id||':operator-media-lost','{"force":"true"}');
     end if;
     return to_jsonb(s);
   end if;
   for a in select * from public.call_attempts where dial_session_id=s.id and ended_at is null and classification_deadline_at<=now() and overflow_state is null loop
-    perform public.portive_overflow(s.id,a.id,false);
-    update public.dial_sessions set status='paused',reason='AMD deadline reached; unknown answer routed to live overflow' where id=s.id returning * into s;
+    update public.call_attempts set answer_classification='unknown',technical_state='answer_unknown',termination_reason='amd_deadline_unknown'
+      where id=a.id and ended_at is null;
+    perform public.portive_enqueue(s.id,a.id,'hangup',a.id||':unknown-answer-hangup','{"force":"true"}');
+    update public.dial_sessions set status='paused',reason='AMD classification was unknown; answered prospect was ended and the session paused' where id=s.id returning * into s;
     perform public.portive_cancel_parallel(s.id,'unknown_answer');
   end loop;
   if s.active_call_id is not null then
@@ -314,7 +340,7 @@ begin
   return to_jsonb(s);
 end $$;
 
-create function public.portive_parallel_event(p_session text,p_attempt text,p_role text,p_type text,p_payload jsonb,p_at timestamptz,p_event text)
+create or replace function public.portive_parallel_event(p_session text,p_attempt text,p_role text,p_type text,p_payload jsonb,p_at timestamptz,p_event text)
 returns void language plpgsql set search_path=public as $$
 declare s public.dial_sessions; a public.call_attempts; classification text; cause text;
 begin
@@ -354,8 +380,9 @@ begin
         if p_type='call.answered' or p_type like 'call.machine.%' and classification='human' then
           update public.call_attempts set answered_at=coalesce(answered_at,p_at),answer_classification=case when classification='human' then 'human' else answer_classification end,
             technical_state='answer_collision',lost_race_or_abandoned=true where id=a.id and technical_state='canceled_after_winner';
-          if found then update public.dial_sessions set status='unsafe',reason='Late answer evidence on a canceled non-winner; review collision' where id=s.id;
-            insert into public.dial_audit_events(session_id,attempt_id,event_type) values(s.id,a.id,'late_answer_collision'); end if;
+          if found then
+            insert into public.dial_audit_events(session_id,attempt_id,event_type) values(s.id,a.id,'late_answer_collision_hangup_already_confirmed');
+          end if;
         end if;
       elsif p_type='call.ringing' then
         update public.call_attempts set ringing_at=coalesce(ringing_at,p_at),technical_state='ringing' where id=a.id and answered_at is null;
@@ -364,23 +391,21 @@ begin
       elsif p_type='call.answered' then
         update public.call_attempts set answered_at=coalesce(answered_at,p_at),technical_state='carrier_answered',
           classification_deadline_at=least(now(),p_at)+interval '1 second' where id=a.id and answer_classification='unknown' and overflow_state is null;
-        if s.active_call_id is not null and s.active_call_id<>a.id and a.answer_classification<>'machine' then perform public.portive_overflow(s.id,a.id,false); end if;
       elsif p_type like 'call.machine.%' then
         update public.call_attempts set amd_result=p_payload->>'result' where id=a.id;
         if a.was_bridged_to_operator or a.answer_classification='human' then
           -- Never cut off an established conversation on a delayed classifier result.
           update public.call_attempts set raw_summary_json=coalesce(raw_summary_json,'{}')||jsonb_build_object('delayedAmdResult',p_payload->>'result') where id=a.id;
         elsif a.answer_classification='machine' and classification='human' then
-          update public.call_attempts set answer_classification='unknown',outcome=null,technical_state='answer_unknown' where id=a.id;
-          perform public.portive_overflow(s.id,a.id,false);
-          update public.dial_sessions set status='paused',reason='Conflicting AMD results routed to live overflow' where id=s.id;
+          update public.call_attempts set answer_classification='unknown',outcome=null,technical_state='answer_unknown',termination_reason='conflicting_amd_results' where id=a.id;
+          perform public.portive_enqueue(s.id,a.id,'hangup',a.id||':unknown-answer-hangup','{"force":"true"}');
+          update public.dial_sessions set status='paused',reason='Conflicting AMD results; answered call ended and the session paused' where id=s.id;
         elsif classification='machine' and a.overflow_state is null then
           update public.call_attempts set answer_classification='machine',technical_state='machine_detected',answered_at=coalesce(answered_at,p_at),outcome='voicemail',termination_reason='machine_detected',classification_deadline_at=null where id=a.id;
           perform public.portive_enqueue(s.id,a.id,'hangup',a.id||':machine');
         elsif classification='human' and a.overflow_state is not null then
-          update public.call_attempts set answer_classification='human',technical_state=case when s.active_call_id is not null and s.active_call_id<>a.id then 'answer_collision' else technical_state end,
-            lost_race_or_abandoned=(s.active_call_id is not null and s.active_call_id<>a.id) where id=a.id;
-          update public.dial_sessions set status='paused',reason='Human identified on live overflow leg' where id=s.id;
+          update public.call_attempts set answer_classification='human' where id=a.id;
+          if s.active_call_id is not null and s.active_call_id<>a.id then perform public.portive_answer_collision(s.id,a.id); end if;
         elsif classification='human' and a.overflow_state is null then
           update public.call_attempts set answered_at=coalesce(answered_at,p_at),answer_classification='human',technical_state='human_detected',classification_deadline_at=null where id=a.id;
           if s.active_call_id=a.id then null;
@@ -390,12 +415,12 @@ begin
             perform public.portive_enqueue(s.id,a.id,'bridge',s.id||':bridge:'||a.id);
             perform public.portive_cancel_parallel(s.id,'winner_selected');
           else
-            perform public.portive_overflow(s.id,a.id,true);
-            update public.dial_sessions set status='paused',reason='Human answer collision routed to live overflow' where id=s.id;
+            perform public.portive_answer_collision(s.id,a.id);
           end if;
         elsif classification='unknown' and a.overflow_state is null then
-          perform public.portive_overflow(s.id,a.id,false);
-          update public.dial_sessions set status='paused',reason='Unknown AMD answer routed to live overflow' where id=s.id;
+          update public.call_attempts set answer_classification='unknown',technical_state='answer_unknown',termination_reason='amd_unknown' where id=a.id;
+          perform public.portive_enqueue(s.id,a.id,'hangup',a.id||':unknown-answer-hangup','{"force":"true"}');
+          update public.dial_sessions set status='paused',reason='AMD classification was unknown; answered prospect was ended and the session paused' where id=s.id;
         end if;
       elsif p_type='call.bridged' then
         if a.overflow_state is not null then update public.call_attempts set overflow_state='connected' where id=a.id;
@@ -404,8 +429,8 @@ begin
             telnyx_agent_call_control_id=s.operator_call_control_id,raw_summary_json=coalesce(raw_summary_json,'{}')||'{"progressState":"bridged"}' where id=a.id;
           update public.dial_sessions set operator_leg_state='bridged' where id=s.id;
         else
-          update public.dial_sessions set status='unsafe',reason='Unexpected bridge on non-winning attempt' where id=s.id;
-          perform public.portive_overflow(s.id,a.id,true);
+          update public.dial_sessions set status='unsafe',reason='Unexpected bridge on non-winning attempt; disconnecting non-winning leg' where id=s.id;
+          perform public.portive_answer_collision(s.id,a.id);
         end if;
       elsif p_type='call.playback.ended' and a.overflow_state='failure_playback' then
         perform public.portive_enqueue(s.id,a.id,'hangup',a.id||':failure-cleanup','{"force":"true"}');
@@ -427,7 +452,7 @@ begin
   update public.workstation_telnyx_webhook_events set processed_at=now(),processing_error=null where event_id=p_event;
 end $$;
 
-create function public.portive_claim_parallel_commands(p_limit integer default 12)
+create or replace function public.portive_claim_parallel_commands(p_limit integer default 12)
 returns setof public.dial_commands language plpgsql set search_path=public as $$
 begin
   return query update public.dial_commands set state='executing',claimed_at=now() where id in (
@@ -437,11 +462,11 @@ end $$;
 
 revoke all on function public.portive_parallel_command(text,uuid,text,boolean,text,text,integer,text,boolean,jsonb),
   public.portive_parallel_event(text,text,text,text,jsonb,timestamptz,text),public.portive_claim_parallel_commands(integer),
-  public.portive_enqueue(text,text,text,text,jsonb),public.portive_overflow(text,text,boolean),public.portive_cancel_parallel(text,text)
+  public.portive_enqueue(text,text,text,text,jsonb),public.portive_overflow(text,text,boolean),public.portive_answer_collision(text,text),public.portive_cancel_parallel(text,text)
   from public,anon,authenticated;
 grant execute on function public.portive_parallel_command(text,uuid,text,boolean,text,text,integer,text,boolean,jsonb),
   public.portive_parallel_event(text,text,text,text,jsonb,timestamptz,text),public.portive_claim_parallel_commands(integer),
-  public.portive_enqueue(text,text,text,text,jsonb),public.portive_overflow(text,text,boolean),public.portive_cancel_parallel(text,text) to service_role;
+  public.portive_enqueue(text,text,text,text,jsonb),public.portive_overflow(text,text,boolean),public.portive_answer_collision(text,text),public.portive_cancel_parallel(text,text) to service_role;
 create or replace function public.portive_session_command(
   p_session_id text, p_controller uuid, p_action text, p_ready boolean default false,
   p_list_id text default null, p_location text default null, p_limit integer default 100,
@@ -555,7 +580,7 @@ begin
   return jsonb_build_object('session',to_jsonb(s),'dispatch',false);
 end $$;
 
-create function public.portive_parallel_snapshot(p_session text) returns jsonb language sql set search_path=public as $$
+create or replace function public.portive_parallel_snapshot(p_session text) returns jsonb language sql set search_path=public as $$
 select jsonb_build_object('session',to_jsonb(s),'attempts',coalesce((
   select jsonb_agg(to_jsonb(a)||jsonb_build_object('leads',jsonb_build_object('business_name',l.business_name,'phone_number',l.phone_number,'lead_lists',jsonb_build_object('name',ll.name))))
   from public.call_attempts a join public.leads l on l.id=a.lead_id join public.lead_lists ll on ll.id=l.lead_list_id
@@ -585,7 +610,7 @@ begin
     if not exists(select 1 from pg_publication_tables where pubname='supabase_realtime' and tablename='call_attempts') then alter publication supabase_realtime add table public.call_attempts; end if;
   end if;
 end $$;
-create function public.portive_parallel_transport_ready() returns boolean language sql set search_path=public as $$
+create or replace function public.portive_parallel_transport_ready() returns boolean language sql set search_path=public as $$
 select count(*)=2 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename in ('dial_sessions','call_attempts')
 $$;
 revoke all on function public.portive_parallel_transport_ready() from public,anon,authenticated;
