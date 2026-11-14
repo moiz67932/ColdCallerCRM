@@ -6,6 +6,7 @@ import { format } from "date-fns";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { historyNote, historyOutcomeLabel } from "@/lib/call-history";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -21,6 +22,11 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 type HistoryCall = {
   id: string;
   status: string;
+  answeredAt?: string | null;
+  technicalState?: string | null;
+  answerClassification?: string;
+  dialSessionId?: string | null;
+  parallelBatch?: number | null;
   outcome?: string | null;
   createdAt: string;
   startedAt?: string | null;
@@ -46,19 +52,11 @@ type HistoryCall = {
 };
 
 function getHistoryOutcomeLabel(call: HistoryCall) {
-  if (call.outcome) {
-    return call.outcome;
-  }
-
-  if (call.status === "voicemail_detected") {
-    return "voicemail";
-  }
-
-  return call.status;
+  return historyOutcomeLabel(call);
 }
 
 function getHistoryNote(call: HistoryCall) {
-  return call.lead.notes?.trim() || call.operatorNotes?.trim() || call.notes?.find((note) => note.body?.trim())?.body?.trim() || "-";
+  return historyNote(call);
 }
 
 function formatHistoryDate(value: string) {
@@ -166,6 +164,7 @@ export default function HistoryPage() {
                 <SelectItem value="bad_number">Bad number</SelectItem>
                 <SelectItem value="interested">Interested</SelectItem>
                 <SelectItem value="demo_requested">Demo requested</SelectItem>
+                <SelectItem value="already_have_system">Already have system</SelectItem>
               </SelectContent>
             </Select>
             <Select value={leadListId} onValueChange={setLeadListId}>
@@ -219,6 +218,8 @@ export default function HistoryPage() {
                     <TableCell>{call.lead.phoneNumber}</TableCell>
                     <TableCell>
                       <Badge variant="secondary">{getHistoryOutcomeLabel(call)}</Badge>
+                      <p className="mt-1 text-xs text-slate-500">{call.technicalState ?? call.status} · {call.answerClassification ?? "unknown"}</p>
+                      {call.parallelBatch != null ? <p className="text-xs text-slate-500">Parallel batch {call.parallelBatch} · session {call.dialSessionId?.slice(0,8)}</p> : null}
                     </TableCell>
                     <TableCell>{call.lead.niche ?? "-"}</TableCell>
                     <TableCell>{call.lead.leadList.name}</TableCell>

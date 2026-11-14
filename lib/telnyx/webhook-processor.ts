@@ -2,12 +2,14 @@ import type { CallStatus, JsonObject, TranscriptStatus } from "@/lib/db-types";
 
 import { logError, logInfo } from "@/lib/logger";
 import { prisma } from "@/lib/workstation-db";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { classifyAnswer } from "@/lib/telnyx/lifecycle";
+import { handleParallelWebhook } from "@/lib/dialer/parallel-webhooks";
 import {
   computeAttemptSummary,
   bridgeAttemptLegs,
   dialBrowserWebRtcLeg,
   hangupCallControlIds,
-  isCallTerminalStatus,
   isBrowserFirstManualDialFlow,
   startAttemptRecording,
 } from "@/lib/telnyx/call-flow";
@@ -49,6 +51,7 @@ async function updateWebhookProcessing(
       payloadJson: payload,
       processedAt: data.processedAt,
       processingError: data.processingError,
+      processing_started_at: null,
     },
   });
 }
@@ -244,10 +247,6 @@ async function updateAttemptProgressState(attempt: ExistingCallAttempt, progress
   });
 }
 
-function isHumanDetectionResult(result?: string | null) {
-  return result === "human" || result === "human_business" || result === "human_residence";
-}
-
 function isMachineDetectionResult(result?: string | null) {
   return result === "machine" || result === "beep_detected";
 }
@@ -355,12 +354,21 @@ async function updateAttemptStatus(attempt: ExistingCallAttempt, status: CallSta
 }
 
 async function markVoicemailDetected(attempt: ExistingCallAttempt, amdResult: string | null, event: TelnyxWebhookPayload) {
+  // A delayed/false AMD result must never cut off an established conversation.
+  if (attempt.endedAt || attempt.wasBridgedToOperator || attempt.answerClassification === "human" || attempt.outcome) {
+    await updateAttemptProgressState(attempt, getExistingSummary(attempt).progressState as string ?? "bridged", {
+      amdReviewRequired: true, delayedAmdResult: amdResult,
+    });
+    return attempt;
+  }
   const nextAttempt = await prisma.callAttempt.update({
     where: { id: attempt.id },
     data: {
       status: "voicemail_detected",
       outcome: "voicemail",
       amdResult: amdResult ?? attempt.amdResult,
+      answerClassification: "machine",
+      technicalState: "answered",
       answeredAt: attempt.answeredAt ?? getEventTimestamp(event),
     },
   });
@@ -395,8 +403,17 @@ async function handleAnsweredEvent(attempt: ExistingCallAttempt, event: TelnyxWe
   const role = getCallRole(syncedAttempt, getPayloadValue(payload, "call_control_id"), clientState?.role ?? null);
 
   if (role === "lead") {
+    if (syncedAttempt.endedAt) {
+      // An answer delivered after hangup is still answer evidence, never a reason to redial.
+      await prisma.callAttempt.update({ where: { id: syncedAttempt.id }, data: {
+        answeredAt: syncedAttempt.answeredAt ?? getEventTimestamp(event),
+        status: syncedAttempt.status === "canceled" ? "completed" : syncedAttempt.status,
+      } });
+      return;
+    }
     const connectedAttempt = await updateAttemptStatus(syncedAttempt, "connected", {
       answeredAt: syncedAttempt.answeredAt ?? getEventTimestamp(event),
+      technicalState: "answered",
     });
 
     await updateAttemptProgressState(connectedAttempt, "lead_answered");
@@ -441,6 +458,7 @@ async function handleMachineDetection(attempt: ExistingCallAttempt, event: Telny
         where: { id: syncedAttempt.id },
         data: {
           amdResult,
+          answerClassification: classifyAnswer(amdResult),
         },
       })
     : syncedAttempt;
@@ -450,7 +468,7 @@ async function handleMachineDetection(attempt: ExistingCallAttempt, event: Telny
     return;
   }
 
-  if (isHumanDetectionResult(amdResult)) {
+  if (classifyAnswer(amdResult) === "human" && !withAmdResult.endedAt) {
     const connectedAttempt = await updateAttemptStatus(withAmdResult, "connected", {
       answeredAt: withAmdResult.answeredAt ?? getEventTimestamp(event),
     });
@@ -486,6 +504,8 @@ async function handleBridgedEvent(attempt: ExistingCallAttempt, event: TelnyxWeb
 
   await updateAttemptStatus(syncedAttempt, "connected", {
     answeredAt: syncedAttempt.answeredAt ?? getEventTimestamp(event),
+    wasBridgedToOperator: true,
+    technicalState: "bridged",
   });
   await updateAttemptProgressState(syncedAttempt, "bridged");
 
@@ -645,9 +665,6 @@ function deriveOutcome(attempt: ExistingCallAttempt, payload: Record<string, unk
 async function handleHangupEvent(attempt: ExistingCallAttempt, event: TelnyxWebhookPayload) {
   const syncedAttempt = await syncAttemptFromEvent(attempt, event);
 
-  if (syncedAttempt.endedAt && (isCallTerminalStatus(syncedAttempt.status) || syncedAttempt.status === "voicemail_detected")) {
-    return;
-  }
 
   const payload = (event.data.payload ?? {}) as Record<string, unknown>;
   const clientState = decodeClientState(getPayloadValue(payload, "client_state"));
@@ -695,6 +712,9 @@ async function handleHangupEvent(attempt: ExistingCallAttempt, event: TelnyxWebh
       endedAt: getPayloadValue(payload, "end_time") ? new Date(getPayloadValue(payload, "end_time")!) : getEventTimestamp(event),
       durationSeconds: deriveDurationSeconds(payload),
       outcome: deriveOutcome(syncedAttempt, payload),
+      terminationReason: hangupCause ?? "unknown",
+      technicalState: syncedAttempt.answeredAt ? "completed" : hangupCause === "user_busy" ? "busy" :
+        hangupCause === "timeout" || hangupCause === "no_answer" ? "no_answer" : "failed",
     },
   });
   await updateAttemptProgressState(syncedAttempt, progressState, {
@@ -719,17 +739,30 @@ async function handleHangupEvent(attempt: ExistingCallAttempt, event: TelnyxWebh
 }
 
 export async function processVoiceWebhookEvent(webhookRowId: string, event: TelnyxWebhookPayload) {
+  if (await handleParallelWebhook(event)) return;
   const eventType = event.data.event_type;
   const payloadObj = event as unknown as JsonObject;
+  let claimedEvent = false;
 
   try {
     logTelnyxLifecycleEvent("Telnyx voice webhook event received by processor", webhookRowId, event, null, {
       lifecycleEvent: TELNYX_LIFECYCLE_EVENTS.has(eventType),
     });
 
-    const attempt = await findAttemptFromEvent(event);
+    let attempt = await findAttemptFromEvent(event);
+
+    const { data: claim, error: claimError } = await getSupabaseAdmin().rpc("portive_claim_voice_event", {
+      p_event_id: event.data.id, p_attempt_id: attempt?.id ?? null,
+    });
+    if (claimError) throw new Error(claimError.message);
+    if (claim === "processed") return;
+    if (claim !== "claimed") throw new Error("Webhook is already processing; retry delivery");
+    claimedEvent = true;
+    if (attempt) attempt = await prisma.callAttempt.findUnique({ where: { id: attempt.id } });
 
     if (!attempt) {
+      const state = decodeClientState(getPayloadValue((event.data.payload ?? {}) as Record<string, unknown>, "client_state"));
+      if (state?.attemptId) throw new Error("Call attempt not available yet; retry delivery");
       logTelnyxLifecycleEvent("Telnyx voice webhook event had no matching call attempt", webhookRowId, event, null, {
         attemptResolution: "not_found",
       });
@@ -738,6 +771,12 @@ export async function processVoiceWebhookEvent(webhookRowId: string, event: Teln
         processedAt: new Date(),
         processingError: null,
       });
+      return;
+    }
+
+    if (attempt.endedAt && ["call.initiated", "call.ringing", "call.bridged", "call.machine.detection.ended",
+      "call.machine.premium.detection.ended", "call.machine.greeting.ended", "call.machine.premium.greeting.ended"].includes(eventType)) {
+      await updateWebhookProcessing(webhookRowId, payloadObj, { processedAt: new Date(), processingError: null });
       return;
     }
 
@@ -849,10 +888,11 @@ export async function processVoiceWebhookEvent(webhookRowId: string, event: Teln
       error: message,
     });
 
-    await updateWebhookProcessing(webhookRowId, payloadObj, {
-      processedAt: new Date(),
-      processingError: message,
-    });
+    if (claimedEvent) await updateWebhookProcessing(webhookRowId, payloadObj, {
+        processedAt: undefined,
+        processingError: message,
+      });
+    throw error;
   }
 }
 

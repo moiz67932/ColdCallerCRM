@@ -1,6 +1,10 @@
 # ColdCaller CRM
 
+Current four-line Parallel engine, configuration and live-verification requirements: [Parallel Dialer](docs/PARALLEL-DIALER.md).
+
 Cold-calling CRM built with Next.js, Supabase, and Telnyx.
+
+The current Power Mode upgrade, migration, deployment commands, verification results and remaining parallel-routing blockers are documented in [docs/DIALER-UPGRADE.md](docs/DIALER-UPGRADE.md). That report supersedes the older call-flow description below. The default code path originates calls from the browser softphone; carrier answer is not proof of a human answer.
 
 ## What Changed
 

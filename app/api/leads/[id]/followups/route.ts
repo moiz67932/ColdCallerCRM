@@ -24,6 +24,10 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
 
   try {
     const payload = followUpSchema.parse(await request.json());
+    if (payload.callAttemptId) {
+      const attempt = await prisma.callAttempt.findUnique({ where: { id: payload.callAttemptId } });
+      if (!attempt || attempt.leadId !== leadId) return jsonError("Call attempt not found for this lead", 404);
+    }
 
     const followUp = await prisma.followUp.create({
       data: {

@@ -3,6 +3,10 @@ type CallAttempt = {
   status: string;
   outcome?: string | null;
   callbackAt?: Date | null;
+  answeredAt?: Date | null;
+  endedAt?: Date | null;
+  dispositionSavedAt?: Date | null;
+  technicalState?: string | null;
 };
 
 type FollowUp = {
@@ -67,9 +71,14 @@ function getOpenCallbackDueAt(lead: LeadWithRelations) {
 }
 
 export function sortLeadsForQueue(leads: LeadWithRelations[]) {
+  const queueAttempt = (lead: LeadWithRelations) => [...lead.callAttempts]
+    .filter((attempt) => !["dialing", "connected"].includes(attempt.status) &&
+      !["canceled_after_winner", "canceled_before_answer"].includes(attempt.technicalState ?? "") &&
+      !(attempt.answeredAt && !attempt.dispositionSavedAt && !attempt.outcome))
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
   return [...leads].sort((a, b) => {
-    const latestCallA = getLatestCallAttempt(a);
-    const latestCallB = getLatestCallAttempt(b);
+    const latestCallA = queueAttempt(a);
+    const latestCallB = queueAttempt(b);
 
     if (!latestCallA && latestCallB) {
       return -1;

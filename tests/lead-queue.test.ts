@@ -48,3 +48,21 @@ test("moves the most recently called lead to the very bottom", () => {
 
   assert.deepEqual(sorted.map((item) => item.id), ["uncalled", "called-earlier", "called-recently"]);
 });
+
+test("does not move an active or unfinished answered conversation down the queue", () => {
+  const active = lead("active", "2026-06-12T00:00:00Z", ["2026-06-13T10:00:00Z"]);
+  active.callAttempts[0].status = "connected";
+  assert.deepEqual(sortLeadsForQueue([lead("older", "2026-06-01T00:00:00Z"), active]).map((item) => item.id), ["active", "older"]);
+  active.callAttempts[0].status = "completed";
+  active.callAttempts[0].answeredAt = new Date("2026-06-13T10:00:00Z");
+  assert.equal(sortLeadsForQueue([active, lead("older", "2026-06-01T00:00:00Z")])[0].id, "active");
+  active.callAttempts[0].outcome = "gatekeeper";
+  assert.equal(sortLeadsForQueue([active, lead("older", "2026-06-01T00:00:00Z")])[1].id, "active");
+});
+
+test("parallel non-winners canceled by a winner retain future-session queue priority", () => {
+  const canceled=lead("canceled","2026-06-12T00:00:00Z",["2026-06-13T10:00:00Z"]);
+  canceled.callAttempts[0].status="canceled";
+  canceled.callAttempts[0].technicalState="canceled_after_winner";
+  assert.deepEqual(sortLeadsForQueue([lead("older","2026-06-01T00:00:00Z"),canceled]).map((item)=>item.id),["canceled","older"]);
+});

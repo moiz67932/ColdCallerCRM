@@ -6,6 +6,10 @@ import { ExternalLink, PhoneCall, PhoneOff, RefreshCcw, Trash2 } from "lucide-re
 import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { sendWebRtcDigit, silenceLocalRingback } from "@/lib/dialer/media";
+import { ParallelLines } from "@/components/dialer/parallel-lines";
+import { SessionControls } from "@/components/dialer/session-controls";
+import type { DialSession, SessionCommandResult, ParallelAttempt } from "@/lib/dialer/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,6 +33,9 @@ type FollowUp = {
 
 type CallAttempt = {
   id: string;
+  recordingConsentAt?: string | null;
+  answerClassification?: string;
+  technicalState?: string;
   status: string;
   outcome?: string | null;
   startedAt?: string | null;
@@ -56,6 +63,7 @@ type CallAttempt = {
 
 type LeadItem = {
   id: string;
+  leadListId?: string;
   createdAt: string;
   businessName?: string | null;
   contactName?: string | null;
@@ -296,10 +304,20 @@ function getLeadSmsName(lead: LeadItem | null) {
 
 export default function QueuePage() {
   const searchParams = useSearchParams();
+  const parkedOperatorCallIdRef = useRef<string | null>(null);
+  const [parallelAttempts, setParallelAttempts] = useState<ParallelAttempt[]>([]);
+  const [parallelMetrics, setParallelMetrics] = useState<Record<string, number | null>>({});
+  const [dialSession, setDialSession] = useState<DialSession | null>(null);
+  const [silentRingback, setSilentRingback] = useState(false);
+  const notificationHandlerRef = useRef(handleWebRtcNotification);
+  const finishedWebRtcCallsRef = useRef(new Set<string>());
+  const noteDraftsRef = useRef(new Map<string, { body: string; saved: string }>());
   const [leads, setLeads] = useState<LeadItem[]>([]);
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [chosenDisposition, setChosenDisposition] = useState("answered");
+  const selectedLeadIdRef = useRef<string | null>(null);
   const [notes, setNotes] = useState("");
   const [lastSavedNotes, setLastSavedNotes] = useState("");
   const [runtimeConfig, setRuntimeConfig] = useState<SettingsResponse["runtimeConfig"] | null>(null);
@@ -344,15 +362,12 @@ export default function QueuePage() {
   const selectedLead = useMemo(() => leads.find((lead) => lead.id === selectedLeadId) ?? null, [leads, selectedLeadId]);
   const latestAttempt = selectedLead?.callAttempts[0] ?? null;
 
-  const selectedSmsLeadSeed = useMemo(
-    () => ({
-      id: selectedLead?.id ?? null,
-      phoneNumber: selectedLead?.phoneNumber ?? "",
-      name: getLeadSmsName(selectedLead),
-      clinicName: selectedLead?.businessName ?? getCustomLeadString(selectedLead, ["clinic_name", "clinicName"]),
-    }),
-    [selectedLead],
-  );
+  const selectedSmsLeadSeed = {
+    id: selectedLead?.id ?? null,
+    phoneNumber: selectedLead?.phoneNumber ?? "",
+    name: getLeadSmsName(selectedLead),
+    clinicName: selectedLead?.businessName ?? getCustomLeadString(selectedLead, ["clinic_name", "clinicName"]),
+  };
   const smsTemplateValues = useMemo(
     () => ({
       name: smsName,
@@ -381,6 +396,13 @@ export default function QueuePage() {
         throw new Error(payload.error ?? "Failed to load leads");
       }
 
+      if (!resetSelection && selectedLeadId && (pendingAttemptIdRef.current || dialSession?.active_call_id)) {
+        setLeads((current) => {
+          const pinned = current.find((lead) => lead.id === selectedLeadId);
+          return pinned && !payload.leads!.some((lead) => lead.id === pinned.id) ? [pinned, ...payload.leads!] : payload.leads!;
+        });
+        return;
+      }
       setLeads(payload.leads);
 
       if ((resetSelection || !selectedLeadId) && payload.leads.length > 0) {
@@ -396,11 +418,43 @@ export default function QueuePage() {
     } finally {
       setLoading(false);
     }
-  }, [requestedLeadId, selectedLeadId, selectedLocation]);
+  }, [requestedLeadId, selectedLeadId, selectedLocation, dialSession?.active_call_id]);
+
+  useEffect(() => { selectedLeadIdRef.current = selectedLeadId; }, [selectedLeadId]);
 
   useEffect(() => {
     pendingAttemptIdRef.current = pendingAttemptId;
   }, [pendingAttemptId]);
+
+  const polledAttemptId = pendingAttemptId ?? dialSession?.active_call_id ??
+    (latestAttempt && isRecentActiveAttempt(latestAttempt) ? latestAttempt.id : null);
+  useEffect(() => {
+    const attemptId = polledAttemptId;
+    if (!attemptId) return;
+    let disposed = false;
+    let polling = false;
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const response = await fetch(`/api/calls/${attemptId}`, { cache: "no-store" });
+        const result = await response.json();
+        if (!disposed && response.ok && result.callAttempt) {
+          const attempt = result.callAttempt as CallAttempt & { leadId: string };
+          setLeads((items) => items.map((lead) => lead.id !== attempt.leadId ? lead : {
+            ...lead,
+            callAttempts: lead.callAttempts.some((item) => item.id === attempt.id)
+              ? lead.callAttempts.map((item) => item.id === attempt.id ? attempt : item)
+              : pendingAttemptIdRef.current === attempt.id ? [attempt, ...lead.callAttempts] : lead.callAttempts,
+          }));
+        }
+      } catch { /* Preserve the call reservation while the network recovers. */ }
+      finally { polling = false; }
+    };
+    void poll();
+    const interval = setInterval(() => { void poll(); }, 2000);
+    return () => { disposed = true; clearInterval(interval); };
+  }, [polledAttemptId]);
 
   useEffect(() => {
     function disconnectOnPageHide() {
@@ -416,10 +470,10 @@ export default function QueuePage() {
   }, []);
 
   useEffect(() => {
-    if (requestedLeadId && leads.some((lead) => lead.id === requestedLeadId)) {
+    if (!pendingAttemptIdRef.current && !dialSession?.active_call_id && requestedLeadId && leads.some((lead) => lead.id === requestedLeadId)) {
       setSelectedLeadId(requestedLeadId);
     }
-  }, [leads, requestedLeadId]);
+  }, [leads, requestedLeadId, dialSession?.active_call_id]);
 
   useEffect(() => {
     if (didInitialLeadLoadRef.current) {
@@ -473,7 +527,7 @@ export default function QueuePage() {
     setSmsBodyEdited(false);
     setSmsConsent(false);
     setSmsSendStatus(null);
-  }, [runtimeConfig?.portiveBookingLink, runtimeConfig?.portiveDemoNumber, selectedSmsLeadSeed]);
+  }, [runtimeConfig?.portiveBookingLink, runtimeConfig?.portiveDemoNumber, selectedSmsLeadSeed.id, selectedSmsLeadSeed.phoneNumber, selectedSmsLeadSeed.name, selectedSmsLeadSeed.clinicName]);
 
   useEffect(() => {
     if (smsTemplateKey === "custom" || smsBodyEdited) {
@@ -637,6 +691,8 @@ export default function QueuePage() {
       client?.off?.("telnyx.ready");
       client?.off?.("telnyx.error");
       client?.off?.("telnyx.notification");
+      client?.off?.("telnyx.socket.close");
+      client?.off?.("telnyx.socket.error");
       client?.disconnect();
     } catch {
       // The SDK can throw if the socket was already closed.
@@ -694,7 +750,40 @@ export default function QueuePage() {
       return;
     }
 
-    await logBrowserWebRtcEvent("telnyx_notification_received", {
+    if (notification.type === "callUpdate" && notification.call && (dialSession?.mode === "parallel" || Boolean(parkedOperatorCallIdRef.current && parkedOperatorCallIdRef.current === getWebRtcCallControlId(notification.call)))) {
+      const call = notification.call;
+      const controlId = getWebRtcCallControlId(call);
+      if (dialSession?.operator_call_control_id && controlId && controlId !== dialSession.operator_call_control_id) return;
+      if (controlId) parkedOperatorCallIdRef.current = controlId;
+      if (call.state === "ringing" && call.direction === "inbound") {
+        const key = call.id ?? controlId ?? "operator";
+        if (!answeredWebRtcCallIdsRef.current.has(key)) {
+          answeredWebRtcCallIdsRef.current.add(key);
+          webRtcCallRef.current = call;
+          await call.answer({ video: false });
+        }
+      } else if (["active", "answered", "held"].includes(call.state ?? "")) {
+        webRtcCallRef.current = call;
+        setWebrtcStatus("in-call");
+        // This is the one parked operator media stream, never one stream per prospect.
+        if (call.remoteStream && remoteAudioRef.current) {
+          remoteAudioRef.current.srcObject = call.remoteStream;
+          void remoteAudioRef.current.play().catch(() => setError("Enable speaker playback before parallel dialing"));
+        }
+      } else if (["hangup", "destroy", "purge", "done"].includes(call.state ?? "")) {
+        webRtcCallRef.current = null;
+        parkedOperatorCallIdRef.current = null;
+        setWebrtcStatus("ready");
+      }
+      return;
+    }
+    if (notification.call?.id && finishedWebRtcCallsRef.current.has(notification.call.id)) return;
+    const immediateCall = notification.call;
+    if (immediateCall?.remoteStream && ["active", "answered", "early", "held"].includes(immediateCall.state ?? "") && remoteAudioRef.current) {
+      if (remoteAudioRef.current.srcObject !== immediateCall.remoteStream) remoteAudioRef.current.srcObject = immediateCall.remoteStream;
+      void remoteAudioRef.current.play().catch(() => undefined);
+    }
+    void logBrowserWebRtcEvent("telnyx_notification_received", {
       notificationType: notification.type ?? null,
       hasCall: Boolean(notification.call),
       state: notification.call?.state ?? null,
@@ -704,10 +793,11 @@ export default function QueuePage() {
     });
 
     if (notification.error) {
+      webRtcReadyRef.current = false;
       const message = notification.error.message;
       setWebrtcStatus("error");
       setUiCallState("failed", message);
-      await logBrowserWebRtcEvent("webrtc_error", { error: message });
+      void logBrowserWebRtcEvent("webrtc_error", { error: message });
       return;
     }
 
@@ -716,13 +806,15 @@ export default function QueuePage() {
     }
 
     const call = notification.call;
+    if (call.id && finishedWebRtcCallsRef.current.has(call.id)) return;
+    if (webRtcCallRef.current?.id && call.id && webRtcCallRef.current.id !== call.id) return;
     webRtcCallRef.current = call;
 
     const browserCallControlId = getWebRtcCallControlId(call);
     setActiveWebRtcCallControlId(browserCallControlId);
     const browserCallKey = call.id ?? browserCallControlId ?? "unknown";
 
-    await logBrowserWebRtcEvent("webrtc_call_update", {
+    void logBrowserWebRtcEvent("webrtc_call_update", {
       browserCallId: call.id ?? null,
       browserCallControlId,
       browserLegId: call.telnyxIDs?.telnyxLegId ?? null,
@@ -731,7 +823,7 @@ export default function QueuePage() {
       state: call.state ?? null,
       previousState: call.prevState ?? null,
     });
-    await reportAttemptProgress(manualDialState ?? "browser_ready", {
+    void reportAttemptProgress(manualDialState ?? "browser_ready", {
       telnyxIds: call.telnyxIDs,
       debug: {
         notificationType: notification.type ?? null,
@@ -745,7 +837,7 @@ export default function QueuePage() {
       },
     });
 
-    await logBrowserWebRtcEvent("incoming_browser_call_state", {
+    void logBrowserWebRtcEvent("incoming_browser_call_state", {
       browserCallId: call.id ?? null,
       browserCallControlId,
       direction: call.direction ?? null,
@@ -753,7 +845,7 @@ export default function QueuePage() {
     });
 
     if (call.state === "ringing" && call.direction === "inbound") {
-      await logBrowserWebRtcEvent("incoming_webrtc_call_received", {
+      void logBrowserWebRtcEvent("incoming_webrtc_call_received", {
         browserCallId: call.id ?? null,
         browserCallControlId,
         direction: call.direction ?? null,
@@ -766,33 +858,33 @@ export default function QueuePage() {
       answeredWebRtcCallIdsRef.current.add(browserCallKey);
       setWebrtcStatus("answering");
       setUiCallState("browser_answered", "Answering incoming browser leg...");
-      await logBrowserWebRtcEvent("answering_incoming_browser_leg", {
+      void logBrowserWebRtcEvent("answering_incoming_browser_leg", {
         browserCallId: call.id ?? null,
         browserCallControlId,
       });
-      await logBrowserWebRtcEvent("incoming_webrtc_call_answer_called", {
+      void logBrowserWebRtcEvent("incoming_webrtc_call_answer_called", {
         browserCallId: call.id ?? null,
         browserCallControlId,
       });
       try {
         await call.answer({ video: false });
-        await logBrowserWebRtcEvent("browser_leg_answered", {
+        void logBrowserWebRtcEvent("browser_leg_answered", {
           browserCallId: call.id ?? null,
           browserCallControlId,
         });
-        await reportAttemptProgress("browser_answered", {
+        void reportAttemptProgress("browser_answered", {
           telnyxIds: call.telnyxIDs,
         });
       } catch (answerError) {
         const message = answerError instanceof Error ? answerError.message : "Failed to answer browser leg";
         setWebrtcStatus("error");
         setUiCallState("failed", message);
-        await logBrowserWebRtcEvent("browser_leg_answer_failed", {
+        void logBrowserWebRtcEvent("browser_leg_answer_failed", {
           browserCallId: call.id ?? null,
           browserCallControlId,
           error: message,
         });
-        await reportAttemptProgress("failed", {
+        void reportAttemptProgress("failed", {
           telnyxIds: call.telnyxIDs,
           clientError: message,
           status: "failed",
@@ -803,20 +895,20 @@ export default function QueuePage() {
 
     if (["active", "answered", "early", "held"].includes(call.state ?? "")) {
       setWebrtcStatus("in-call");
-      await logBrowserWebRtcEvent("incoming_webrtc_call_active", {
+      void logBrowserWebRtcEvent("incoming_webrtc_call_active", {
         browserCallId: call.id ?? null,
         browserCallControlId,
         state: call.state ?? null,
       });
       if (call.direction === "outbound" && call.state === "early") {
         setUiCallState("lead_ringing", "Lead is ringing...");
-        await reportAttemptProgress("lead_ringing", {
+        void reportAttemptProgress("lead_ringing", {
           telnyxIds: call.telnyxIDs,
         });
       }
       if (call.direction === "outbound" && ["active", "answered"].includes(call.state ?? "")) {
         setUiCallState("bridged", "Lead answered. Two-way audio should be live.");
-        await reportAttemptProgress("bridged", {
+        void reportAttemptProgress("bridged", {
           telnyxIds: call.telnyxIDs,
           status: "connected",
           answeredAt: new Date().toISOString(),
@@ -826,6 +918,7 @@ export default function QueuePage() {
     }
 
     if (["hangup", "destroy", "purge", "done"].includes(call.state ?? "")) {
+      if (call.id) finishedWebRtcCallsRef.current.add(call.id);
       const attemptId = pendingAttemptIdRef.current ?? latestAttempt?.id ?? null;
       const wasLocalHangup = attemptId ? locallyEndedAttemptIdsRef.current.has(attemptId) : false;
       const wasConnectedToLead =
@@ -833,7 +926,7 @@ export default function QueuePage() {
         manualDialState === "lead_answered" ||
         manualDialState === "browser_answered" ||
         Boolean(latestAttempt?.answeredAt);
-      await logBrowserWebRtcEvent("browser_leg_hangup", {
+      void logBrowserWebRtcEvent("browser_leg_hangup", {
         browserCallId: call.id ?? null,
         browserCallControlId,
         cause: call.cause ?? null,
@@ -862,7 +955,7 @@ export default function QueuePage() {
                 ? "Call ended."
               : "Call failed before audio was established.";
       setUiCallState(finalState, finalMessage);
-      await reportAttemptProgress(finalState, {
+      void reportAttemptProgress(finalState, {
         telnyxIds: call.telnyxIDs,
         status: finalState === "lead_hung_up" || finalState === "ended" ? undefined : "failed",
         clientError: finalState === "failed" ? (call.sipReason ?? call.cause ?? "Call failed") : undefined,
@@ -883,6 +976,9 @@ export default function QueuePage() {
     if (webRtcConnectPromiseRef.current) {
       return webRtcConnectPromiseRef.current;
     }
+    if (telnyxClientRef.current && !webRtcReadyRef.current) {
+      disconnectTelnyxWebRtcClient("reconnect_after_disconnect");
+    }
 
     const connectPromise = (async () => {
       if (!navigator.mediaDevices?.getUserMedia) {
@@ -891,7 +987,9 @@ export default function QueuePage() {
 
       setUiCallState("browser_connecting", "Connecting browser softphone...");
       setWebrtcStatus("checking microphone");
-      const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      let micStream: MediaStream;
+      try { micStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+      catch (error) { setMicPermission("denied"); throw error; }
       micStream.getTracks().forEach((track) => track.stop());
       setMicPermission("granted");
       await logBrowserWebRtcEvent("microphone_permission_granted");
@@ -959,13 +1057,27 @@ export default function QueuePage() {
 
             const message = event?.error?.message ?? "Telnyx WebRTC error";
             window.clearTimeout(timeout);
+            webRtcReadyRef.current = false;
             setWebrtcStatus("error");
             setUiCallState("failed", message);
             void logBrowserWebRtcEvent("webrtc_registration_error", { error: message });
             reject(new Error(message));
           })
           .on("telnyx.notification", (event) => {
-            void handleWebRtcNotification(event, generation);
+            void notificationHandlerRef.current(event, generation);
+          })
+          .on("telnyx.socket.close", () => {
+            if (generation !== webRtcClientGenerationRef.current) return;
+            webRtcReadyRef.current = false;
+            webRtcConnectPromiseRef.current = null;
+            setWebrtcStatus("offline");
+            setCallMessage("Softphone disconnected. Dialing is paused until it reconnects.");
+          })
+          .on("telnyx.socket.error", () => {
+            if (generation !== webRtcClientGenerationRef.current) return;
+            webRtcReadyRef.current = false;
+            webRtcConnectPromiseRef.current = null;
+            setWebrtcStatus("error");
           });
 
         client.connect();
@@ -979,6 +1091,8 @@ export default function QueuePage() {
     } catch (connectError) {
       if (webRtcConnectPromiseRef.current === connectPromise) {
         webRtcConnectPromiseRef.current = null;
+        webRtcReadyRef.current = false;
+        setWebrtcStatus("error");
       }
       if (connectError instanceof Error && connectError.message.toLowerCase().includes("microphone")) {
         setMicPermission("denied");
@@ -1007,9 +1121,12 @@ export default function QueuePage() {
       return;
     }
 
-    setNotes(selectedLead.notes ?? "");
-    setLastSavedNotes(selectedLead.notes ?? "");
-  }, [selectedLead]);
+    const draft = noteDraftsRef.current.get(selectedLead.id);
+    setNotes(draft?.body ?? selectedLead.notes ?? "");
+    setLastSavedNotes(draft?.saved ?? selectedLead.notes ?? "");
+    // Notes belong to the selected ID; provider polling must not replace an unsaved draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedLead?.id]);
 
   useEffect(() => {
     const progressState = latestAttempt?.rawSummaryJson?.progressState;
@@ -1040,7 +1157,7 @@ export default function QueuePage() {
 
     if (latestAttempt.status === "voicemail_detected") {
       setUiCallState("ended", "Voicemail detected. Call ended automatically.");
-      if (!promptedVoicemailAttemptIdsRef.current.has(latestAttempt.id) && selectedLead) {
+      if (!dialSession && !promptedVoicemailAttemptIdsRef.current.has(latestAttempt.id) && selectedLead) {
         promptedVoicemailAttemptIdsRef.current.add(latestAttempt.id);
         promptVoicemailDetected(selectedLead.businessName ?? "This lead", selectedLead.phoneNumber);
       }
@@ -1058,7 +1175,7 @@ export default function QueuePage() {
     }
 
     setUiCallState("failed", "Call ended.");
-  }, [latestAttempt, selectedLead]);
+  }, [latestAttempt, selectedLead, dialSession]);
 
   useEffect(() => {
     if (!latestAttempt?.rawSummaryJson?.browserLegFailed) {
@@ -1081,7 +1198,7 @@ export default function QueuePage() {
 
     const timer = setTimeout(async () => {
       try {
-        await fetch(`/api/leads/${selectedLead.id}/notes`, {
+        const response = await fetch(`/api/leads/${selectedLead.id}/notes`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -1093,7 +1210,9 @@ export default function QueuePage() {
           }),
         });
 
-        setLastSavedNotes(notes);
+        if (!response.ok) throw new Error("Autosave failed");
+        noteDraftsRef.current.set(selectedLead.id, { body: noteDraftsRef.current.get(selectedLead.id)?.body ?? notes, saved: notes });
+        if (selectedLeadIdRef.current === selectedLead.id) setLastSavedNotes(notes);
       } catch {
         // Ignore autosave errors; explicit save remains available.
       }
@@ -1149,8 +1268,21 @@ export default function QueuePage() {
     };
   });
 
-  async function startCall() {
-    if (!selectedLead) {
+  async function startCall(reservation?: SessionCommandResult) {
+    let callLead = selectedLead;
+    if (reservation?.lead) {
+      const response = await fetch(`/api/leads/${reservation.lead.id}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok || !payload.lead) throw new Error(payload.error ?? "Reserved lead unavailable");
+      callLead = { ...payload.lead, tags: payload.lead.tags ?? [] } as LeadItem;
+      const reservedLead = callLead;
+      setLeads((current) => [reservedLead, ...current.filter((lead) => lead.id !== reservedLead.id)]);
+      setSelectedLeadId(callLead.id);
+    } else if (dialSession) {
+      setError("Use the dial-session controls while a session is active.");
+      return;
+    }
+    if (!callLead) {
       return;
     }
 
@@ -1171,7 +1303,7 @@ export default function QueuePage() {
     callStartAttemptedRef.current = true;
 
     try {
-      const createResponse = await fetch(`/api/leads/${selectedLead.id}/call`, {
+      const createResponse = reservation ? null : await fetch(`/api/leads/${callLead.id}/call`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -1181,9 +1313,12 @@ export default function QueuePage() {
         }),
       });
 
-      const createPayload = (await createResponse.json()) as CallBootstrapResponse;
+      const createPayload: CallBootstrapResponse = reservation ? {
+        attempt: { id: reservation.attempt!.id, status: "dialing" },
+        callerNumber: reservation.callerNumber, manualDialFlow: "browser_first",
+      } : await createResponse!.json();
 
-      if (!createResponse.ok || !createPayload.attempt) {
+      if ((createResponse && !createResponse.ok) || !createPayload.attempt) {
         setError(createPayload.error ?? "Call initiation failed");
         setUiCallState("failed", createPayload.error ?? "Call initiation failed");
         callStartAttemptedRef.current = false;
@@ -1214,12 +1349,12 @@ export default function QueuePage() {
         await reportAttemptProgress("dialing_lead");
         await logBrowserWebRtcEvent("placing_browser_originated_outbound_call", {
           callAttemptId: createPayload.attempt.id,
-          destinationNumber: selectedLead.phoneNumber,
+          destinationNumber: reservation?.destination ?? callLead.phoneNumber,
           callerNumber: createPayload.callerNumber ?? null,
         });
 
         const call = client.newCall({
-          destinationNumber: selectedLead.phoneNumber,
+          destinationNumber: reservation?.destination ?? callLead.phoneNumber,
           callerNumber: createPayload.callerNumber,
           clientState,
           debug: true,
@@ -1232,7 +1367,7 @@ export default function QueuePage() {
           state: call.state ?? null,
         });
       } else {
-        const response = await fetch(`/api/leads/${selectedLead.id}/call`, {
+        const response = await fetch(`/api/leads/${callLead.id}/call`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -1288,6 +1423,14 @@ export default function QueuePage() {
   }
 
   async function hangupOutboundCall() {
+    if (dialSession?.mode === "parallel") {
+      if (!dialSession.active_call_id) return;
+      const response = await fetch(`/api/calls/${dialSession.active_call_id}`, {
+        method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "canceled" }),
+      });
+      if (!response.ok) setError("Could not request prospect hangup; the parked operator call was preserved");
+      return;
+    }
     const attemptId = pendingAttemptIdRef.current ?? hangupAttemptId;
 
     if (!attemptId) {
@@ -1342,13 +1485,7 @@ export default function QueuePage() {
     }
 
     try {
-      if (call.sendDigits) {
-        await call.sendDigits(digit);
-      } else if (call.dtmf) {
-        await call.dtmf(digit);
-      } else {
-        throw new Error("The Telnyx WebRTC SDK did not expose DTMF on this call.");
-      }
+      await sendWebRtcDigit(call, digit);
 
       setCallMessage(`Sent DTMF ${digit}`);
       await logBrowserWebRtcEvent("dtmf_digit_sent", {
@@ -1367,11 +1504,17 @@ export default function QueuePage() {
     }
   }
 
-  function moveToNextLead() {
+  async function moveToNextLead() {
+    if (pendingAttemptIdRef.current || webRtcCallRef.current || dialSession?.active_call_id) {
+      setError("End the call and save its disposition before changing leads.");
+      return;
+    }
     if (!selectedLead) {
       return;
     }
 
+    try { if (notes !== lastSavedNotes) await saveNote(); }
+    catch (error) { setError(error instanceof Error ? error.message : "Save notes before skipping"); return; }
     const currentIndex = leads.findIndex((lead) => lead.id === selectedLead.id);
     const nextLead = leads[currentIndex + 1] ?? leads[0];
 
@@ -1438,16 +1581,18 @@ export default function QueuePage() {
         }),
       });
 
-      if (response.ok) {
-        setLastSavedNotes(notes);
-        await refreshLeads();
+      if (!response.ok) {
+        const payload = await response.json();
+        throw new Error(payload.error ?? "Note could not be saved");
       }
+      noteDraftsRef.current.set(selectedLead.id, { body: noteDraftsRef.current.get(selectedLead.id)?.body ?? notes, saved: notes });
+      if (selectedLeadIdRef.current === selectedLead.id) setLastSavedNotes(notes);
     } finally {
       setSavingNote(false);
     }
   }
 
-  async function setOutcome(outcome: string, callbackAt?: Date | null) {
+  async function setOutcome(outcome: string, callbackAt?: Date | null, nextAction?: string) {
     if (!selectedLead) {
       return;
     }
@@ -1463,6 +1608,7 @@ export default function QueuePage() {
         body: JSON.stringify({
           callAttemptId: latestAttempt?.id,
           outcome,
+          nextAction,
           operatorNotes: notes,
           callbackAt: callbackAt ? callbackAt.toISOString() : undefined,
         }),
@@ -1482,27 +1628,16 @@ export default function QueuePage() {
   }
 
   async function setFollowUp(date: Date) {
-    if (!selectedLead) {
+    if (dialSession?.mode === "parallel" && dialSession.active_call_id && callInProgress && selectedLead) {
+      const response = await fetch(`/api/leads/${selectedLead.id}/followups`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ callAttemptId: dialSession.active_call_id, dueAt: date.toISOString(), channel: "call", note: "Callback requested during conversation" }),
+      });
+      if (!response.ok) setError("Could not save the callback reminder");
+      else setCallMessage("Callback reminder saved. Select the final disposition after the conversation.");
       return;
     }
-
-    const response = await fetch(`/api/leads/${selectedLead.id}/followups`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        callAttemptId: latestAttempt?.id,
-        channel: "call",
-        dueAt: date.toISOString(),
-        status: "open",
-        note: "Callback scheduled from workspace",
-      }),
-    });
-
-    if (response.ok) {
-      await setOutcome("callback", date);
-    }
+    // The outcome endpoint creates the callback once with the stable call-attempt ID.
+    await setOutcome("callback", date);
   }
 
   function resetSmsTemplate(nextTemplateKey = smsTemplateKey, nextName = smsName) {
@@ -1587,6 +1722,51 @@ export default function QueuePage() {
     }
   }
 
+  useEffect(() => {
+    const attemptId = dialSession?.active_call_id;
+    if (!attemptId) return;
+    let canceled = false;
+    void (async () => {
+      const response = await fetch(`/api/calls/${attemptId}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok || !payload.callAttempt?.leadId) return;
+      const leadResponse = await fetch(`/api/leads/${payload.callAttempt.leadId}`, { cache: "no-store" });
+      const leadPayload = await leadResponse.json();
+      if (!canceled && leadResponse.ok && leadPayload.lead) {
+        const lead = { ...leadPayload.lead, tags: leadPayload.lead.tags ?? [] } as LeadItem;
+        setLeads((items) => [lead, ...items.filter((item) => item.id !== lead.id)]);
+        setSelectedLeadId(lead.id);
+      }
+    })().catch(() => setError("Could not recover the active call's lead. Session will remain reserved."));
+    return () => { canceled = true; };
+  }, [dialSession?.active_call_id]);
+
+  useEffect(() => {
+    if (dialSession?.mode !== "parallel") return;
+    const acknowledge = () => {
+      const call = webRtcCallRef.current;
+      const controlId = getWebRtcCallControlId(call ?? undefined);
+      if (!call || !controlId || !["active", "answered", "held"].includes(call.state ?? "") || !call.remoteStream?.getAudioTracks().length) return;
+      void fetch("/api/dial-sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+        action: "operator_ready", sessionId: dialSession.id, controllerId: sessionStorage.getItem("portive-controller"),
+        ready: webRtcReadyRef.current && micPermission === "granted", callControlId: controlId,
+      }) }).catch(() => undefined);
+    };
+    acknowledge(); const timer = setInterval(acknowledge, 1500);
+    return () => clearInterval(timer);
+  }, [dialSession?.id, dialSession?.mode, micPermission]);
+
+  useEffect(() => { notificationHandlerRef.current = handleWebRtcNotification; });
+
+  useEffect(() => {
+    // Only the SDK's dedicated local tone element is changed. Never mute remote audio or a media track.
+    const apply = () => silenceLocalRingback(document, silentRingback);
+    apply();
+    const observer = new MutationObserver(apply);
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => { observer.disconnect(); silenceLocalRingback(document, false); };
+  }, [silentRingback]);
+
   const displayedCallStatus = manualDialState ?? latestAttempt?.rawSummaryJson?.progressState ?? latestAttempt?.status ?? "idle";
   const displayedCallStatusLabel = callStatusLabels[displayedCallStatus] ?? displayedCallStatus.replaceAll("_", " ");
   const now = Date.now();
@@ -1596,7 +1776,7 @@ export default function QueuePage() {
     leads
       .map((lead) => ({ lead, attempt: lead.callAttempts[0] }))
       .find(({ attempt }) => attempt && !locallyEndedAttemptIdsRef.current.has(attempt.id) && attempt.id === pendingAttemptId) ?? null;
-  const callInProgress = Boolean(
+  const callInProgress = dialSession?.mode === "parallel" ? parallelAttempts.some((attempt) => attempt.id === dialSession.active_call_id && !attempt.ended_at) : Boolean(
     pendingAttemptId ||
       latestAttemptIsActive ||
       (manualDialState && activeManualCallStates.includes(manualDialState)),
@@ -1607,6 +1787,7 @@ export default function QueuePage() {
   const softphoneReady = isBrowserReadyForOutboundDial();
   const browserFirstFlow = getManualDialFlow() === "browser_first";
   const callButtonDisabled =
+    Boolean(dialSession) ||
     calling ||
     callInProgress ||
     !selectedLead ||
@@ -1616,14 +1797,14 @@ export default function QueuePage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 dark:border-slate-700 dark:bg-slate-900/90 dark:text-slate-100">
+      <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 dark:border-slate-700 dark:bg-slate-900/90 dark:text-slate-100 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-xl font-semibold">Lead Queue / Calling Workspace</h1>
           <p className="text-sm text-slate-600 dark:text-slate-300">Shortcuts: C call, N next lead, 1..8 outcomes, / focus notes</p>
         </div>
-        <div className="flex items-center gap-3">
-          <div className="w-56">
-            <Select value={selectedLocation || "__all__"} onValueChange={selectWorkspaceLocation}>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="w-full sm:w-56">
+            <Select disabled={Boolean(dialSession) || callInProgress} value={selectedLocation || "__all__"} onValueChange={selectWorkspaceLocation}>
               <SelectTrigger>
                 <SelectValue placeholder="All locations" />
               </SelectTrigger>
@@ -1644,6 +1825,17 @@ export default function QueuePage() {
         </div>
       </div>
 
+      <SessionControls
+        location={selectedLocation}
+        ready={webRtcReadyRef.current && micPermission === "granted" && webrtcStatus !== "error"}
+        idle={!webRtcCallRef.current && !calling && !pendingAttemptId}
+        onDispatch={startCall}
+        onSession={(session) => { setDialSession(session); if (session?.mode === "parallel") setSilentRingback(Boolean(session.parallel_options?.silentRingback)); }}
+        onSnapshot={(snapshot) => { setParallelAttempts(snapshot.attempts); setParallelMetrics(snapshot.metrics); }}
+        beforeAdvance={async () => { if (notes !== lastSavedNotes) await saveNote(); }}
+        onEndCall={hangupOutboundCall}
+      />
+      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={silentRingback} onChange={(event) => setSilentRingback(event.target.checked)} />Silent local ringback (carrier early media remains audible)</label>
       {error ? <p className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
       {browserFirstFlow && !runtimeConfig?.telnyxWebrtcCredentialConfigured ? (
         <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
@@ -1691,7 +1883,13 @@ export default function QueuePage() {
                     : ""
                 }`}
                 key={lead.id}
-                onClick={() => setSelectedLeadId(lead.id)}
+                disabled={Boolean(pendingAttemptId || dialSession?.active_call_id) && selectedLeadId !== lead.id}
+                onClick={() => {
+                  void (async () => {
+                    try { if (notes !== lastSavedNotes) await saveNote(); setSelectedLeadId(lead.id); }
+                    catch (error) { setError(error instanceof Error ? error.message : "Save notes before switching leads"); }
+                  })();
+                }}
                 type="button"
               >
                 <p className="truncate font-medium">{lead.businessName ?? "Untitled business"}</p>
@@ -1713,6 +1911,7 @@ export default function QueuePage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {dialSession?.mode === "parallel" ? <ParallelLines attempts={parallelAttempts} winner={dialSession.active_call_id} metrics={parallelMetrics} /> : null}
             {selectedLead ? (
               <>
                 <div className="grid gap-2 text-sm md:grid-cols-2">
@@ -1764,9 +1963,17 @@ export default function QueuePage() {
                   <Button onClick={moveToNextLead} variant="secondary">
                     Skip
                   </Button>
-                  <Button disabled={savingOutcome} onClick={() => void setOutcome("bad_number")} variant="destructive">
+                  <Button disabled={savingOutcome || Boolean(dialSession && callInProgress)} onClick={() => void setOutcome("bad_number")} variant="destructive">
                     Mark bad number
                   </Button>
+                  <Button variant="outline" onClick={() => {
+                    const leadId = selectedLead.id;
+                    void fetch(`/api/leads/${leadId}/suppression`, { method: "POST" }).then(async (response) => {
+                      const result = await response.json();
+                      if (!response.ok) throw new Error(result.error ?? "Suppression failed");
+                      setCallMessage("Number added to persistent Do Not Call suppression.");
+                    }).catch((err) => setError(err.message));
+                  }}>Do Not Call</Button>
                   <Button
                     disabled={!selectedLead.website}
                     onClick={() => {
@@ -1813,7 +2020,7 @@ export default function QueuePage() {
                   <div className="flex flex-wrap gap-2">
                     {outcomeButtons.map((item) => (
                       <Button
-                        disabled={savingOutcome}
+                        disabled={savingOutcome || Boolean(dialSession && callInProgress)}
                         key={item.outcome}
                         onClick={() => void setOutcome(item.outcome)}
                         size="sm"
@@ -1822,7 +2029,14 @@ export default function QueuePage() {
                         {item.label}
                       </Button>
                     ))}
+                    <Button size="sm" variant="outline" disabled={savingOutcome || Boolean(dialSession && callInProgress)} onClick={() => void setOutcome("gatekeeper", null, "manager_callback_pending")}>Manager callback pending</Button>
                   </div>
+                  {dialSession ? <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <select aria-label="Disposition to save" className="rounded border bg-background p-2 text-sm" value={chosenDisposition} onChange={(event) => setChosenDisposition(event.target.value)}>{outcomeButtons.map((item) => <option value={item.outcome} key={item.outcome}>{item.label}</option>)}</select>
+                    <Button disabled={savingOutcome || callInProgress} onClick={() => {
+                      void (async () => { try { await saveNote(); await setOutcome(chosenDisposition); } catch (error) { setError(error instanceof Error ? error.message : "Could not save wrap-up"); } })();
+                    }}>Save Disposition and Continue</Button>
+                  </div> : null}
                 </div>
               </>
             ) : (
@@ -1865,6 +2079,12 @@ export default function QueuePage() {
 
             <div className="space-y-2">
               <Label>Recording</Label>
+              <Button size="sm" variant="outline" disabled={!latestAttempt || !callInProgress || Boolean(latestAttempt.recordingConsentAt)} onClick={() => {
+                if (!latestAttempt) return;
+                void fetch(`/api/calls/${latestAttempt.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ recordingConsent: true }) })
+                  .then(async (response) => { if (!response.ok) throw new Error("Recording consent could not be saved"); await refreshLeads(); })
+                  .catch((err) => setError(err.message));
+              }}>{latestAttempt?.recordingConsentAt ? "Recording consent saved" : "Confirm recording consent"}</Button>
               {latestAttempt?.recording?.downloadUrl ? (
                 <audio className="w-full" controls src={latestAttempt.recording.downloadUrl} />
               ) : (
@@ -1876,7 +2096,10 @@ export default function QueuePage() {
 
             <div className="space-y-2">
               <Label htmlFor="notes-box">Notes</Label>
-              <Textarea id="notes-box" ref={notesRef} value={notes} onChange={(event) => setNotes(event.target.value)} />
+              <Textarea id="notes-box" ref={notesRef} value={notes} onChange={(event) => {
+                setNotes(event.target.value);
+                if (selectedLead) noteDraftsRef.current.set(selectedLead.id, { body: event.target.value, saved: lastSavedNotes });
+              }} />
               <div className="flex items-center justify-between text-xs text-slate-500">
                 <span>{notes === lastSavedNotes ? "Saved" : "Saving..."}</span>
                 <Button loading={savingNote} onClick={() => void saveNote()} size="sm" variant="outline">

@@ -13,6 +13,10 @@ import {
   isPublicWebhookBaseUrlConfigured,
 } from "@/lib/telnyx/helpers";
 import { getTelnyxClient } from "@/lib/telnyx/client";
+import { getAppSettings } from "@/lib/settings";
+import { parsePhoneNumberFromString } from "libphonenumber-js";
+import { recordingAllowed } from "@/lib/dialer/media";
+import { executeCallControlCommand } from "@/lib/telnyx/commands";
 
 const ACTIVE_CALL_STATUSES: CallStatus[] = ["dialing", "connected"];
 
@@ -42,6 +46,8 @@ export async function createOutboundCallAttempt(leadId: string) {
   if (!lead) {
     throw new Error("Lead not found");
   }
+  const destination = parsePhoneNumberFromString(lead.phoneNumber, "US");
+  if (!destination?.isValid()) throw new Error("Lead phone number is invalid");
 
   const attempt = await prisma.callAttempt.create({
     data: {
@@ -82,7 +88,7 @@ export async function initiateOutboundCall(callAttemptId: string) {
   }
 
   const client = getTelnyxClient();
-  const response = await client.calls.dial({
+  const response = await executeCallControlCommand(attempt.id, "dial_lead", () => client.calls.dial({
     connection_id: getTelnyxConnectionId(),
     from: getOutboundCallerId(),
     to: attempt.lead.phoneNumber,
@@ -90,7 +96,7 @@ export async function initiateOutboundCall(callAttemptId: string) {
     client_state: encodeClientState({ attemptId: attempt.id, role: "lead" }),
     answering_machine_detection: "detect_beep",
     command_id: `${attempt.id}-outbound-dial`,
-  });
+  }));
 
   const callData = response.data;
 
@@ -176,7 +182,7 @@ export async function dialBrowserWebRtcLeg(callAttemptId: string) {
     sipUri: target.sipUri,
   });
 
-  const response = await getTelnyxClient().calls.dial({
+  const response = await executeCallControlCommand(attempt.id, "dial_browser", () => getTelnyxClient().calls.dial({
     connection_id: getTelnyxConnectionId(),
     from: getOutboundCallerId(),
     to: target.sipUri,
@@ -186,7 +192,7 @@ export async function dialBrowserWebRtcLeg(callAttemptId: string) {
     link_to: attempt.telnyxCallControlId,
     bridge_intent: true,
     timeout_secs: 30,
-  });
+  }));
   const callData = response.data;
 
   if (!callData?.call_control_id) {
@@ -239,11 +245,12 @@ export async function bridgeAttemptLegs(callAttemptId: string) {
   });
 
   try {
-    await getTelnyxClient().calls.actions.bridge(attempt.telnyxAgentCallControlId, {
+    const browserControlId = attempt.telnyxAgentCallControlId;
+    await executeCallControlCommand(attempt.id, "bridge", () => getTelnyxClient().calls.actions.bridge(browserControlId, {
       call_control_id_to_bridge_with: attempt.telnyxCallControlId,
       command_id: `${attempt.id}-browser-pstn-bridge`,
       prevent_double_bridge: true,
-    });
+    }));
 
     logInfo("Browser WebRTC to PSTN bridge requested successfully", {
       callAttemptId,
@@ -295,16 +302,21 @@ export async function hangupCallControlIds(attemptId: string, callControlIds: Ar
 
   const client = getTelnyxClient();
 
-  await Promise.allSettled(
+  const results = await Promise.allSettled(
     ids.map((callControlId, index) =>
       client.calls.actions.hangup(callControlId, {
         command_id: `${attemptId}-hangup-${index}`,
       }),
     ),
   );
+  if (results.some((result) => result.status === "rejected")) {
+    throw new Error("Could not confirm call leg hangup; dialing must remain paused");
+  }
 }
 
 export async function startAttemptRecording(callAttemptId: string) {
+  const settings = await getAppSettings();
+  if (!settings.enableRecording) return;
   const attempt = await prisma.callAttempt.findUnique({
     where: { id: callAttemptId },
   });
@@ -313,19 +325,20 @@ export async function startAttemptRecording(callAttemptId: string) {
     return;
   }
 
-  const recordingControlId = attempt.telnyxAgentCallControlId ?? attempt.telnyxCallControlId;
+  if (!recordingAllowed(settings.enableRecording, attempt)) return;
+  const recordingControlId = attempt.parallelBatch != null ? attempt.telnyxCallControlId : attempt.telnyxAgentCallControlId ?? attempt.telnyxCallControlId;
 
   if (!recordingControlId) {
     return;
   }
 
   try {
-    await getTelnyxClient().calls.actions.startRecording(recordingControlId, {
+    await executeCallControlCommand(attempt.id, "start_recording", () => getTelnyxClient().calls.actions.startRecording(recordingControlId, {
       channels: "single",
       format: "mp3",
       recording_track: "both",
       command_id: `${attempt.id}-recording`,
-    });
+    }));
   } catch (error) {
     logError("Failed to start recording", {
       callAttemptId: attempt.id,
@@ -356,6 +369,7 @@ export async function computeAttemptSummary(callAttemptId: string) {
     where: { id: attempt.id },
     data: {
       rawSummaryJson: {
+        ...(attempt.rawSummaryJson ?? {}),
         status: attempt.status,
         outcome: attempt.outcome,
         durationSeconds: attempt.durationSeconds,

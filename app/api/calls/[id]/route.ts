@@ -7,6 +7,9 @@ import { formatUnknownError, jsonError } from "@/lib/http";
 import { logInfo } from "@/lib/logger";
 import { prisma } from "@/lib/workstation-db";
 import { hangupAttemptLegs, startAttemptRecording } from "@/lib/telnyx/call-flow";
+import { resolveClientStatus } from "@/lib/telnyx/lifecycle";
+import { isBrowserFirstManualDialFlow } from "@/lib/telnyx/call-flow";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 function getHangupSourceFromWebhookPayload(payloadJson: JsonValue) {
   if (!payloadJson || typeof payloadJson !== "object" || Array.isArray(payloadJson)) {
@@ -64,7 +67,9 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
     return NextResponse.json({ error: "Call attempt not found" }, { status: 404 });
   }
 
-  const controlIds = [callAttempt.telnyxCallControlId, callAttempt.telnyxAgentCallControlId].filter(
+  const controlIds = (callAttempt.parallelBatch != null
+    ? [callAttempt.telnyxCallControlId, callAttempt.overflowCallControlId]
+    : [callAttempt.telnyxCallControlId, callAttempt.telnyxAgentCallControlId]).filter(
     (value): value is string => Boolean(value),
   );
 
@@ -95,6 +100,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
 const updateCallAttemptSchema = z
   .object({
     status: z.enum(["connected", "failed", "canceled"]).optional(),
+    recordingConsent: z.literal(true).optional(),
     clientError: z.string().optional(),
     answeredAt: z.string().datetime().optional(),
     debug: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
@@ -107,7 +113,7 @@ const updateCallAttemptSchema = z
       })
       .optional(),
   })
-  .refine((value) => Boolean(value.status || value.clientError || value.debug || value.progressState || value.telnyxIds), {
+  .refine((value) => Boolean(value.status || value.recordingConsent || value.clientError || value.debug || value.progressState || value.telnyxIds), {
     message: "A status update, client error, progress update, Telnyx ID update, or debug payload is required",
   });
 
@@ -127,6 +133,28 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
     if (!attempt) {
       return jsonError("Call attempt not found", 404);
     }
+    if (payload.recordingConsent) {
+      await prisma.callAttempt.update({ where: { id }, data: { recordingConsentAt: new Date() } });
+      await startAttemptRecording(id);
+      return NextResponse.json({ saved: true });
+    }
+    if (attempt.parallelBatch !== null && attempt.parallelBatch !== undefined) {
+      if (payload.status === "canceled" && !attempt.endedAt) {
+        const { error } = await getSupabaseAdmin().rpc("portive_enqueue", {
+          p_session: attempt.dialSessionId, p_attempt: id, p_action: "hangup", p_key: `${id}:operator-end`,
+        });
+        if (error) throw new Error(error.message);
+      } else if (payload.status) return jsonError("Parallel lifecycle changes require provider events", 409);
+      return NextResponse.json({ attempt });
+    }
+    const providerIds = payload.telnyxIds ? (isBrowserFirstManualDialFlow() ? {
+      telnyxCallControlId: payload.telnyxIds.callControlId ?? attempt.telnyxCallControlId,
+      telnyxCallSessionId: payload.telnyxIds.callSessionId ?? attempt.telnyxCallSessionId,
+      telnyxCallLegId: payload.telnyxIds.callLegId ?? attempt.telnyxCallLegId,
+    } : {
+      telnyxAgentCallControlId: payload.telnyxIds.callControlId ?? attempt.telnyxAgentCallControlId,
+      telnyxAgentCallLegId: payload.telnyxIds.callLegId ?? attempt.telnyxAgentCallLegId,
+    }) : {};
 
     const existingSummary =
       attempt.rawSummaryJson && typeof attempt.rawSummaryJson === "object" && !Array.isArray(attempt.rawSummaryJson)
@@ -186,14 +214,9 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       updated = await prisma.callAttempt.update({
         where: { id },
         data: {
-          status:
-            payload.status === "connected"
-              ? updated.status === "voicemail_detected" || updated.endedAt
-                ? updated.status
-                : "connected"
-              : updated.endedAt
-                ? updated.status
-                : payload.status,
+          status: resolveClientStatus(updated, payload.status),
+          ...(payload.status === "connected" ? { wasBridgedToOperator: true, technicalState: "bridged" } : {}),
+          ...(payload.status === "canceled" ? { terminationReason: "operator_hangup" } : {}),
           answeredAt:
             payload.status === "connected" && !updated.answeredAt
               ? payload.answeredAt
@@ -204,9 +227,9 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
             payload.status === "connected"
               ? updated.endedAt
               : updated.endedAt ?? new Date(),
-          telnyxCallControlId: payload.telnyxIds?.callControlId ?? updated.telnyxCallControlId,
-          telnyxCallSessionId: payload.telnyxIds?.callSessionId ?? updated.telnyxCallSessionId,
-          telnyxCallLegId: payload.telnyxIds?.callLegId ?? updated.telnyxCallLegId,
+          ...(payload.status !== "connected" && ["busy", "no_answer"].includes(payload.progressState ?? "") && !updated.answeredAt
+            ? { technicalState: payload.progressState, outcome: payload.progressState === "no_answer" ? "no_answer" : updated.outcome } : {}),
+          ...providerIds,
           rawSummaryJson: summaryWithProgress,
         },
       });
@@ -218,9 +241,7 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       updated = await prisma.callAttempt.update({
         where: { id },
         data: {
-          telnyxCallControlId: payload.telnyxIds?.callControlId ?? updated.telnyxCallControlId,
-          telnyxCallSessionId: payload.telnyxIds?.callSessionId ?? updated.telnyxCallSessionId,
-          telnyxCallLegId: payload.telnyxIds?.callLegId ?? updated.telnyxCallLegId,
+          ...providerIds,
           rawSummaryJson: summaryWithProgress,
         },
       });

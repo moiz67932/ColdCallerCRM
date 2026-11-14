@@ -1,0 +1,162 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import type { DialSession, SessionCommandResult, ParallelAttempt } from "@/lib/dialer/types";
+import { defaultParallelOptions } from "@/lib/dialer/parallel-policy";
+
+type Mode = "manual" | "power" | "parallel";
+type Props = {
+  ready: boolean;
+  idle: boolean;
+  location?: string;
+  onDispatch: (result: SessionCommandResult) => Promise<void>;
+  onSession: (session: DialSession | null) => void;
+  beforeAdvance: () => Promise<void>;
+  onEndCall: () => Promise<void>;
+  onSnapshot?: (snapshot: { attempts: ParallelAttempt[]; metrics: Record<string, number | null> }) => void;
+};
+
+export function SessionControls(props: Props) {
+  const [mode, setMode] = useState<Mode>("manual");
+  const [session, setSession] = useState<DialSession | null>(null);
+  const [lists, setLists] = useState<Array<{ id: string; name: string }>>([]);
+  const [listId, setListId] = useState("");
+  const [lines, setLines] = useState(4);
+  const [options, setOptions] = useState(defaultParallelOptions);
+  const [parallelBlockers, setParallelBlockers] = useState<string[]>(["Provider readiness has not loaded."]);
+  const transportReady = useRef(false);
+  const [timeZone, setTimeZone] = useState("America/New_York");
+  const [reviewed, setReviewed] = useState(false);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [controllerId, setControllerId] = useState("");
+  const controller = useRef("");
+  const inFlight = useRef(false);
+  const current = useRef(props);
+  useEffect(() => { current.current = props; });
+
+  const acceptSession = useCallback((value: DialSession | null) => {
+    setSession(value);
+    current.current.onSession(value && !["stopped", "completed"].includes(value.status) ? value : null);
+  }, []);
+
+  // Discover persisted sessions even in Manual Mode; a refresh never dispatches an existing attempt again.
+  useEffect(() => {
+    controller.current = sessionStorage.getItem("portive-controller") ?? crypto.randomUUID();
+    sessionStorage.setItem("portive-controller", controller.current);
+    void fetch("/api/dial-sessions", { cache: "no-store" }).then(async (response) => {
+      const data = await response.json();
+      if (!response.ok) { setError(data.error); return; }
+      setControllerId(controller.current);
+      setLists(data.lists ?? []);
+      setParallelBlockers(data.capabilities?.parallelBlockers ?? ["Provider readiness unavailable."]);
+      setListId(data.session?.selected_list_id ?? data.lists?.[0]?.id ?? "");
+      if (data.session) { acceptSession(data.session); setMode(data.session.mode); }
+    }).catch(() => setError("Unable to recover dial sessions. Manual calling remains available."));
+  }, [acceptSession]);
+
+  const commandSessionId = session?.id;
+  const commandMode = session?.mode;
+  const commandStatus = session?.status;
+  const commandController = session?.controller_id;
+  const command = useCallback(async (action: string, options?: Record<string, unknown>) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    try {
+      if (["next", "continue", "skip", "start"].includes(action)) await current.current.beforeAdvance();
+      const response = await fetch("/api/dial-sessions", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action, sessionId: commandSessionId, controllerId: controller.current,
+          ready: current.current.ready, transportReady: commandMode === "parallel" ? transportReady.current : true, location: current.current.location, ...options,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Session command failed");
+      acceptSession(result.session);
+      setError("");
+      if (result.dispatch) await current.current.onDispatch(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Dial session failed");
+      // A failed/uncertain dispatch is never retried. Keep its durable reservation for recovery.
+    } finally { inFlight.current = false; setBusy(false); }
+  }, [acceptSession, commandSessionId, commandMode]);
+
+  useEffect(() => {
+    if (!commandSessionId || ["completed", "stopped"].includes(commandStatus ?? "") || commandController !== controller.current) return;
+    const timer = setInterval(() => {
+      const action = commandMode === "parallel" ? "heartbeat" : commandStatus === "running" && current.current.idle ? "next" : "heartbeat";
+      void command(action);
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [command, commandSessionId, commandStatus, commandController, commandMode]);
+
+  const streamSessionId = session?.mode === "parallel" ? session.id : null;
+  useEffect(() => {
+    if (!streamSessionId) return;
+    const stream = new EventSource(`/api/dial-sessions/${streamSessionId}/events`);
+    stream.addEventListener("snapshot", (event) => {
+      const snapshot = JSON.parse((event as MessageEvent).data);
+      transportReady.current = true;
+      acceptSession(snapshot.session);
+      current.current.onSnapshot?.(snapshot);
+    });
+    const failed = () => { transportReady.current = false; setError("Realtime session transport disconnected; new dialing is suspended."); };
+    stream.addEventListener("transport_error", failed);
+    stream.onerror = failed;
+    return () => { transportReady.current = false; stream.close(); };
+  }, [acceptSession, streamSessionId]);
+
+  const active = session && !["completed", "stopped"].includes(session.status);
+  const owned = !session || session.controller_id === controllerId;
+  return (
+    <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900/90">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium">Calling mode</span>
+        {(["manual", "power", "parallel"] as const).map((item) => (
+          <Button key={item} size="sm" variant={mode === item ? "default" : "outline"} disabled={Boolean(active) || !props.idle}
+            onClick={() => setMode(item)}>{item[0].toUpperCase() + item.slice(1)}</Button>
+        ))}
+        {session ? <span className="text-sm" role="status">{session.status.replaceAll("_", " ")} · {session.phase.replaceAll("_", " ")}{session.mode === "parallel" ? ` · operator ${session.operator_leg_state}` : ""}{session.reason ? ` · ${session.reason}` : ""}</span> : null}
+      </div>
+      {mode !== "manual" ? (
+        <>
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <label>Lead list <select aria-label="Dial session lead list" className="rounded border bg-background p-2" disabled={Boolean(active)} value={listId} onChange={(e) => setListId(e.target.value)}>
+              <option value="">Choose list</option>{lists.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}
+            </select></label>
+            <label>List local timezone <select aria-label="List local timezone" className="rounded border bg-background p-2" value={timeZone} disabled={Boolean(active)} onChange={(e) => setTimeZone(e.target.value)}>
+              {["America/New_York", "America/Chicago", "America/Denver", "America/Phoenix", "America/Los_Angeles", "America/Anchorage", "Pacific/Honolulu"].map((zone) => <option key={zone}>{zone}</option>)}
+            </select></label>
+            {mode === "parallel" ? <label>Maximum lines <select aria-label="Maximum lines" className="rounded border bg-background p-2" value={lines} onChange={(e) => setLines(Number(e.target.value))}>{[2, 3, 4].map((n) => <option key={n}>{n}</option>)}</select></label> : null}
+            <label className="flex items-center gap-2"><input type="checkbox" checked={reviewed} disabled={Boolean(active)} onChange={(e) => setReviewed(e.target.checked)} />I reviewed this list’s eligibility, DNC screening and local calling restrictions.</label>
+          </div>
+          {mode === "parallel" ? <>
+            {parallelBlockers.length ? <div role="status" className="text-sm text-amber-700 dark:text-amber-300"><p>Parallel technical blockers:</p><ul className="list-inside list-disc">{parallelBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div> : <p className="text-sm text-green-600">Controlled provider configuration verified. Capacity is checked again at Start and Resume.</p>}
+            <div className="flex flex-wrap gap-3 text-sm">
+              {([['ringTimeout','Ring timeout (seconds)',15,120],['maxCallSeconds','Maximum call seconds',30,1800],['batchDelaySeconds','Batch delay (seconds)',0,60],['attemptLimit','Attempt limit',1,500],['maxSpendCents','Maximum spend (cents)',1,100000]] as const).map(([key,label,min,max]) => <label key={key}>{label}<input className="ml-2 w-20 rounded border bg-background p-1" type="number" min={min} max={max} value={options[key]} disabled={Boolean(active)} onChange={(event) => setOptions((current) => ({ ...current, [key]: Number(event.target.value) }))} /></label>)}
+              <label><input type="checkbox" checked={options.autoContinue} disabled={Boolean(active)} onChange={(event) => setOptions((current) => ({ ...current, autoContinue: event.target.checked }))} /> Automatically continue after saved disposition</label>
+              <label><input type="checkbox" checked={options.silentRingback} disabled={Boolean(active)} onChange={(event) => setOptions((current) => ({ ...current, silentRingback: event.target.checked }))} /> Silent local ringback</label>
+              <span>Batch mode · Continuous refill unavailable</span>
+            </div>
+          </> : null}
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" disabled={Boolean(active) || !props.ready || !props.idle || !reviewed || !listId || mode === "parallel" && parallelBlockers.length > 0 || busy}
+              onClick={() => void command("start", { listId, timeZone, reviewed, mode, options, maxLines: mode === "parallel" ? lines : 1 })}>Start Session</Button>
+            <Button size="sm" variant="outline" disabled={!active || !owned || busy || session.status !== "running"} onClick={() => void command("pause")}>Pause</Button>
+            <Button size="sm" variant="outline" disabled={!active || !owned || busy || session.status !== "paused" || !props.ready} onClick={() => void command("resume")}>Resume</Button>
+            <Button size="sm" variant="destructive" disabled={!active || !owned || busy} onClick={() => void command("stop")}>Stop Session</Button>
+            {session?.mode === "parallel" ? <Button size="sm" variant="outline" disabled={busy || !owned || !["awaiting_disposition", "ready"].includes(session.phase)} onClick={() => void command("continue")}>Continue next batch</Button> : null}
+            <Button size="sm" variant="outline" disabled={!active || !owned || !session.active_call_id || busy || props.idle} onClick={() => void props.onEndCall()}>End Active Call</Button>
+            <Button size="sm" variant="outline" disabled={!active || !owned || (session.mode === "parallel" ? session.phase !== "awaiting_disposition" : !props.idle) || busy} onClick={() => void command("skip")}>Skip Lead</Button>
+          </div>
+          <p className="text-xs text-slate-500 dark:text-slate-400">One attempt per number per session · 100-attempt limit · 9am–8pm local window. Use a list grouped by timezone; per-lead timeZone overrides are respected. Answered calls wait for a saved disposition or explicit skip. Pause preserves the live call.</p>
+          {!owned && active ? <p className="text-sm text-amber-600">This session is controlled by another browser. Close it there or wait for recovery.</p> : null}
+        </>
+      ) : null}
+      {error && mode !== "manual" ? <p className="text-sm text-red-600" role="alert">{error}</p> : null}
+    </div>
+  );
+}

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 
 import { logInfo } from "@/lib/logger";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { prisma } from "@/lib/workstation-db";
 import { parseTelnyxEvent } from "@/lib/telnyx/events";
 import { verifyTelnyxSignature } from "@/lib/telnyx/signature";
@@ -62,7 +63,7 @@ export async function POST(request: NextRequest) {
   try {
     parsedEvent = parseTelnyxEvent(rawBody);
   } catch {
-    const eventId = `raw-${createHash("sha256").update(`${timestampHeader ?? "no-ts"}|${rawBody}`).digest("hex")}`;
+    const eventId = `raw-${createHash("sha256").update(rawBody).digest("hex")}`;
 
     try {
       await prisma.telnyxWebhookEvent.create({
@@ -91,7 +92,7 @@ export async function POST(request: NextRequest) {
 
   const eventId =
     parsedEvent.data.id ??
-    `raw-${createHash("sha256").update(`${timestampHeader ?? "no-ts"}|${rawBody}`).digest("hex")}`;
+    `raw-${createHash("sha256").update(rawBody).digest("hex")}`;
 
   const callControlId =
     typeof parsedEvent.data.payload?.call_control_id === "string"
@@ -105,33 +106,32 @@ export async function POST(request: NextRequest) {
       signatureError: signatureResult.verified ? undefined : signatureResult.reason,
     });
 
-    const stored = await prisma.telnyxWebhookEvent.create({
-      data: {
-        eventId,
-        eventType: parsedEvent.data.event_type,
-        callControlId,
-        payloadJson: parsedEvent,
-        signatureVerified: signatureResult.verified,
-        processingError: signatureResult.verified ? null : signatureResult.reason,
-      },
-    });
-
     if (!signatureResult.verified) {
       return NextResponse.json({ accepted: false, error: signatureResult.reason }, { status: 401 });
     }
+    // Verify before insertion: unsigned deliveries cannot poison a valid event ID.
+    // A conflict is retried unless the event was actually processed successfully.
+    const db = getSupabaseAdmin();
+    const { error: insertError } = await db.from("workstation_telnyx_webhook_events").upsert({
+      event_id: eventId, event_type: parsedEvent.data.event_type, call_control_id: callControlId,
+      payload_json: parsedEvent, signature_verified: true,
+    }, { onConflict: "event_id", ignoreDuplicates: true });
+    if (insertError) throw new Error(insertError.message);
+    const { data: stored, error: readError } = await db.from("workstation_telnyx_webhook_events")
+      .select("id,signature_verified").eq("event_id", eventId).single();
+    if (readError || !stored) throw new Error(readError?.message ?? "Webhook persistence failed");
+    if (!stored.signature_verified) {
+      const { error } = await db.from("workstation_telnyx_webhook_events").update({
+        signature_verified: true, payload_json: parsedEvent, processing_error: null,
+      }).eq("id", stored.id);
+      if (error) throw new Error(error.message);
+    }
+    parsedEvent.data.id = eventId;
 
     await processVoiceWebhookEvent(stored.id, parsedEvent);
 
     return NextResponse.json({ accepted: true });
-  } catch (error) {
-    if (error instanceof Error && error.message.toLowerCase().includes("duplicate")) {
-      logInfo("Duplicate Telnyx webhook ignored", {
-        eventId,
-      });
-
-      return NextResponse.json({ accepted: true, duplicate: true });
-    }
-
+  } catch {
     return NextResponse.json({ accepted: false }, { status: 500 });
   }
 }

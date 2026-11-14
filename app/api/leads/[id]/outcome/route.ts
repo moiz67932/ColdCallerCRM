@@ -2,9 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
 import { requireApiAuth } from "@/lib/api-auth";
-import { CallOutcome, type CallOutcome as CallOutcomeType, type LeadDerivedStatus } from "@/lib/db-types";
+import { CallOutcome, type CallOutcome as CallOutcomeType } from "@/lib/db-types";
 import { formatUnknownError, jsonError } from "@/lib/http";
 import { prisma } from "@/lib/workstation-db";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { sanitizeUserText } from "@/lib/sanitize";
 import { computeAttemptSummary } from "@/lib/telnyx/call-flow";
 
 const outcomeSchema = z.object({
@@ -14,23 +16,6 @@ const outcomeSchema = z.object({
   callbackAt: z.string().datetime().optional(),
   nextAction: z.string().optional(),
 });
-
-function mapLeadStatus(outcome: CallOutcomeType): LeadDerivedStatus {
-  switch (outcome) {
-    case "bad_number":
-      return "bad_number";
-    case "interested":
-      return "interested";
-    case "demo_requested":
-      return "demo_requested";
-    case "not_interested":
-      return "closed_lost";
-    case "callback":
-      return "follow_up";
-    default:
-      return "contacted";
-  }
-}
 
 export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const authError = await requireApiAuth(request, { mutation: true });
@@ -58,57 +43,23 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     if (callAttempt && callAttempt.leadId !== leadId) {
       return jsonError("Call attempt not found for this lead", 404);
     }
-
-    const callbackAt = payload.callbackAt ? new Date(payload.callbackAt) : null;
-
-    const now = new Date();
-    const updatedAttempt = callAttempt
-      ? await prisma.callAttempt.update({
-          where: { id: callAttempt.id },
-          data: {
-            outcome: payload.outcome,
-            operatorNotes: payload.operatorNotes ?? callAttempt.operatorNotes,
-            callbackAt,
-            nextAction: payload.nextAction ?? callAttempt.nextAction,
-          },
-        })
-      : await prisma.callAttempt.create({
-          data: {
-            leadId,
-            status: "completed",
-            outcome: payload.outcome,
-            operatorNotes: payload.operatorNotes,
-            callbackAt,
-            nextAction: payload.nextAction,
-            startedAt: now,
-            endedAt: now,
-            durationSeconds: 0,
-            rawSummaryJson: {
-              source: "manual_outcome",
-              outcome: payload.outcome,
-            },
-          },
-        });
-
-    if (payload.outcome === "callback" && callbackAt) {
-      await prisma.followUp.create({
-        data: {
-          leadId,
-          callAttemptId: updatedAttempt.id,
-          dueAt: callbackAt,
-          status: "open",
-          channel: "call",
-          note: payload.nextAction ?? "Callback requested",
-        },
-      });
+    if (callAttempt?.dialSessionId && !callAttempt.endedAt) {
+      return jsonError("End the session call before saving its after-call disposition", 409);
     }
 
-    await prisma.lead.update({
-      where: { id: leadId },
-      data: {
-        derivedStatus: mapLeadStatus(payload.outcome),
-      },
+    const now = new Date();
+    const targetAttempt = callAttempt ?? await prisma.callAttempt.create({
+      data: { leadId, status: "completed", startedAt: now, endedAt: now, durationSeconds: 0,
+        rawSummaryJson: { source: "manual_outcome" } },
     });
+    const { error } = await getSupabaseAdmin().rpc("portive_save_disposition", {
+      p_attempt_id: targetAttempt.id, p_lead_id: leadId, p_outcome: payload.outcome,
+      p_notes: payload.operatorNotes === undefined ? null : sanitizeUserText(payload.operatorNotes),
+      p_callback: payload.callbackAt ?? null, p_next_action: payload.nextAction ?? null,
+    });
+    if (error) throw new Error(error.message);
+    const updatedAttempt = await prisma.callAttempt.findUnique({ where: { id: targetAttempt.id } });
+    if (!updatedAttempt) throw new Error("Saved call attempt could not be reloaded");
 
     await computeAttemptSummary(updatedAttempt.id);
 

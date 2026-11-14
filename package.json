@@ -9,7 +9,12 @@
     "lint": "eslint",
     "demo-agent:backfill": "tsx scripts/backfill-lead-profile-extraction.ts",
     "playwright:install": "playwright install chromium",
-    "test": "node --test --import tsx tests/**/*.test.ts"
+    "test": "node --test --import tsx tests/*.test.ts tests/**/*.test.ts",
+    "test:dialer": "node --test --import tsx tests/dialer/*.test.ts tests/lead-queue.test.ts",
+    "test:dialer:db": "node --test --import tsx tests/dialer/database.integration.ts",
+    "dialer:watchdog": "node --env-file=.env.local --import tsx scripts/dialer-watchdog.ts",
+    "test:parallel:db": "node --test --import tsx tests/dialer/parallel.integration.ts",
+    "parallel:check": "node --env-file=.env.local --import tsx scripts/parallel-provider-check.ts"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.2.12",
