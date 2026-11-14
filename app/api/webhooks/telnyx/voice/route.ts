@@ -9,6 +9,7 @@ import { parseTelnyxEvent } from "@/lib/telnyx/events";
 import { verifyTelnyxSignature } from "@/lib/telnyx/signature";
 import { processVoiceWebhookEvent } from "@/lib/telnyx/webhook-processor";
 
+import { orchestrationBackend, wakeOrchestration } from "@/lib/dialer/orchestration";
 export const runtime = "nodejs";
 
 function getStringPayloadValue(payload: Record<string, unknown> | undefined, key: string) {
@@ -54,6 +55,7 @@ function getVoiceWebhookReceiptContext(parsedEvent: ReturnType<typeof parseTelny
 }
 
 export async function POST(request: NextRequest) {
+  const vercelArrival = Date.now();
   const rawBody = await request.text();
   const signatureHeader = request.headers.get("telnyx-signature-ed25519");
   const timestampHeader = request.headers.get("telnyx-timestamp");
@@ -90,6 +92,7 @@ export async function POST(request: NextRequest) {
     timestampHeader,
   });
 
+  const vercelAuthenticated = Date.now();
   const eventId =
     parsedEvent.data.id ??
     `raw-${createHash("sha256").update(rawBody).digest("hex")}`;
@@ -114,7 +117,7 @@ export async function POST(request: NextRequest) {
     const db = getSupabaseAdmin();
     const { error: insertError } = await db.from("workstation_telnyx_webhook_events").upsert({
       event_id: eventId, event_type: parsedEvent.data.event_type, call_control_id: callControlId,
-      payload_json: parsedEvent, signature_verified: true,
+      payload_json: parsedEvent, signature_verified: true, raw_body: rawBody,
     }, { onConflict: "event_id", ignoreDuplicates: true });
     if (insertError) throw new Error(insertError.message);
     const { data: stored, error: readError } = await db.from("workstation_telnyx_webhook_events")
@@ -128,7 +131,14 @@ export async function POST(request: NextRequest) {
     }
     parsedEvent.data.id = eventId;
 
-    await processVoiceWebhookEvent(stored.id, parsedEvent);
+    await processVoiceWebhookEvent(stored.id, parsedEvent, {rawBody,signature:signatureHeader??"",timestamp:timestampHeader??"",vercelArrival,vercelAuthenticated});
+    if (orchestrationBackend() === "cloudflare" && callControlId) {
+      const { data: attempt } = await db.from("call_attempts").select("dial_session_id").or(`telnyx_call_control_id.eq.${callControlId},telnyx_agent_call_control_id.eq.${callControlId}`).limit(1).maybeSingle();
+      if (attempt?.dial_session_id) {
+        const { data: session } = await db.from("dial_sessions").select("mode").eq("id",attempt.dial_session_id).maybeSingle();
+        if (session?.mode === "power") await wakeOrchestration(attempt.dial_session_id);
+      }
+    }
 
     return NextResponse.json({ accepted: true });
   } catch {

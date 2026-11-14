@@ -1,5 +1,7 @@
 # ColdCaller CRM
 
+Cloudflare Workers + Durable Objects orchestration: [setup and rollback](docs/CLOUDFLARE-DIALER.md), [architecture audit](docs/CLOUDFLARE-DIALER-AUDIT.md).
+
 Current four-line Parallel engine, configuration and live-verification requirements: [Parallel Dialer](docs/PARALLEL-DIALER.md).
 
 Cold-calling CRM built with Next.js, Supabase, and Telnyx.

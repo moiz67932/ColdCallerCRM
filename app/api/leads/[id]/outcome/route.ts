@@ -7,6 +7,7 @@ import { formatUnknownError, jsonError } from "@/lib/http";
 import { prisma } from "@/lib/workstation-db";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { sanitizeUserText } from "@/lib/sanitize";
+import { wakeOrchestration } from "@/lib/dialer/orchestration";
 import { computeAttemptSummary } from "@/lib/telnyx/call-flow";
 
 const outcomeSchema = z.object({
@@ -62,6 +63,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     if (!updatedAttempt) throw new Error("Saved call attempt could not be reloaded");
 
     await computeAttemptSummary(updatedAttempt.id);
+    if (updatedAttempt.dialSessionId) await wakeOrchestration(updatedAttempt.dialSessionId);
 
     return NextResponse.json({ attempt: updatedAttempt });
   } catch (error) {

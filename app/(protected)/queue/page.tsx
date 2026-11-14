@@ -1762,6 +1762,16 @@ export default function QueuePage() {
     return () => clearInterval(timer);
   }, [dialSession?.id, dialSession?.mode, micPermission]);
 
+  const audioReportedAttempts = useRef(new Set<string>());
+  useEffect(() => {
+    if (dialSession?.mode !== "parallel" || !dialSession.active_call_id) return;
+    const winner=parallelAttempts.find(a=>a.id===dialSession.active_call_id && a.was_bridged_to_operator && !a.ended_at);
+    const audio=remoteAudioRef.current;
+    if (!winner || !audio || audio.paused || audio.readyState<2 || audioReportedAttempts.current.has(winner.id)) return;
+    audioReportedAttempts.current.add(winner.id);
+    void fetch(`/api/dial-sessions/${dialSession.id}/telemetry`, {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({controllerId:sessionStorage.getItem("portive-controller"),attemptId:winner.id,clientAt:Date.now(),event:"operator_audio_available"})});
+  }, [dialSession?.id,dialSession?.mode,dialSession?.active_call_id,parallelAttempts]);
+
   useEffect(() => { notificationHandlerRef.current = handleWebRtcNotification; });
 
   useEffect(() => {

@@ -9,7 +9,7 @@ import { evidenceBlockers } from "../lib/dialer/parallel-policy";
 async function main() {
   const required = (name: string) => { const value=process.env[name]; if(!value) throw new Error(`Missing ${name}`); return value; };
   const connection=process.env.TELNYX_PARALLEL_CONNECTION_ID || required("TELNYX_CONNECTION_ID"), credential=required("TELNYX_TELEPHONY_CREDENTIAL_ID");
-  const config={connection,credential,callerId:required("TELNYX_FROM_NUMBER"),webhook:`${required("APP_BASE_URL").replace(/\/$/,"")}/api/webhooks/telnyx/voice`,amd:"premium",deadlineMs:1000};
+  const config={connection,credential,callerId:required("TELNYX_FROM_NUMBER"),webhook:`${required("APP_BASE_URL").replace(/\/$/,"")}/api/webhooks/telnyx/voice`,amd:"premium",deadlineMs:1000,...(process.env.DIALER_ORCHESTRATION_BACKEND === "cloudflare" ? {orchestrationBackend:"cloudflare"} : {})};
   const fingerprint=parallelFingerprint(config);
   const client=new Telnyx({apiKey:required("TELNYX_API_KEY"),maxRetries:0});
   const [application,browser]=await Promise.all([client.callControlApplications.retrieve(connection),client.telephonyCredentials.retrieve(credential)]);
@@ -20,7 +20,7 @@ async function main() {
   const reportIndex=process.argv.indexOf("--report");
   if(reportIndex<0) { console.log("Read-only check complete. Controlled audio/collision evidence is still required to enable Parallel Mode."); return; }
   const report=JSON.parse(readFileSync(process.argv[reportIndex+1],"utf8"));
-  const blockers=evidenceBlockers(report);
+  const blockers=evidenceBlockers(report, process.env.DIALER_ORCHESTRATION_BACKEND === "cloudflare" ? "cloudflare" : "node");
   if(blockers.length) throw new Error(blockers.join(" "));
   if(report.config_fingerprint!==fingerprint || report.profile_id!==profileId) throw new Error("Controlled report does not match this provider configuration");
   const age=Date.now()-Date.parse(report.verified_at);

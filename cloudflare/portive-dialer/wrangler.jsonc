@@ -1,0 +1,74 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "portive-dialer",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-14",
+  "workers_dev": true,
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "SessionCoordinator"
+      ]
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SESSIONS",
+        "class_name": "SessionCoordinator"
+      }
+    ]
+  },
+  "triggers": {
+    "crons": [
+      "*/5 * * * *"
+    ]
+  },
+  "vars": {
+    "DEPLOYMENT_ENV": "local",
+    "DIALER_PARALLEL_ENABLED": "false"
+  },
+  "env": {
+    "staging": {
+      "name": "portive-dialer-staging",
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "SESSIONS",
+            "class_name": "SessionCoordinator"
+          }
+        ]
+      },
+      "vars": {
+        "DEPLOYMENT_ENV": "staging",
+        "DIALER_PARALLEL_ENABLED": "false"
+      },
+      "triggers": {
+        "crons": [
+          "*/5 * * * *"
+        ]
+      }
+    },
+    "production": {
+      "name": "portive-dialer-production",
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "SESSIONS",
+            "class_name": "SessionCoordinator"
+          }
+        ]
+      },
+      "vars": {
+        "DEPLOYMENT_ENV": "production",
+        "DIALER_PARALLEL_ENABLED": "false"
+      },
+      "triggers": {
+        "crons": [
+          "*/5 * * * *"
+        ]
+      }
+    }
+  }
+}

@@ -1,5 +1,7 @@
 # Portive dialer upgrade — implementation and verification
 
+Current serverless orchestration and deployment instructions: [Cloudflare Dialer](CLOUDFLARE-DIALER.md). The persistent Node watchdog remains available as a fenced rollback backend.
+
 The Parallel implementation has since been extended. See [PARALLEL-DIALER.md](PARALLEL-DIALER.md) for current behavior and readiness gates. The original Parallel status and test counts below describe the earlier delivery.
 
 ## 1. Architecture discovered

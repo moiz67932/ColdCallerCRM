@@ -1,10 +1,12 @@
 # Portive Parallel Dialer
 
+Current serverless orchestration and deployment instructions: [Cloudflare Dialer](CLOUDFLARE-DIALER.md). The persistent Node watchdog remains available as a fenced rollback backend.
+
 ## Current delivery
 
 The previous hard-coded rejection has been replaced by a real Telnyx Call Control adapter, durable PostgreSQL batch engine and four-line interface. Parallel eligibility is now determined by provider configuration and controlled verification evidence. The feature flag alone cannot release live dialing.
 
-**This checkout is not live-verified.** It has no `.env.local`, Telnyx credentials or controlled provider report. No real telephone calls were made. Live Parallel Mode remains unavailable until provider configuration and controlled-call evidence are verified. Overflow staffing and failure audio are not required for the ordinary single-operator flow. Existing Manual and Power workflows remain in the application.
+**This checkout is not live-verified.** Its current local environment has invalid URL values and missing WebRTC credentials; no controlled Cloudflare provider report has been installed. No real telephone calls were made. Live Parallel Mode remains unavailable until provider configuration and controlled-call evidence are verified. Overflow staffing and failure audio are not required for the ordinary single-operator flow. Existing Manual and Power workflows remain in the application.
 
 ## Implemented architecture
 

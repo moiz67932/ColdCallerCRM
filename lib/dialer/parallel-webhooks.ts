@@ -2,7 +2,10 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import type { TelnyxWebhookPayload } from "@/lib/telnyx/events";
 import { startAttemptRecording } from "@/lib/telnyx/call-flow";
 
-export async function handleParallelWebhook(event: TelnyxWebhookPayload) {
+import { cloudflareRequest, orchestrationBackend } from "./orchestration";
+export type ProviderDelivery = { rawBody: string; signature: string; timestamp: string; vercelArrival: number; vercelAuthenticated: number };
+
+export async function handleParallelWebhook(event: TelnyxWebhookPayload, delivery?: ProviderDelivery) {
   const payload = event.data.payload ?? {};
   let state: { sessionId?: string; attemptId?: string; role?: string } = {};
   try { state = JSON.parse(Buffer.from(String(payload.client_state ?? ""), "base64").toString("utf8")); } catch { /* Fall back to durable provider IDs. */ }
@@ -18,6 +21,21 @@ export async function handleParallelWebhook(event: TelnyxWebhookPayload) {
   if (!state.sessionId) return false;
   // Reuse recording/transcript storage and history identifiers without issuing a second bridge.
   if (event.data.event_type.startsWith("call.recording.")) return false;
+  const { data: owner, error: ownerError } = await db.from("dial_sessions").select("orchestration_backend,status").eq("id",state.sessionId).single();
+  if (ownerError || !owner) throw new Error("Unable to resolve orchestration ownership");
+  const terminal=["stopped","completed"].includes(owner.status);
+  if (owner.orchestration_backend !== orchestrationBackend() || (terminal && state.role === "operator")) {
+    if (!terminal) throw new Error("Active session belongs to a different orchestration backend");
+    const {error}=await db.rpc("portive_orchestration_terminal_event",{p_session:state.sessionId,p_attempt:state.attemptId??null,p_role:state.role,p_event:event});
+    if(error)throw new Error(error.message);
+    return true;
+  }
+  if (orchestrationBackend() === "cloudflare") {
+    if (!delivery) throw new Error("Original signed Telnyx delivery is required for Cloudflare forwarding");
+    await cloudflareRequest(`/internal/session/${state.sessionId}`, {kind:"event",eventId:event.data.id,delivery:{...delivery,...state}});
+    if (event.data.event_type === "call.bridged" && state.attemptId && state.role === "lead") await startAttemptRecording(state.attemptId);
+    return true;
+  }
   const { error } = await db.rpc("portive_parallel_event", {
     p_session: state.sessionId, p_attempt: state.attemptId ?? null, p_role: state.role,
     p_type: event.data.event_type, p_payload: payload,

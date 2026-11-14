@@ -3,12 +3,13 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { getTelnyxClient } from "@/lib/telnyx/client";
 import { getVoiceWebhookUrl } from "@/lib/telnyx/helpers";
 import { evidenceBlockers } from "./parallel-policy";
+import { cloudflareRequest, orchestrationBackend } from "./orchestration";
 import { parallelFingerprint } from "./parallel-fingerprint";
 
 export function parallelConfiguration() {
   return {
     connection: env.TELNYX_PARALLEL_CONNECTION_ID || env.TELNYX_CONNECTION_ID, credential: env.TELNYX_TELEPHONY_CREDENTIAL_ID,
-    callerId: env.TELNYX_FROM_NUMBER, webhook: getVoiceWebhookUrl(), amd: "premium", deadlineMs: 1000,
+    callerId: env.TELNYX_FROM_NUMBER, webhook: getVoiceWebhookUrl(), amd: "premium", deadlineMs: 1000, ...(orchestrationBackend() === "cloudflare" ? { orchestrationBackend: "cloudflare" } : {}),
   };
 }
 
@@ -32,10 +33,19 @@ export async function parallelReadiness(verifyProvider = false) {
     const transport = await getSupabaseAdmin().rpc("portive_parallel_transport_ready");
     if (transport.error || transport.data !== true) blockers.push("Supabase Realtime publication for sessions and attempts is unavailable.");
   } else blockers.push("Supabase configuration is missing.");
-  blockers.push(...evidenceBlockers(verification?.evidence ?? null));
+  blockers.push(...evidenceBlockers(verification?.evidence ?? null, orchestrationBackend()));
   let sipUri: string | undefined;
   let availableCreditCents = 0;
   let channels = verification?.account_channels ?? 0;
+  if (orchestrationBackend() === "cloudflare") {
+    if (env.DIALER_CLOUDFLARE_ENABLED !== "true" || !env.DIALER_CLOUDFLARE_URL || !env.DIALER_CLOUDFLARE_SECRET) blockers.push("Configure and enable Cloudflare orchestration before starting sessions.");
+    if (verifyProvider && !blockers.length) {
+      try {
+        const worker = await cloudflareRequest("/internal/prepare", {});
+        if (!worker.parallelEnabled || worker.fingerprint !== fingerprint) blockers.push("Cloudflare dialing flag or configuration differs from the verified Vercel configuration.");
+      } catch { blockers.push("Cloudflare orchestration readiness check failed."); }
+    }
+  }
   if (verifyProvider && !blockers.length && verification) {
     try {
       const client = getTelnyxClient();

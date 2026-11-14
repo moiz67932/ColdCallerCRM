@@ -6,6 +6,8 @@ import { dispatchCommands } from "./parallel-dispatch";
 import { parallelConfiguration } from "./parallel-readiness";
 import { parallelFingerprint } from "./parallel-fingerprint";
 
+import { assertOrchestrationBackend, orchestrationBackend } from "./orchestration";
+
 export type ParallelCommand = {
   id: string; session_id: string; attempt_id: string | null; action: string;
   parameters: Record<string, string>; state: string;
@@ -14,6 +16,8 @@ export type ParallelCommand = {
 // Separate interface permits controlled tests to hold every dial request in flight
 // and verify actual concurrent invocation without accessing the phone network.
 export async function tickParallelSessions() {
+  if (orchestrationBackend() !== "node") throw new Error("Node executor is disabled for this backend");
+  await assertOrchestrationBackend();
   const db = getSupabaseAdmin();
   const { data, error } = await db.from("dial_sessions").select("id,controller_id,status,parallel_options").eq("mode", "parallel")
     .in("status", ["running", "paused", "stopping", "unsafe"]);
@@ -32,6 +36,8 @@ export async function tickParallelSessions() {
 }
 
 export async function drainParallelCommands() {
+  if (orchestrationBackend() !== "node") throw new Error("Node executor is disabled for this backend");
+  await assertOrchestrationBackend();
   const db = getSupabaseAdmin();
   // A process crash after a command was sent is uncertain, never a redial lease.
   const { data: stale } = await db.from("dial_commands").update({ state: "uncertain", error: "Worker lost command acknowledgement" })

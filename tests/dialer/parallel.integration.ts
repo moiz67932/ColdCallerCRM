@@ -17,6 +17,7 @@ function sql(query: string, database = dbName) {
 }
 function fixture() {
   sql(`truncate public.dial_audit_events,public.dial_session_targets,public.dial_sessions,public.lead_lists cascade;
+    select public.portive_set_orchestration_backend('node',false);
     delete from public.dial_suppressions;
     insert into public.app_settings(key,value_json) values('dialer_watchdog_heartbeat',jsonb_build_object('at',now()))
       on conflict(key) do update set value_json=excluded.value_json;
@@ -69,6 +70,7 @@ test("parallel migrations apply on top of the Power schema and rerun without los
   assert.equal(sql("select count(*) from public.dialer_provider_verifications where config_fingerprint='rerun-marker'"),"1");
   sql("update public.dialer_provider_verifications set overflow_slots=0 where config_fingerprint='rerun-marker'");
   sql("delete from public.dialer_provider_verifications where config_fingerprint='rerun-marker'");
+  sql(readFileSync("supabase/migrations/202611140002_cloudflare_orchestration.sql", "utf8"));
 });
 test("no prospects are reserved until both provider answer and browser media acknowledgement", () => {
   setup(); const s=invoke("start").id; invoke("tick",s); assert.equal(sql("select count(*) from public.call_attempts"),"0");
@@ -262,4 +264,117 @@ test("Realtime failure pauses the scheduler without interrupting healthy operato
   invoke("heartbeat",s,{transportReady:false});invoke("tick",s);
   assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),"paused");
   assert.equal(sql(`select overflow_state is null from public.call_attempts where id='${a[0].id}'`),"t");
+});
+
+function cloudflareWork(s: string) {return JSON.parse(sql(`select public.portive_orchestration_work('${s}')`));}
+function cloudflareComplete(command: {id:string}, ok=true, status=0, control="fixture-control") {
+  sql(`select public.portive_orchestration_complete('${command.id}',${ok},'{"data":{"call_control_id":"${control}"}}',${status})`);
+}
+function cloudflareStart() {
+  setup();sql("select public.portive_set_orchestration_backend('cloudflare',true);select public.portive_orchestration_prepare('cloudflare')");
+  const s=invoke('start').id,op=cloudflareWork(s).commands;
+  assert.equal(op.length,1);assert.equal(op[0].action,'dial_operator');cloudflareComplete(op[0],true,0,'operator');
+  event(s,null,'operator','call.answered',{call_control_id:'operator'});invoke('operator_ready',s,{callControlId:'operator'});
+  const work=cloudflareWork(s);assert.equal(work.commands.length,4);
+  for(const c of work.commands) cloudflareComplete(c,true,0,c.attempt_id);
+  return s as string;
+}
+function cloudflareEvent(s:string,a:string,type:string,payload:Record<string,unknown>,eventId=crypto.randomUUID()) {
+  const ev={data:{id:eventId,event_type:type,occurred_at:new Date().toISOString(),payload}};
+  return JSON.parse(sql(`select public.portive_cloudflare_event('${s}','${a}','lead','${JSON.stringify(ev)}','${JSON.stringify(ev)}','{"cloudflareArrival":1}')`));
+}
+test('Cloudflare owns each session and fences Node claims and unsafe backend switches',()=>{
+  const s=cloudflareStart();assert.equal(sql(`select orchestration_backend from public.dial_sessions where id='${s}'`),'cloudflare');
+  assert.throws(()=>sql('select public.portive_claim_parallel_commands(4)'),/backend mismatch/);
+  assert.throws(()=>sql("select public.portive_set_orchestration_backend('node',false)"),/Finish sessions/);
+  assert.equal(cloudflareWork(s).commands.length,0);
+});
+test('Cloudflare event RPC claims winner and returns immediate bridge plus ringing cancellations',()=>{
+  const s=cloudflareStart(),a=attempts(s);
+  cloudflareEvent(s,a[0].id,'call.answered',{call_control_id:a[0].id});
+  const work=cloudflareEvent(s,a[0].id,'call.machine.premium.detection.ended',{result:'human_business'});
+  assert.equal(work.session.active_call_id,a[0].id);assert.equal(work.commands.filter((c:{action:string})=>c.action==='bridge').length,1);
+  assert.equal(sql(`select count(*) from public.call_attempts where dial_session_id='${s}' and technical_state='canceled_after_winner'`),'3');
+  assert.equal(sql(`select count(*) from public.dial_commands where session_id='${s}' and action='dial_lead'`),'4');
+});
+test('Cloudflare duplicate and delayed events retain one operator bridge and distinct collision',()=>{
+  const s=cloudflareStart(),a=attempts(s);
+  for(const item of a.slice(0,2)) cloudflareEvent(s,item.id,'call.answered',{call_control_id:item.id});
+  const key=crypto.randomUUID();cloudflareEvent(s,a[0].id,'call.machine.premium.detection.ended',{result:'human_business'},key);
+  cloudflareEvent(s,a[0].id,'call.machine.premium.detection.ended',{result:'human_business'},key);
+  cloudflareEvent(s,a[1].id,'call.machine.premium.detection.ended',{result:'human_business'});
+  cloudflareEvent(s,a[0].id,'call.machine.premium.detection.ended',{result:'machine'});
+  assert.equal(sql(`select count(*) from public.dial_commands where session_id='${s}' and action='bridge'`),'1');
+  assert.equal(sql(`select technical_state from public.call_attempts where id='${a[1].id}'`),'answer_collision');
+  assert.equal(sql(`select active_call_id from public.dial_sessions where id='${s}'`),a[0].id);
+});
+test('Cloudflare stale command acknowledgement is uncertain and cannot be redialed after restart',()=>{
+  const s=cloudflareStart();sql(`update public.dial_commands set state='executing',claimed_at=now()-interval '61 seconds' where session_id='${s}' and action='dial_lead'`);
+  const work=cloudflareWork(s);assert.equal(work.session.status,'unsafe');
+  assert.equal(work.commands.filter((c:{action:string})=>c.action==='dial_lead').length,0);
+  assert.equal(sql(`select count(*) from public.dial_commands where session_id='${s}' and action='dial_lead' and state='uncertain'`),'4');
+});
+test('Cloudflare bridge rejection pauses and queues provider cleanup without a replacement dial',()=>{
+  const s=cloudflareStart(),a=attempts(s);cloudflareEvent(s,a[0].id,'call.answered',{call_control_id:a[0].id});
+  const work=cloudflareEvent(s,a[0].id,'call.machine.premium.detection.ended',{result:'human_business'}),bridge=work.commands.find((c:{action:string})=>c.action==='bridge');
+  cloudflareComplete(bridge,false,422);assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),'unsafe');
+  assert.equal(sql(`select count(*) from public.dial_commands where command_key='${a[0].id}:bridge-failure' and action='hangup'`),'1');
+});
+test('Cloudflare missed terminal webhook reconciliation retains reservations and disposition safety',()=>{
+  const s=cloudflareStart(),a=attempts(s);answer(s,a[0].id);event(s,a[0].id,'lead','call.bridged');
+  sql(`select public.portive_orchestration_reconcile('${s}','${a[0].id}',false,'${a[0].id}')`);
+  assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),'unsafe');
+  assert.equal(sql(`select ended_at is not null from public.call_attempts where id='${a[0].id}'`),'t');
+  assert.equal(sql(`select disposition_saved_at is null from public.call_attempts where id='${a[0].id}'`),'t');
+  assert.throws(()=>sql(`select public.portive_orchestration_reconcile('${s}','${a[1].id}',false,'wrong-control')`),/identity mismatch/);
+});
+test('Cloudflare alarms only receive future relevant deadlines',()=>{
+  const s=cloudflareStart();const work=cloudflareWork(s);assert(work.deadlines.length>0);
+  for(const deadline of work.deadlines)assert(Date.parse(deadline)>Date.now()-1000);
+});
+test('Cloudflare migration reruns safely after its own readiness replacements',()=>{
+  setup();sql(readFileSync('supabase/migrations/202611140002_cloudflare_orchestration.sql','utf8'));
+  assert.doesNotThrow(()=>sql("select public.portive_orchestration_guard('node')"));
+  assert.throws(()=>sql("set role anon; select public.portive_orchestration_prepare('cloudflare')"),/permission denied/);
+});
+test('Cloudflare bounded operator recovery cleans a parked leg without changing winner rules',()=>{
+ const s=cloudflareStart();sql(`update public.dial_sessions set started_at=now()-interval '31 minutes' where id='${s}'`);
+ const work=cloudflareWork(s);assert.equal(work.operator_reconcile,true);
+ sql(`select public.portive_orchestration_operator('${s}','operator',true)`);
+ assert.equal(sql(`select count(*) from public.dial_commands where session_id='${s}' and action='hangup_operator'`),'1');
+ sql(`select public.portive_orchestration_operator('${s}','operator',false)`);
+ assert.equal(sql(`select operator_leg_state from public.dial_sessions where id='${s}'`),'disconnected');
+});
+test('Cloudflare zero-worker enablement cannot authorize dialing',()=>{
+ setup();sql("select public.portive_set_orchestration_backend('cloudflare',false)");
+ assert.throws(()=>sql("select public.portive_orchestration_prepare('cloudflare')"),/disabled/);
+});
+test('Cloudflare uncertain bridge acknowledgement preserves the possibly connected winner',()=>{
+ const s=cloudflareStart(),a=attempts(s);cloudflareEvent(s,a[0].id,'call.answered',{call_control_id:a[0].id});
+ const work=cloudflareEvent(s,a[0].id,'call.machine.premium.detection.ended',{result:'human_business'}),bridge=work.commands.find((c:{action:string})=>c.action==='bridge');
+ cloudflareComplete(bridge,false,0);
+ assert.equal(sql(`select count(*) from public.dial_commands where attempt_id='${a[0].id}' and action='hangup'`),'0');
+ assert.equal(sql(`select active_call_id from public.dial_sessions where id='${s}'`),a[0].id);
+});
+test('Cloudflare final authorization cancels a stale unsent prospect command after winner selection',()=>{
+ const s=cloudflareStart(),a=attempts(s);answer(s,a[0].id);
+ const c=sql(`select id from public.dial_commands where attempt_id='${a[1].id}' and action='dial_lead'`);
+ sql(`update public.dial_commands set state='executing' where id='${c}'`);
+ assert.equal(JSON.parse(sql(`select public.portive_orchestration_authorize('${c}')`)).allowed,false);
+});
+test('Cloudflare operator cleanup cannot bypass an ended winner disposition',()=>{
+ const s=cloudflareStart(),a=attempts(s);answer(s,a[0].id);event(s,a[0].id,'lead','call.bridged');
+ for(const item of a)event(s,item.id,'lead','call.hangup');
+ sql(`select public.portive_orchestration_operator('${s}','operator',false)`);
+ assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),'unsafe');
+ assert.equal(sql(`select active_call_id from public.dial_sessions where id='${s}'`),a[0].id);
+ assert.throws(()=>sql("select public.portive_set_orchestration_backend('node',false)"),/Finish sessions/);
+});
+test('Cloudflare late answered cancellation after rollback stays audited without a competing executor',()=>{
+ const s=cloudflareStart(),a=attempts(s);sql(`update public.call_attempts set ended_at=now(),status='canceled',technical_state='canceled_after_winner' where dial_session_id='${s}';update public.dial_commands set state='confirmed' where session_id='${s}';update public.dial_sessions set status='stopped',operator_terminal_at=now() where id='${s}';select public.portive_set_orchestration_backend('node',false)`);
+ const key=crypto.randomUUID(),ev={data:{id:key,event_type:'call.answered',occurred_at:new Date().toISOString(),payload:{}}};
+ sql(`insert into public.workstation_telnyx_webhook_events(event_id,event_type,payload_json,signature_verified) values('${key}','call.answered','${JSON.stringify(ev)}',true);select public.portive_orchestration_terminal_event('${s}','${a[0].id}','lead','${JSON.stringify(ev)}')`);
+ assert.equal(sql(`select technical_state from public.call_attempts where id='${a[0].id}'`),'answer_collision');
+ assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),'stopped');
+ assert.equal(sql(`select count(*) from public.dial_commands where session_id='${s}' and state<>'confirmed'`),'0');
 });

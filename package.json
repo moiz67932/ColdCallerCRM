@@ -14,7 +14,9 @@
     "test:dialer:db": "node --test --import tsx tests/dialer/database.integration.ts",
     "dialer:watchdog": "node --env-file=.env.local --import tsx scripts/dialer-watchdog.ts",
     "test:parallel:db": "node --test --import tsx tests/dialer/parallel.integration.ts",
-    "parallel:check": "node --env-file=.env.local --import tsx scripts/parallel-provider-check.ts"
+    "parallel:check": "node --env-file=.env.local --import tsx scripts/parallel-provider-check.ts",
+    "test:cloudflare": "npm --prefix cloudflare/portive-dialer test",
+    "build:cloudflare": "npm --prefix cloudflare/portive-dialer run bundle"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.2.12",

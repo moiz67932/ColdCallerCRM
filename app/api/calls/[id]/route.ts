@@ -9,6 +9,7 @@ import { prisma } from "@/lib/workstation-db";
 import { hangupAttemptLegs, startAttemptRecording } from "@/lib/telnyx/call-flow";
 import { resolveClientStatus } from "@/lib/telnyx/lifecycle";
 import { isBrowserFirstManualDialFlow } from "@/lib/telnyx/call-flow";
+import { wakeOrchestration } from "@/lib/dialer/orchestration";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 function getHangupSourceFromWebhookPayload(payloadJson: JsonValue) {
@@ -144,6 +145,7 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
           p_session: attempt.dialSessionId, p_attempt: id, p_action: "hangup", p_key: `${id}:operator-end`,
         });
         if (error) throw new Error(error.message);
+        if (attempt.dialSessionId) await wakeOrchestration(attempt.dialSessionId);
       } else if (payload.status) return jsonError("Parallel lifecycle changes require provider events", 409);
       return NextResponse.json({ attempt });
     }

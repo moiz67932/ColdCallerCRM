@@ -4,6 +4,7 @@ import { getOutboundCallerId, getTelnyxManualDialFlow } from "@/lib/telnyx/helpe
 import { hangupAttemptLegs } from "@/lib/telnyx/call-flow";
 import type { DialSession, SessionCommandResult } from "./types";
 import { parallelReadiness } from "./parallel-readiness";
+import { assertOrchestrationBackend, orchestrationBackend, prepareOrchestration, wakeOrchestration } from "./orchestration";
 import type { ParallelOptions } from "./parallel-policy";
 
 export function dialerCapabilities() {
@@ -21,6 +22,8 @@ export async function sessionCommand(input: {
   options?: ParallelOptions; callControlId?: string;
   transportReady?: boolean;
 }) {
+  await assertOrchestrationBackend(input.sessionId);
+  if (["start", "resume", "next", "continue", "skip"].includes(input.action)) await prepareOrchestration();
   const existing = input.sessionId ? await getCurrentSession() : null;
   if (input.mode === "parallel" || existing?.mode === "parallel") {
     const starting = input.action === "start" || input.action === "resume";
@@ -36,6 +39,7 @@ export async function sessionCommand(input: {
         operatorSipUri: readiness?.sipUri, callControlId: input.callControlId, transportReady: input.transportReady ?? true },
     });
     if (error) throw new Error(error.message);
+    await wakeOrchestration(data.id);
     return { session: data, dispatch: false } as SessionCommandResult;
   }
   const capabilities = dialerCapabilities();
@@ -53,6 +57,7 @@ export async function sessionCommand(input: {
     p_timezone: input.timeZone ?? null, p_reviewed: input.reviewed ?? false,
   });
   if (error) throw new Error(error.message);
+  await wakeOrchestration(data.session.id);
   return { ...data, ...(data.dispatch ? { callerNumber: getOutboundCallerId() } : {}) } as SessionCommandResult;
 }
 
@@ -65,7 +70,7 @@ export async function getCurrentSession() {
 
 // No new call is ever dispatched from a watchdog or webhook. Only a ready browser can consume a claim.
 export async function stopSession(session: DialSession, endUnavailableCall = false) {
-  if (session.mode === "parallel") return session;
+  if (session.mode === "parallel" || orchestrationBackend() === "cloudflare") return session;
   const db = getSupabaseAdmin();
   try {
     if (session.active_call_id) {
@@ -93,6 +98,8 @@ export async function stopSession(session: DialSession, endUnavailableCall = fal
 }
 
 export async function sweepExpiredSessions() {
+  if (orchestrationBackend() !== "node") throw new Error("Node watchdog is disabled for the selected backend");
+  await assertOrchestrationBackend();
   const db = getSupabaseAdmin();
   const { error: heartbeatError } = await db.from("app_settings").upsert({
     key: "dialer_watchdog_heartbeat", value_json: { at: new Date().toISOString() },

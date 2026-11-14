@@ -4,7 +4,7 @@ import { logError, logInfo } from "@/lib/logger";
 import { prisma } from "@/lib/workstation-db";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { classifyAnswer } from "@/lib/telnyx/lifecycle";
-import { handleParallelWebhook } from "@/lib/dialer/parallel-webhooks";
+import { handleParallelWebhook, type ProviderDelivery } from "@/lib/dialer/parallel-webhooks";
 import {
   computeAttemptSummary,
   bridgeAttemptLegs,
@@ -738,8 +738,8 @@ async function handleHangupEvent(attempt: ExistingCallAttempt, event: TelnyxWebh
   await computeAttemptSummary(syncedAttempt.id);
 }
 
-export async function processVoiceWebhookEvent(webhookRowId: string, event: TelnyxWebhookPayload) {
-  if (await handleParallelWebhook(event)) return;
+export async function processVoiceWebhookEvent(webhookRowId: string, event: TelnyxWebhookPayload, delivery?: ProviderDelivery) {
+  if (await handleParallelWebhook(event, delivery)) return;
   const eventType = event.data.event_type;
   const payloadObj = event as unknown as JsonObject;
   let claimedEvent = false;

@@ -1,5 +1,7 @@
 # Readiness verification — 2026-11-13
 
+Cloudflare migration audit, current verification scope and staging/rollback instructions: [audit](CLOUDFLARE-DIALER-AUDIT.md), [verification](CLOUDFLARE-DIALER-VERIFICATION.md), [runbook](CLOUDFLARE-DIALER.md). Earlier counts below describe the previous delivery.
+
 Fresh checks were run after the request to resume testing. Existing working changes were preserved. No production deployment, database migration or real telephone call was performed.
 
 | Check | Result |
