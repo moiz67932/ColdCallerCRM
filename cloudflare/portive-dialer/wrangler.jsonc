@@ -21,7 +21,9 @@
     ]
   },
   "triggers": {
-    "crons": []
+    "crons": [
+      "*/5 * * * *"
+    ]
   },
   "vars": {
     "DEPLOYMENT_ENV": "local",
@@ -43,9 +45,7 @@
         "DIALER_PARALLEL_ENABLED": "false"
       },
       "triggers": {
-        "crons": [
-          "*/5 * * * *"
-        ]
+        "crons": []
       }
     },
     "production": {
