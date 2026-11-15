@@ -3,6 +3,9 @@ import { execFile, execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import test from "node:test";
+import { createRequire } from "node:module";
+import { chromium } from "playwright";
+import ts from "typescript";
 
 // Explicitly targets a disposable local container. Never reads production DB credentials.
 const container = "portive-dialer-test-20261113";
@@ -71,6 +74,7 @@ test("parallel migrations apply on top of the Power schema and rerun without los
   sql("update public.dialer_provider_verifications set overflow_slots=0 where config_fingerprint='rerun-marker'");
   sql("delete from public.dialer_provider_verifications where config_fingerprint='rerun-marker'");
   sql(readFileSync("supabase/migrations/202611140002_cloudflare_orchestration.sql", "utf8"));
+  sql(readFileSync("supabase/migrations/202611150001_parallel_dispatch_safety.sql", "utf8"));
 });
 test("no prospects are reserved until both provider answer and browser media acknowledgement", () => {
   setup(); const s=invoke("start").id; invoke("tick",s); assert.equal(sql("select count(*) from public.call_attempts"),"0");
@@ -270,12 +274,16 @@ function cloudflareWork(s: string) {return JSON.parse(sql(`select public.portive
 function cloudflareComplete(command: {id:string}, ok=true, status=0, control="fixture-control") {
   sql(`select public.portive_orchestration_complete('${command.id}',${ok},'{"data":{"call_control_id":"${control}"}}',${status})`);
 }
-function cloudflareStart() {
+function cloudflareReserved() {
   setup();sql("select public.portive_set_orchestration_backend('cloudflare',true);select public.portive_orchestration_prepare('cloudflare')");
   const s=invoke('start').id,op=cloudflareWork(s).commands;
   assert.equal(op.length,1);assert.equal(op[0].action,'dial_operator');cloudflareComplete(op[0],true,0,'operator');
   event(s,null,'operator','call.answered',{call_control_id:'operator'});invoke('operator_ready',s,{callControlId:'operator'});
   const work=cloudflareWork(s);assert.equal(work.commands.length,4);
+  return { session: s as string, work };
+}
+function cloudflareStart() {
+  const { session: s, work } = cloudflareReserved();
   for(const c of work.commands) cloudflareComplete(c,true,0,c.attempt_id);
   return s as string;
 }
@@ -334,6 +342,7 @@ test('Cloudflare alarms only receive future relevant deadlines',()=>{
 });
 test('Cloudflare migration reruns safely after its own readiness replacements',()=>{
   setup();sql(readFileSync('supabase/migrations/202611140002_cloudflare_orchestration.sql','utf8'));
+  sql(readFileSync('supabase/migrations/202611150001_parallel_dispatch_safety.sql','utf8'));
   assert.doesNotThrow(()=>sql("select public.portive_orchestration_guard('node')"));
   assert.throws(()=>sql("set role anon; select public.portive_orchestration_prepare('cloudflare')"),/permission denied/);
 });
@@ -377,4 +386,220 @@ test('Cloudflare late answered cancellation after rollback stays audited without
  assert.equal(sql(`select technical_state from public.call_attempts where id='${a[0].id}'`),'answer_collision');
  assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),'stopped');
  assert.equal(sql(`select count(*) from public.dial_commands where session_id='${s}' and state<>'confirmed'`),'0');
+});
+
+function authorize(command: { id: string }) {
+  return JSON.parse(sql(`select public.portive_orchestration_authorize('${command.id}')`));
+}
+function zoneAtHour(hour: number) {
+  return sql(`select name from pg_timezone_names where name like 'Etc/GMT%' and extract(hour from clock_timestamp() at time zone name)=${hour} limit 1`);
+}
+test('final DNC denial closes only the unsent reservation, keeps duplicate protection and cannot be reclaimed',()=>{
+  const {session,work}=cloudflareReserved(), command=work.commands[0];
+  assert.equal(authorize(command).allowed,true);
+  sql(`insert into public.dial_suppressions(phone_number,reason) values('${command.parameters.to}','Fixture DNC after reservation')`);
+  assert.deepEqual(authorize(command),{allowed:false,reason:'destination_suppressed'});
+  assert.equal(sql(`select state||':'||(completed_at is not null) from public.dial_commands where id='${command.id}'`),'canceled:true');
+  assert.equal(sql(`select status||':'||technical_state||':'||(ended_at is not null) from public.call_attempts where id='${command.attempt_id}'`),'canceled:canceled_before_answer:true');
+  assert.equal(sql(`select count(*) from public.dial_session_targets where session_id='${session}' and attempt_id='${command.attempt_id}'`),'1');
+  assert.equal(authorize(command).allowed,false);
+  cloudflareComplete(command,true,0,'must-not-be-written');
+  assert.equal(sql(`select telnyx_call_control_id is null from public.call_attempts where id='${command.attempt_id}'`),'t');
+  assert(!cloudflareWork(session).commands.some((c:{id:string})=>c.id===command.id));
+  assert.equal(sql(`select count(*) from public.dial_audit_events where attempt_id='${command.attempt_id}' and event_type='dispatch_denied'`),'1');
+  assert.equal(authorize(work.commands[1]).allowed,true);
+});
+test('current per-lead DNC and suppression flags block an already queued prospect',()=>{
+  for(const flag of ['doNotCall','suppressed']) {
+    const {work}=cloudflareReserved(),command=work.commands[0];
+    sql(`update public.leads set custom_fields_json=jsonb_build_object('${flag}',true) where id='${command.attempt.lead_id}'`);
+    assert.deepEqual(authorize(command),{allowed:false,reason:'destination_suppressed'});
+  }
+});
+test('final calling-hour gate allows 9 and 19, denies 8 and 20 and honors lead overrides',()=>{
+  for(const hour of [9,19,8,20]) {
+    const {work}=cloudflareReserved(),command=work.commands[0];
+    sql(`update public.leads set custom_fields_json=jsonb_build_object('timeZone','${zoneAtHour(hour)}') where id='${command.attempt.lead_id}'`);
+    const result=authorize(command);
+    assert.equal(result.allowed,hour>=9&&hour<20,`local hour ${hour}`);
+    if(!result.allowed) {
+      assert.equal(result.reason,'outside_calling_window');
+      assert.equal(sql(`select state from public.dial_commands where id='${command.id}'`),'canceled');
+      assert.equal(sql(`select ended_at is not null from public.call_attempts where id='${command.attempt_id}'`),'t');
+    }
+  }
+});
+test('Parallel blank timezone falls back at reservation and final authorization; invalid timezone fails closed',()=>{
+  setup();sql(`update public.leads set custom_fields_json='{"timeZone":""}'`);
+  assert.equal(attempts(start()).length,4);
+  const {session,work}=cloudflareReserved(),command=work.commands[0];
+  sql(`update public.leads set custom_fields_json='{"timeZone":""}' where id='${command.attempt.lead_id}'`);
+  assert.equal(authorize(command).allowed,true);
+  sql(`update public.dial_sessions set time_zone='${zoneAtHour(3)}' where id='${session}'`);
+  assert.equal(authorize(command).reason,'outside_calling_window');
+  const next=work.commands[1];
+  sql(`update public.leads set custom_fields_json='{"timeZone":"Invalid/Zone"}' where id='${next.attempt.lead_id}'`);
+  assert.equal(authorize(next).reason,'invalid_timezone');
+});
+test('denial never invents a terminal event for an attempt with provider identity',()=>{
+  const {session,work}=cloudflareReserved(),command=work.commands[0];
+  sql(`update public.call_attempts set telnyx_call_control_id='possibly-sent' where id='${command.attempt_id}';insert into public.dial_suppressions(phone_number,reason) values('${command.parameters.to}','DNC')`);
+  assert.equal(authorize(command).allowed,false);
+  assert.equal(sql(`select state from public.dial_commands where id='${command.id}'`),'uncertain');
+  assert.equal(sql(`select ended_at is null from public.call_attempts where id='${command.attempt_id}'`),'t');
+  assert.equal(sql(`select status from public.dial_sessions where id='${session}'`),'unsafe');
+});
+test('startup heartbeats cannot substitute for verified operator media, and media loss blocks queued dials',()=>{
+  setup();const s=invoke('start').id;
+  event(s,null,'operator','call.answered',{call_control_id:'operator'});
+  invoke('heartbeat',s);invoke('tick',s);
+  assert.equal(sql(`select browser_media_ready from public.dial_sessions where id='${s}'`),'f');
+  assert.equal(attempts(s),null);
+  const {session,work}=cloudflareReserved();
+  sql(`select public.portive_parallel_command('${session}','${controller}','heartbeat',false)`);
+  assert.equal(authorize(work.commands[0]).allowed,false);
+  assert.equal(sql(`select state from public.dial_commands where id='${work.commands[0].id}'`),'canceled');
+});
+test('safety migration reruns without losing reservations or server-only grants',()=>{
+  const {session}=cloudflareReserved();
+  sql(readFileSync('supabase/migrations/202611150001_parallel_dispatch_safety.sql','utf8'));
+  assert.equal(sql(`select count(*) from public.dial_session_targets where session_id='${session}'`),'4');
+  assert.throws(()=>sql('set role anon;select public.portive_orchestration_authorize(gen_random_uuid())'),/permission denied/);
+  assert.equal(sql("select public.portive_orchestrator_ready(3)"),'t');
+});
+
+test('ordinary positive heartbeats preserve false readiness until explicit acknowledgement',()=>{
+  setup();const s=invoke('start').id;
+  event(s,null,'operator','call.answered',{call_control_id:'operator'});
+  for(let i=0;i<3;i++) invoke('heartbeat',s);
+  assert.equal(sql(`select browser_media_ready from public.dial_sessions where id='${s}'`),'f');
+  assert.equal(invoke('tick',s).status,'running'); assert.equal(attempts(s),null);
+  invoke('operator_ready',s,{callControlId:'operator'});
+  assert.equal(invoke('tick',s).status,'running'); assert.equal(attempts(s).length,4);
+});
+test('media loss remains latched across stale positive heartbeats and explicit acknowledgements',()=>{
+  const {session,work}=cloudflareReserved();
+  sql(`select public.portive_parallel_command('${session}','${controller}','heartbeat',false)`);
+  for(let i=0;i<3;i++) { invoke('heartbeat',session);invoke('operator_ready',session,{callControlId:'operator'}); }
+  const s=invoke('tick',session);assert.equal(s.status,'unsafe');assert.equal(s.browser_media_ready,false);
+  for(const c of work.commands) assert.equal(authorize(c).allowed,false);
+  assert.equal(sql(`select count(*) from public.dial_session_targets where session_id='${session}'`),'4');
+  assert.equal(sql(`select count(*) from public.call_attempts where dial_session_id='${session}'`),'4');
+});
+test('reordered and duplicate media requests cannot prevent active winner cleanup, including paused sessions',()=>{
+  for(const paused of [false,true]) {
+    const s=cloudflareStart(),a=attempts(s);answer(s,a[0].id);event(s,a[0].id,'lead','call.bridged');
+    if(paused) invoke('pause',s);
+    sql(`select public.portive_parallel_command('${s}','${controller}','heartbeat',false)`);
+    for(let i=0;i<2;i++) {invoke('heartbeat',s);invoke('operator_ready',s,{callControlId:'operator'});}
+    cloudflareWork(s);cloudflareWork(s);
+    assert.equal(sql(`select status||':'||browser_media_ready from public.dial_sessions where id='${s}'`),'unsafe:false');
+    assert.equal(sql(`select count(*) from public.dial_commands where attempt_id='${a[0].id}' and action='hangup'`),'1');
+    assert.equal(sql(`select ended_at is null from public.call_attempts where id='${a[0].id}'`),'t');
+    assert.throws(()=>invoke('resume',s),/paused session/);
+  }
+});
+test('healthy transport pause can recover through verified media and explicit resume',()=>{
+  const s=cloudflareStart();invoke('heartbeat',s,{transportReady:false});
+  assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),'paused');
+  invoke('operator_ready',s,{callControlId:'operator'});
+  assert.equal(invoke('resume',s).status,'running');
+  assert.equal(sql(`select count(*) from public.call_attempts where dial_session_id='${s}'`),'4');
+});
+
+test('Chromium media -> real SQL -> Worker executor preserves startup, DNC denial and reordered winner cleanup', {timeout:60_000}, async()=>{
+  // Load the actual Worker adapter without importing Cloudflare platform types
+  // into the application's TypeScript program. All provider I/O is replaced.
+  const load=createRequire(`${process.cwd()}/package.json`);
+  const {executeCommand}=load(`${process.cwd()}/cloudflare/portive-dialer/src/executor.ts`) as {
+    executeCommand:(command:unknown,env:unknown,db:unknown,provider:unknown)=>Promise<void>;
+  };
+  const {fingerprint}=load(`${process.cwd()}/cloudflare/portive-dialer/src/types.ts`) as {
+    fingerprint:(env:Record<string,string>)=>Promise<string>;
+  };
+  const env={DIALER_PARALLEL_ENABLED:'true',TELNYX_PARALLEL_CONNECTION_ID:'fixture-app',
+    TELNYX_TELEPHONY_CREDENTIAL_ID:'fixture-credential',TELNYX_FROM_NUMBER:'+12125550100',
+    VERCEL_VOICE_WEBHOOK_URL:'https://fixture.invalid/api/webhooks/telnyx/voice'};
+  const fp=await fingerprint(env);
+  setup();sql(`select public.portive_set_orchestration_backend('cloudflare',true);select public.portive_orchestration_prepare('cloudflare');update public.dialer_provider_verifications set config_fingerprint='${fp}' where id='${verificationId}'`);
+  const s=invoke('start',null,{fingerprint:fp}).id;
+  const operator=cloudflareWork(s).commands[0];cloudflareComplete(operator,true,0,'operator');
+  event(s,null,'operator','call.answered',{call_control_id:'operator'});
+  const requests:Array<{path:string;body:Record<string,unknown>}>=[];
+  const literal=(v:unknown):string=>v===null?'null':typeof v==='boolean'||typeof v==='number'?String(v):
+    typeof v==='string'?`'${v.replaceAll("'","''")}'`:`'${JSON.stringify(v).replaceAll("'","''")}'::jsonb`;
+  const db={async rpc(name:string,args:Record<string,unknown>) {
+    assert(['portive_orchestration_authorize','portive_orchestration_complete','portive_answer_collision'].includes(name));
+    return JSON.parse(sql(`select public.${name}(${Object.entries(args).map(([k,v])=>`${k}=>${literal(v)}`).join(',')})`)||'null');
+  }};
+  const provider={async request(path:string,body:Record<string,unknown>) {
+    requests.push({path,body});
+    if(path==='calls')return {data:{call_control_id:JSON.parse(Buffer.from(String(body.client_state),'base64').toString()).attemptId}};
+    return {data:{}};
+  },async action(id:string,action:string,body:Record<string,unknown>) {return this.request(`calls/${id}/actions/${action}`,body);}};
+  const run=async(commands:unknown[])=>{for(const c of commands)await executeCommand(c,env,db,provider);};
+  const browser=await chromium.launch({headless:true,args:['--autoplay-policy=no-user-gesture-required']});
+  try {
+    const page=await browser.newPage();await page.route('**/*',route=>route.abort());
+    const statuses:string[]=[];
+    await page.exposeFunction('ackMedia',(status:string)=>{
+      statuses.push(status);
+      if(status==='ready')invoke('operator_ready',s,{callControlId:'operator'});
+      if(status==='unavailable')sql(`select public.portive_parallel_command('${s}','${controller}','heartbeat',false)`);
+    });
+    const script=ts.transpileModule(readFileSync('lib/dialer/parallel-media.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
+    await page.addScriptTag({type:'module',content:script+'\nwindow.watchMedia=watchParallelOperatorMedia;'});
+    await page.waitForFunction('Boolean(window.watchMedia)');
+    await page.evaluate(`(async()=>{
+      const context=new AudioContext();await context.resume();const oscillator=context.createOscillator(),destination=context.createMediaStreamDestination();
+      oscillator.connect(destination);oscillator.start();const audio=document.createElement('audio');document.body.append(audio);
+      window.acks=[];window.media=window.watchMedia(audio,destination.stream,status=>window.acks.push(window.ackMedia(status)));
+      window.mediaFixture={context,oscillator,audio,destination};
+    })()`);
+    await page.waitForFunction('window.media.ready()');await page.evaluate('Promise.all(window.acks)');
+    assert.deepEqual(statuses,['ready']);
+    const work=cloudflareWork(s);assert.equal(work.session.status,'running');assert.equal(work.commands.length,4);
+    const denied=work.commands[0];
+    sql(`insert into public.dial_suppressions(phone_number,reason) values('${denied.parameters.to}','Fixture DNC after queueing')`);
+    await run([denied]);assert.equal(requests.length,0);
+    assert.equal(sql(`select state from public.dial_commands where id='${denied.id}'`),'canceled');
+    await run(work.commands.slice(1));assert.equal(requests.filter(r=>r.path==='calls').length,3);
+    const winner=work.commands[1].attempt_id;answer(s,winner);event(s,winner,'lead','call.bridged');
+    await run(cloudflareWork(s).commands);
+    await page.evaluate('window.mediaFixture.audio.pause()');
+    await page.waitForFunction("window.media.status()==='unavailable'");await page.evaluate('Promise.all(window.acks)');
+    // Simulate independent stale requests committing after the browser's loss.
+    invoke('heartbeat',s);invoke('operator_ready',s,{callControlId:'operator'});invoke('heartbeat',s);
+    const cleanup=cloudflareWork(s);assert.equal(cleanup.session.status,'unsafe');assert.equal(cleanup.session.browser_media_ready,false);
+    await run(cleanup.commands);await run(cloudflareWork(s).commands);
+    assert.equal(requests.filter(r=>r.path===`calls/${winner}/actions/hangup`).length,1);
+    const duplicate=crypto.randomUUID();event(s,winner,'lead','call.hangup',{},duplicate);event(s,winner,'lead','call.hangup',{},duplicate);
+    invoke('operator_ready',s,{callControlId:'operator'});await run(cloudflareWork(s).commands);
+    assert.equal(requests.filter(r=>r.path==='calls').length,3);
+    assert.equal(sql(`select count(*) from public.dial_session_targets where session_id='${s}'`),'4');
+    assert.equal(sql(`select count(*) from public.dial_audit_events where session_id='${s}' and attempt_id='${winner}' and event_type='call.hangup'`),'1');
+    // An actual rejected browser play promise must still fail closed in SQL.
+    await page.evaluate('window.media.dispose()');
+    setup();sql("select public.portive_set_orchestration_backend('cloudflare',true);select public.portive_orchestration_prepare('cloudflare')");
+    const rejectedSession=invoke('start',null,{fingerprint:fp}).id;
+    cloudflareComplete(cloudflareWork(rejectedSession).commands[0],true,0,'operator');
+    event(rejectedSession,null,'operator','call.answered',{call_control_id:'operator'});
+    const rejectedStatuses:string[]=[];
+    await page.exposeFunction('ackRejectedMedia',(status:string)=>{
+      rejectedStatuses.push(status);
+      if(status==='unavailable')sql(`select public.portive_parallel_command('${rejectedSession}','${controller}','heartbeat',false)`);
+    });
+    await page.evaluate(`(()=>{
+      const blocked=document.createElement('audio');blocked.play=()=>Promise.reject(new DOMException('Fixture autoplay rejection','NotAllowedError'));
+      window.rejectedAcks=[];window.rejectedMedia=window.watchMedia(blocked,window.mediaFixture.destination.stream,status=>window.rejectedAcks.push(window.ackRejectedMedia(status)));
+    })()`);
+    await page.waitForFunction("window.rejectedMedia.status()==='unavailable'");await page.evaluate('Promise.all(window.rejectedAcks)');
+    assert.deepEqual(rejectedStatuses,['unavailable']);
+    invoke('heartbeat',rejectedSession);invoke('operator_ready',rejectedSession,{callControlId:'operator'});
+    assert.equal(sql(`select status||':'||browser_media_ready from public.dial_sessions where id='${rejectedSession}'`),'unsafe:false');
+    assert.equal(attempts(rejectedSession),null);
+    assert.equal(requests.filter(r=>r.path==='calls').length,3);
+    await page.evaluate('window.rejectedMedia.dispose()');
+    await page.evaluate('window.media.dispose();window.mediaFixture.oscillator.stop();window.mediaFixture.destination.stream.getTracks().forEach(t=>t.stop());window.mediaFixture.context.close()');
+  } finally {await browser.close();}
 });

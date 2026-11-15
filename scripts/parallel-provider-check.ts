@@ -20,6 +20,8 @@ async function main() {
   const reportIndex=process.argv.indexOf("--report");
   if(reportIndex<0) { console.log("Read-only check complete. Controlled audio/collision evidence is still required to enable Parallel Mode."); return; }
   const report=JSON.parse(readFileSync(process.argv[reportIndex+1],"utf8"));
+  // Shared with Start/Resume so malformed peak_concurrent_legs is rejected both
+  // before import and when reading an existing verification record.
   const blockers=evidenceBlockers(report, process.env.DIALER_ORCHESTRATION_BACKEND === "cloudflare" ? "cloudflare" : "node");
   if(blockers.length) throw new Error(blockers.join(" "));
   if(report.config_fingerprint!==fingerprint || report.profile_id!==profileId) throw new Error("Controlled report does not match this provider configuration");
@@ -27,7 +29,6 @@ async function main() {
   if(!Number.isFinite(age)||age<0||age>86400000) throw new Error("Controlled report must be from the past 24 hours");
   const channels=Number(report.account_channels), rate=Number(report.rate_ceiling_cents);
   if(!Number.isInteger(channels)||channels<5||!Number.isInteger(rate)||rate<1) throw new Error("Report lacks verified five-leg capacity or an all-inclusive rate ceiling");
-  if(Number(report.peak_concurrent_legs)<5) throw new Error("Controlled report must prove four prospect legs plus the operator leg");
   if((application.data?.outbound?.channel_limit??0)<channels || (profile.data?.concurrent_call_limit??0)<channels || application.data?.webhook_event_url!==config.webhook) throw new Error("Live provider limits or webhook do not satisfy the report");
   const db=createClient(required("SUPABASE_URL"),required("SUPABASE_SERVICE_ROLE_KEY"));
   const {data,error}=await db.from("dialer_provider_verifications").insert({config_fingerprint:fingerprint,connection_id:connection,profile_id:profileId,account_channels:channels,overflow_slots:0,rate_ceiling_cents:rate,evidence:report,expires_at:new Date(Date.now()+7*86400000).toISOString()}).select("id").single();

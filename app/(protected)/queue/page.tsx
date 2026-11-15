@@ -7,6 +7,7 @@ import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { sendWebRtcDigit, silenceLocalRingback } from "@/lib/dialer/media";
+import { watchParallelOperatorMedia, type ParallelMediaStatus } from "@/lib/dialer/parallel-media";
 import { ParallelLines } from "@/components/dialer/parallel-lines";
 import { SessionControls } from "@/components/dialer/session-controls";
 import type { DialSession, SessionCommandResult, ParallelAttempt } from "@/lib/dialer/types";
@@ -308,6 +309,8 @@ export default function QueuePage() {
   const [parallelAttempts, setParallelAttempts] = useState<ParallelAttempt[]>([]);
   const [parallelMetrics, setParallelMetrics] = useState<Record<string, number | null>>({});
   const [dialSession, setDialSession] = useState<DialSession | null>(null);
+  const [parallelMediaStatus, setParallelMediaStatus] = useState<ParallelMediaStatus>("pending");
+  const refreshParallelMediaRef = useRef<() => void>(() => {});
   const [silentRingback, setSilentRingback] = useState(false);
   const notificationHandlerRef = useRef(handleWebRtcNotification);
   const finishedWebRtcCallsRef = useRef(new Set<string>());
@@ -680,6 +683,7 @@ export default function QueuePage() {
     const client = telnyxClientRef.current;
     webRtcCallRef.current = null;
     telnyxClientRef.current = null;
+    refreshParallelMediaRef.current();
     setActiveWebRtcCallControlId(null);
 
     if (remoteAudioRef.current) {
@@ -772,14 +776,12 @@ export default function QueuePage() {
         webRtcCallRef.current = call;
         setWebrtcStatus("in-call");
         // This is the one parked operator media stream, never one stream per prospect.
-        if (call.remoteStream && remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = call.remoteStream;
-          void remoteAudioRef.current.play().catch(() => setError("Enable speaker playback before parallel dialing"));
-        }
+        refreshParallelMediaRef.current();
       } else if (["hangup", "destroy", "purge", "done"].includes(call.state ?? "")) {
         webRtcCallRef.current = null;
         parkedOperatorCallIdRef.current = null;
         setWebrtcStatus("ready");
+        refreshParallelMediaRef.current();
       }
       return;
     }
@@ -1747,20 +1749,68 @@ export default function QueuePage() {
     return () => { canceled = true; };
   }, [dialSession?.active_call_id]);
 
+  const parallelMediaSessionId = dialSession?.mode === "parallel" ? dialSession.id : null;
   useEffect(() => {
-    if (dialSession?.mode !== "parallel") return;
-    const acknowledge = () => {
+    if (!parallelMediaSessionId) { setParallelMediaStatus("pending"); return; }
+    let stopped = false;
+    let sending = false;
+    let dirty = false;
+    let status: ParallelMediaStatus = "pending";
+    let observed: { audio: HTMLAudioElement; stream: MediaStream; monitor: ReturnType<typeof watchParallelOperatorMedia> } | null = null;
+    async function acknowledge() {
+      dirty = true;
+      if (sending || stopped) return;
+      sending = true;
+      try {
+        do {
+          dirty = false;
+          const call = webRtcCallRef.current;
+          const controlId = getWebRtcCallControlId(call ?? undefined);
+          const connected = webRtcReadyRef.current && micPermission === "granted";
+          const ready = connected && Boolean(call && controlId && ["active", "answered", "held"].includes(call.state ?? "") &&
+            observed && observed.stream === call.remoteStream && observed.monitor.ready());
+          // While the operator is still ringing, the ordinary heartbeat keeps
+          // the browser lease alive. It must not claim operator media readiness.
+          if (!ready && status === "pending" && connected) break;
+          await fetch("/api/dial-sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+            action: ready ? "operator_ready" : "heartbeat", sessionId: parallelMediaSessionId,
+            controllerId: sessionStorage.getItem("portive-controller"), ready, callControlId: controlId,
+          }) });
+          // Loss during an in-flight ready acknowledgement is sent next, never
+          // dropped behind the earlier request.
+        } while (dirty && !stopped);
+      } catch { /* The normal heartbeat/lease still fails closed on transport loss. */ }
+      finally { sending = false; }
+    }
+    const changed = (next: ParallelMediaStatus) => {
+      status = next;
+      setParallelMediaStatus(next);
+      if (next === "unavailable") setError("Operator audio unavailable. Check speaker playback and the remote audio stream before resuming.");
+      void acknowledge();
+    };
+    const refresh = () => {
       const call = webRtcCallRef.current;
       const controlId = getWebRtcCallControlId(call ?? undefined);
-      if (!call || !controlId || !["active", "answered", "held"].includes(call.state ?? "") || !call.remoteStream?.getAudioTracks().length) return;
-      void fetch("/api/dial-sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
-        action: "operator_ready", sessionId: dialSession.id, controllerId: sessionStorage.getItem("portive-controller"),
-        ready: webRtcReadyRef.current && micPermission === "granted", callControlId: controlId,
-      }) }).catch(() => undefined);
+      const audio = remoteAudioRef.current;
+      const stream = call?.remoteStream;
+      if (!call || !controlId || !["active", "answered", "held"].includes(call.state ?? "") || !audio || !stream) {
+        if (observed) { observed.monitor.dispose(); observed = null; changed("unavailable"); }
+        return;
+      }
+      if (observed?.audio !== audio || observed?.stream !== stream) {
+        if (observed) { observed.monitor.dispose(); observed = null; changed("unavailable"); }
+        observed = { audio, stream, monitor: watchParallelOperatorMedia(audio, stream, changed) };
+      }
+      observed.monitor.ready();
+      void acknowledge();
     };
-    acknowledge(); const timer = setInterval(acknowledge, 1500);
-    return () => clearInterval(timer);
-  }, [dialSession?.id, dialSession?.mode, micPermission]);
+    refreshParallelMediaRef.current = refresh;
+    refresh(); const timer = setInterval(refresh, 1500);
+    return () => {
+      stopped = true; clearInterval(timer); observed?.monitor.dispose();
+      refreshParallelMediaRef.current = () => {};
+    };
+  }, [parallelMediaSessionId, micPermission]);
 
   const audioReportedAttempts = useRef(new Set<string>());
   useEffect(() => {
@@ -1844,6 +1894,7 @@ export default function QueuePage() {
       <SessionControls
         location={selectedLocation}
         ready={webRtcReadyRef.current && micPermission === "granted" && webrtcStatus !== "error"}
+        operatorMediaReady={parallelMediaStatus === "pending" ? undefined : parallelMediaStatus === "ready"}
         idle={!webRtcCallRef.current && !calling && !pendingAttemptId}
         onDispatch={startCall}
         onSession={(session) => { setDialSession(session); if (session?.mode === "parallel") setSilentRingback(Boolean(session.parallel_options?.silentRingback)); }}

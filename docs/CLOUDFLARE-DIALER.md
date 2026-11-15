@@ -1,6 +1,6 @@
 # Cloudflare dialer deployment and verification
 
-The implementation is prepared for staging; production calling and latency remain unverified. The existing three-panel UI, lead priorities, notes, callbacks, dispositions, recording consent, WebRTC path and collision policy remain in place. Apply the fourth SQL migration before deploying the updated Vercel backend.
+The implementation is prepared for staging; production calling and latency remain unverified. The existing three-panel UI, lead priorities, notes, callbacks, dispositions, recording consent, WebRTC path and collision policy remain in place. Apply the migrations below, including the final Parallel safety migration, before deploying the updated Vercel backend.
 
 ## 1. Fedora prerequisites and local checks
 
@@ -55,8 +55,24 @@ Use a separate staging Supabase project and controlled test leads. Apply in orde
 2. `202611130002_parallel_engine.sql`
 3. `202611140001_single_operator_collisions.sql`
 4. `202611140002_cloudflare_orchestration.sql`
+5. `202611150001_parallel_dispatch_safety.sql`
 
-Keep the fourth migration last, including after manually rerunning an earlier script. It preserves existing session/attempt/lead/CRM data and defaults the backend to `node`. It grants new RPCs only to the service role. SQL migrations do not enable real Parallel calling.
+Keep this order; do not rerun older function definitions over the final safety migration. An existing installation through `202611140002` needs only the new `202611150001` migration. Apply it first in isolated staging, with sessions drained and Parallel disabled, before deploying the updated browser code. No existing migration file is edited. The orchestration migration defaults the backend to `node`; the safety migration preserves that selection, all existing records, and service-role-only RPC permissions. SQL migrations do not enable real Parallel calling.
+
+The safety migration rechecks the current queued destination, suppression/DNC, and effective 09:00–20:00 local calling window at Cloudflare final authorization, using the wall clock after acquiring database locks. An empty per-lead `timeZone` falls back to the session timezone. A denied unsent command becomes `canceled`, closes its unsent attempt, and records `dispatch_denied`. Its session target is retained to prevent same-session redials. Provider identity/answer evidence instead leaves the command `uncertain` and session `unsafe` for reconciliation; terminal evidence is never invented.
+
+The updated browser acknowledges operator media only after successful speaker playback with an active stream and live, enabled, unmuted remote audio tracks. Normal initial buffering remains pending; actual playback rejection and loss after readiness revoke media. Positive heartbeats renew only the browser lease and cannot grant readiness. Genuine loss latches the session unsafe (including while paused), so late positive heartbeats or operator acknowledgements cannot restore media or suppress winner cleanup. Healthy transport-only pauses retain explicit acknowledgement/resume; unsafe media failures require terminal reconciliation and stopping before a fresh session. Controlled evidence import and readiness both require numeric, finite, integer `peak_concurrent_legs >= 5`; reports lacking that field require genuine corrected evidence, not a fabricated replacement.
+
+Offline safety regression commands (no live credentials or calls required):
+
+```bash
+npm run test:dialer
+node tests/dialer/parallel-media.browser.mjs
+# Only against the disposable PostgreSQL container described above:
+node --test --import tsx tests/dialer/database.integration.ts tests/dialer/parallel.integration.ts
+npm --prefix cloudflare/portive-dialer test -- --cache=false
+npm --prefix cloudflare/portive-dialer run typecheck
+```
 
 Finish or Stop all old sessions and obtain provider terminal evidence for every outstanding call. Reconcile pending/uncertain commands from actual provider evidence; do not delete safety rows to force a switch. Stop the old watchdog, then change the database selection:
 

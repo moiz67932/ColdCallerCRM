@@ -23,6 +23,7 @@ export function evidenceBlockers(evidence: Record<string, unknown> | null, backe
   const blockers = missing.map((scenario) => `Controlled test has not passed: ${scenario}`);
   if (evidence.suite !== "portive-parallel-v1" || evidence.passed !== true) blockers.push("Verification suite is incomplete.");
   if (typeof evidence.max_answer_to_audio_ms !== "number" || !Number.isFinite(evidence.max_answer_to_audio_ms) || evidence.max_answer_to_audio_ms < 0 || evidence.max_answer_to_audio_ms > 1500) blockers.push("Answer-to-live-audio latency has not been verified within 1500ms.");
+  if (typeof evidence.peak_concurrent_legs !== "number" || !Number.isFinite(evidence.peak_concurrent_legs) || !Number.isInteger(evidence.peak_concurrent_legs) || evidence.peak_concurrent_legs < 5) blockers.push("Controlled report must prove a finite integer peak of at least five concurrent legs.");
   if (!Array.isArray(evidence.provider_call_ids) || evidence.provider_call_ids.length < 4) blockers.push("Verification report lacks controlled provider call identifiers.");
   if (backend === "cloudflare") {
     if (evidence.orchestration_backend !== "cloudflare") blockers.push("Controlled report must verify the Cloudflare orchestration path.");
