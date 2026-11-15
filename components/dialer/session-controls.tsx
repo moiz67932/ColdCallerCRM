@@ -8,6 +8,9 @@ import { defaultParallelOptions } from "@/lib/dialer/parallel-policy";
 type Mode = "manual" | "power" | "parallel";
 type Props = {
   ready: boolean;
+  // Undefined means initial operator playback is still pending. Only an
+  // explicit operator_ready acknowledgement can grant media in the database.
+  operatorMediaReady?: boolean;
   idle: boolean;
   location?: string;
   onDispatch: (result: SessionCommandResult) => Promise<void>;
@@ -70,7 +73,8 @@ export function SessionControls(props: Props) {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({
           action, sessionId: commandSessionId, controllerId: controller.current,
-          ready: current.current.ready, transportReady: commandMode === "parallel" ? transportReady.current : true, location: current.current.location, ...options,
+          ready: current.current.ready && (commandMode !== "parallel" || current.current.operatorMediaReady !== false),
+          transportReady: commandMode === "parallel" ? transportReady.current : true, location: current.current.location, ...options,
         }),
       });
       const result = await response.json();
@@ -146,7 +150,7 @@ export function SessionControls(props: Props) {
             <Button size="sm" disabled={Boolean(active) || !props.ready || !props.idle || !reviewed || !listId || mode === "parallel" && parallelBlockers.length > 0 || busy}
               onClick={() => void command("start", { listId, timeZone, reviewed, mode, options, maxLines: mode === "parallel" ? lines : 1 })}>Start Session</Button>
             <Button size="sm" variant="outline" disabled={!active || !owned || busy || session.status !== "running"} onClick={() => void command("pause")}>Pause</Button>
-            <Button size="sm" variant="outline" disabled={!active || !owned || busy || session.status !== "paused" || !props.ready} onClick={() => void command("resume")}>Resume</Button>
+            <Button size="sm" variant="outline" disabled={!active || !owned || busy || session.status !== "paused" || !props.ready || session.mode === "parallel" && props.operatorMediaReady !== true} onClick={() => void command("resume")}>Resume</Button>
             <Button size="sm" variant="destructive" disabled={!active || !owned || busy} onClick={() => void command("stop")}>Stop Session</Button>
             {session?.mode === "parallel" ? <Button size="sm" variant="outline" disabled={busy || !owned || !["awaiting_disposition", "ready"].includes(session.phase)} onClick={() => void command("continue")}>Continue next batch</Button> : null}
             <Button size="sm" variant="outline" disabled={!active || !owned || !session.active_call_id || busy || props.idle} onClick={() => void props.onEndCall()}>End Active Call</Button>

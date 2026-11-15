@@ -1,0 +1,257 @@
+-- Forward-only: apply after 202611140002_cloudflare_orchestration.sql.
+-- Preserve existing reservations, safety ledgers, and the Power/Manual RPCs.
+begin;
+
+-- Replace only Parallel scheduling: retain Cloudflare readiness, treat empty
+-- timezone overrides like Power, and keep startup heartbeats distinct from
+-- a verified operator-media acknowledgement.
+create or replace function public.portive_parallel_command(
+  p_session text,p_controller uuid,p_action text,p_ready boolean default false,
+  p_list text default null,p_location text default null,p_lines integer default 4,p_timezone text default null,
+  p_reviewed boolean default false,p_options jsonb default '{}'
+) returns jsonb language plpgsql set search_path=public as $$
+declare s public.dial_sessions; a public.call_attempts; l public.leads; v public.dialer_provider_verifications;
+  phone text; business text; n integer:=0; capacity integer; per_attempt integer; candidate record;
+begin
+  perform pg_advisory_xact_lock(hashtextextended('portive-single-operator',0));
+  if p_action='start' then
+    select * into v from public.dialer_provider_verifications where id=(p_options->>'verificationId')::uuid and expires_at>now();
+    if v.id is null or v.config_fingerprint is distinct from p_options->>'fingerprint' then raise exception 'Current provider verification evidence is missing'; end if;
+    if p_lines not between 2 and 4 or v.account_channels < p_lines+1 then
+      raise exception 'Verified provider capacity must cover prospect lines plus the operator leg'; end if;
+    if not p_ready or not p_reviewed or p_timezone is null then raise exception 'Softphone, list review and timezone are required'; end if;
+    perform now() at time zone p_timezone;
+    if not public.portive_orchestrator_ready(3) then
+      raise exception 'Parallel worker is unavailable'; end if;
+    if exists(select 1 from public.call_attempts where ended_at is null and status in ('dialing','connected','voicemail_detected')) then raise exception 'Active call exists'; end if;
+    if (p_options->>'ringTimeout')::integer not between 15 and 120
+      or (p_options->>'maxCallSeconds')::integer not between 30 and 1800
+      or (p_options->>'attemptLimit')::integer not between 1 and 500
+      or (p_options->>'batchDelaySeconds')::integer not between 0 and 60
+      or (p_options->>'maxSpendCents')::integer < 1 then raise exception 'Invalid session limits'; end if;
+    insert into public.dial_sessions(controller_id,selected_list_id,location,time_zone,mode,max_lines,attempt_limit,parallel_options,verification_id,reserved_cost_cents)
+      values(p_controller,p_list,nullif(p_location,''),p_timezone,'parallel',p_lines,(p_options->>'attemptLimit')::integer,p_options,v.id,
+      ceil(30*v.rate_ceiling_cents)::integer) returning * into s;
+    if s.reserved_cost_cents > (p_options->>'maxSpendCents')::integer then raise exception 'Budget does not cover bounded operator leg'; end if;
+    perform public.portive_enqueue(s.id,null,'dial_operator',s.id||':operator');
+  else
+    select * into s from public.dial_sessions where id=p_session and mode='parallel' for update;
+    if s.id is null or (p_action <> 'tick' and s.controller_id <> p_controller) then raise exception 'Session controlled by another browser'; end if;
+    if s.status in ('stopped','completed') then return to_jsonb(s); end if;
+    if p_action='heartbeat' then
+      -- A positive heartbeat renews the browser lease only. It cannot grant or
+      -- resurrect operator media. Loss latches unsafe even while paused/stopping.
+      update public.dial_sessions set heartbeat_at=now(),browser_media_ready=case when not p_ready then false else browser_media_ready end,
+        status=case when not p_ready then 'unsafe' else status end,
+        reason=case when not p_ready then 'Operator audio unavailable' else reason end where id=s.id returning * into s;
+      if p_options->>'transportReady'='false' and s.status='running' then
+        update public.dial_sessions set status='paused',reason='Realtime transport unavailable; conversation preserved' where id=s.id returning * into s;
+        perform public.portive_cancel_parallel(s.id,'transport_unavailable');
+      end if;
+    elsif p_action='operator_ready' then
+      -- A delayed acknowledgement cannot undo a genuine loss. Unsafe sessions
+      -- require terminal reconciliation/stop before a fresh session can start.
+      if s.status='unsafe' or s.operator_terminal_at is not null then return to_jsonb(s); end if;
+      if s.operator_call_control_id is null or nullif(p_options->>'callControlId','') is null or s.operator_call_control_id is distinct from p_options->>'callControlId' or s.operator_leg_state not in ('answered','ready','bridged') then
+        raise exception 'Operator media leg has not been verified'; end if;
+      if not p_ready then
+        update public.dial_sessions set browser_media_ready=false,status='unsafe',reason='Operator audio unavailable',heartbeat_at=now() where id=s.id returning * into s;
+      else
+        update public.dial_sessions set browser_media_ready=true,operator_leg_state=case when operator_leg_state='bridged' then 'bridged' else 'ready' end,heartbeat_at=now() where id=s.id returning * into s;
+      end if;
+    elsif p_action='pause' then
+      update public.dial_sessions set status='paused',reason='Operator paused' where id=s.id returning * into s;
+      perform public.portive_cancel_parallel(s.id,'operator_pause');
+    elsif p_action='stop' then
+      update public.dial_sessions set status='stopping',reason='Operator stopped; current conversation may finish' where id=s.id returning * into s;
+      perform public.portive_cancel_parallel(s.id,'session_stopped');
+    elsif p_action='resume' then
+      if s.status <> 'paused' or not p_ready then raise exception 'Resume requires a paused session and connected softphone'; end if;
+      update public.dial_sessions set status='running',reason=null,heartbeat_at=now() where id=s.id returning * into s;
+    elsif p_action in ('continue','skip') then
+      if s.active_call_id is not null then
+        select * into a from public.call_attempts where id=s.active_call_id for update;
+        if a.ended_at is null then raise exception 'Finish the active conversation first'; end if;
+        if a.disposition_saved_at is null and p_action <> 'skip' then raise exception 'Save the disposition before continuing'; end if;
+        if p_action='skip' then update public.call_attempts set disposition_saved_at=now() where id=a.id;
+          insert into public.dial_audit_events(session_id,attempt_id,event_type) values(s.id,a.id,'disposition_explicitly_skipped'); end if;
+      end if;
+      update public.dial_sessions set parallel_options=jsonb_set(parallel_options,'{continueRequested}','true') where id=s.id returning * into s;
+    elsif p_action not in ('tick','next') then raise exception 'Unknown parallel action'; end if;
+  end if;
+
+  -- A tick is the authoritative scheduler. Browser events alone never launch a batch.
+  if p_action <> 'tick' then return to_jsonb(s); end if;
+  if s.heartbeat_at<now()-interval '10 seconds' then
+    update public.dial_sessions set status='unsafe',browser_media_ready=false,reason='Operator browser lease expired' where id=s.id returning * into s;
+  end if;
+  for a in select * from public.call_attempts where dial_session_id=s.id and ended_at is null and failure_deadline_at<=now() loop
+    perform public.portive_enqueue(s.id,a.id,'hangup',a.id||':failure-cleanup','{"force":"true"}');
+  end loop;
+  if s.status='unsafe' then
+    perform public.portive_cancel_parallel(s.id,'media_or_provider_failure');
+    -- Failed media cannot preserve a usable conversation; end the prospect leg.
+    if s.active_call_id is not null and (not s.browser_media_ready or s.operator_terminal_at is not null) and exists(select 1 from public.call_attempts where id=s.active_call_id and ended_at is null) then
+      update public.dial_sessions set status='unsafe',reason='Operator media was lost; active prospect call is being ended safely' where id=s.id;
+      perform public.portive_enqueue(s.id,s.active_call_id,'hangup',s.active_call_id||':operator-media-lost','{"force":"true"}');
+    end if;
+    return to_jsonb(s);
+  end if;
+  for a in select * from public.call_attempts where dial_session_id=s.id and ended_at is null and classification_deadline_at<=now() and overflow_state is null loop
+    update public.call_attempts set answer_classification='unknown',technical_state='answer_unknown',termination_reason='amd_deadline_unknown'
+      where id=a.id and ended_at is null;
+    perform public.portive_enqueue(s.id,a.id,'hangup',a.id||':unknown-answer-hangup','{"force":"true"}');
+    update public.dial_sessions set status='paused',reason='AMD classification was unknown; answered prospect was ended and the session paused' where id=s.id returning * into s;
+    perform public.portive_cancel_parallel(s.id,'unknown_answer');
+  end loop;
+  if s.active_call_id is not null then
+    select * into a from public.call_attempts where id=s.active_call_id;
+    if a.ended_at is null then return to_jsonb(s); end if;
+    if a.disposition_saved_at is null then
+      if s.phase<>'awaiting_disposition' then update public.dial_sessions set phase='awaiting_disposition' where id=s.id returning * into s; end if;
+      return to_jsonb(s);
+    end if;
+    if s.status='running' and not coalesce((s.parallel_options->>'autoContinue')::boolean,true)
+      and not coalesce((s.parallel_options->>'continueRequested')::boolean,false) then return to_jsonb(s); end if;
+    update public.dial_sessions set active_call_id=null,phase='ready',
+      next_batch_at=now()+make_interval(secs=>(parallel_options->>'batchDelaySeconds')::integer)
+      where id=s.id returning * into s;
+  end if;
+  if exists(select 1 from public.call_attempts where dial_session_id=s.id and ended_at is null) then return to_jsonb(s); end if;
+  if s.status='stopping' then
+    perform public.portive_enqueue(s.id,null,'hangup_operator',s.id||':stop-operator');
+    if s.operator_leg_state='disconnected' then update public.dial_sessions set status='stopped',ended_at=now() where id=s.id returning * into s; end if;
+    return to_jsonb(s);
+  end if;
+  if not coalesce((s.parallel_options->>'autoContinue')::boolean,true) and s.parallel_batch>0 and not coalesce((s.parallel_options->>'continueRequested')::boolean,false) then return to_jsonb(s); end if;
+  if s.status <> 'running' or not s.browser_media_ready or s.operator_leg_state <> 'ready' or s.next_batch_at>now() then return to_jsonb(s); end if;
+  if s.started_at+interval '1800 seconds' < now()+make_interval(secs=>(s.parallel_options->>'maxCallSeconds')::integer+(s.parallel_options->>'ringTimeout')::integer) then
+    update public.dial_sessions set status='stopping',reason='Bounded operator media lease ending' where id=s.id returning * into s;
+    perform public.portive_enqueue(s.id,null,'hangup_operator',s.id||':stop-operator'); return to_jsonb(s);
+  end if;
+  select * into v from public.dialer_provider_verifications where id=s.verification_id and expires_at>now();
+  if v.id is null then update public.dial_sessions set status='paused',reason='Provider verification expired' where id=s.id returning * into s; return to_jsonb(s); end if;
+  per_attempt:=2*ceil((s.parallel_options->>'maxCallSeconds')::numeric/60)*v.rate_ceiling_cents+2*v.rate_ceiling_cents;
+  capacity:=least(s.max_lines,s.attempt_limit-(select count(*)::integer from public.dial_session_targets where session_id=s.id));
+  update public.dial_sessions set parallel_batch=parallel_batch+1,parallel_options=jsonb_set(parallel_options,'{continueRequested}','false') where id=s.id returning * into s;
+  for candidate in
+    select x.id,c.last_call from public.leads x left join lateral (
+      select max(created_at) last_call from public.call_attempts where lead_id=x.id
+        and status not in ('dialing','connected') and coalesce(technical_state,'') not in ('canceled_after_winner','canceled_before_answer')
+        and (answered_at is null or disposition_saved_at is not null or outcome is not null)
+    ) c on true where x.lead_list_id=s.selected_list_id and (s.location is null or x.location=s.location)
+    order by c.last_call asc nulls first,x.created_at desc,x.id
+  loop
+    exit when n>=capacity;
+    if s.reserved_cost_cents+per_attempt>(s.parallel_options->>'maxSpendCents')::integer then exit; end if;
+    select * into l from public.leads where id=candidate.id for update;
+    phone:=public.portive_phone(l.phone_number);
+    business:=coalesce(nullif(l.custom_fields_json->>'organizationId',''),nullif(regexp_replace(lower(l.website),'^(https?://)?(www\.)?([^/]+).*','\3'),''),nullif(lower(l.business_name),''),phone);
+    if phone !~ '^\+1[2-9][0-9]{2}[2-9][0-9]{6}$' or l.derived_status in ('bad_number','closed_lost')
+      or coalesce(l.custom_fields_json->>'workspaceHidden','false')='true' or coalesce(l.custom_fields_json->>'doNotCall','false')='true'
+      or coalesce(l.custom_fields_json->>'suppressed','false')='true' or coalesce(l.custom_fields_json->>'automatedCallingApproved','true')='false'
+      or exists(select 1 from public.dial_suppressions where phone_number=phone)
+      or exists(select 1 from public.dial_session_targets where session_id=s.id and (phone_number=phone or lead_id=l.id))
+      or exists(select 1 from public.follow_ups where lead_id=l.id and status='open' and due_at>now())
+      or exists(select 1 from public.call_attempts where lead_id=l.id and (ended_at is null and status in ('dialing','connected') or callback_at>now()))
+      or exists(select 1 from public.dial_session_targets t join public.call_attempts active_attempt on active_attempt.id=t.attempt_id where active_attempt.ended_at is null and t.business_key=business)
+      then continue; end if;
+    begin
+      if extract(hour from now() at time zone coalesce(nullif(l.custom_fields_json->>'timeZone',''),s.time_zone)) not between 9 and 19 then continue; end if;
+    exception when invalid_parameter_value then continue; end;
+    insert into public.call_attempts(lead_id,dial_session_id,parallel_batch,status,technical_state,started_at,raw_summary_json)
+      values(l.id,s.id,s.parallel_batch,'dialing','reserved',now(),jsonb_build_object('mode','parallel','progressState','dialing_lead')) returning * into a;
+    insert into public.dial_session_targets values(s.id,l.id,phone,business,a.id);
+    perform public.portive_enqueue(s.id,a.id,'dial_lead',a.id||':dial',jsonb_build_object('to',phone));
+    n:=n+1;
+    update public.dial_sessions set reserved_cost_cents=reserved_cost_cents+per_attempt,phase='calling' where id=s.id returning * into s;
+  end loop;
+  if n=0 then
+    update public.dial_sessions set status='stopping',reason=case when capacity=0 then 'Attempt limit reached' else 'No eligible leads or insufficient reserved budget' end where id=s.id returning * into s;
+    perform public.portive_enqueue(s.id,null,'hangup_operator',s.id||':stop-operator');
+  end if;
+  return to_jsonb(s);
+end $$;
+
+-- Every dial is checked against current data after command claim, immediately
+-- before provider I/O. The transaction never holds locks across an HTTP request.
+create or replace function public.portive_orchestration_authorize(p_command uuid)
+returns jsonb language plpgsql set search_path=public as $$
+declare
+  c public.dial_commands; s public.dial_sessions; a public.call_attempts; l public.leads;
+  phone text; destination text; deny_reason text; local_hour integer; checked_at timestamptz;
+begin
+  select * into c from public.dial_commands where id=p_command;
+  if c.id is null then return jsonb_build_object('allowed',false,'reason','command_missing'); end if;
+  perform public.portive_orchestration_guard('cloudflare',c.session_id);
+  select * into s from public.dial_sessions where id=c.session_id for update;
+  select * into c from public.dial_commands where id=p_command for update;
+  select * into a from public.call_attempts where id=c.attempt_id for update;
+  if c.state is distinct from 'executing' then return jsonb_build_object('allowed',false); end if;
+
+  if (c.action='dial_lead' and (s.status<>'running' or s.active_call_id is not null or not s.browser_media_ready or a.termination_reason is not null))
+    or (c.action='dial_operator' and s.status<>'running')
+    or (c.action='bridge' and (s.active_call_id is distinct from a.id or a.ended_at is not null)) then
+    deny_reason:='session_not_dispatchable';
+  end if;
+  if c.action='dial_lead' and deny_reason is null then
+    if a.id is null or a.dial_session_id is distinct from s.id or a.ended_at is not null then
+      deny_reason:='attempt_not_dispatchable';
+    elsif a.telnyx_call_control_id is not null or a.telnyx_agent_call_control_id is not null or a.answered_at is not null then
+      deny_reason:='provider_identity_already_present';
+    else
+      select * into l from public.leads where id=a.lead_id for update;
+      phone:=public.portive_phone(l.phone_number);
+      destination:=c.parameters->>'to';
+      if l.id is null or destination is null or destination is distinct from phone then
+        deny_reason:='destination_changed';
+      elsif exists(select 1 from public.dial_suppressions where phone_number in (phone,destination))
+        or coalesce(l.custom_fields_json->>'doNotCall','false')='true'
+        or coalesce(l.custom_fields_json->>'suppressed','false')='true'
+        or l.derived_status in ('bad_number','closed_lost') then
+        deny_reason:='destination_suppressed';
+      elsif coalesce(l.custom_fields_json->>'automatedCallingApproved','true')='false' then
+        deny_reason:='automated_calling_disabled';
+      else
+        begin
+          -- now() is transaction-start time; a lock wait must not authorize an
+          -- already-closed window. Sample the wall clock after acquiring locks.
+          checked_at:=clock_timestamp();
+          local_hour:=extract(hour from checked_at at time zone coalesce(nullif(l.custom_fields_json->>'timeZone',''),s.time_zone));
+          if local_hour is null or local_hour<9 or local_hour>=20 then deny_reason:='outside_calling_window'; end if;
+        exception when invalid_parameter_value then deny_reason:='invalid_timezone';
+        end;
+      end if;
+    end if;
+  end if;
+
+  if deny_reason is not null then
+    checked_at:=clock_timestamp();
+    if c.action='dial_lead' and a.ended_at is null and
+      (a.telnyx_call_control_id is not null or a.telnyx_agent_call_control_id is not null or a.answered_at is not null) then
+      -- Never manufacture terminal evidence for a possibly submitted attempt.
+      update public.dial_commands set state='uncertain',error='Dispatch denied: '||deny_reason where id=c.id;
+      update public.dial_sessions set status='unsafe',reason='Dispatch denied with provider evidence; reconciliation required' where id=s.id;
+    else
+      update public.dial_commands set state='canceled',completed_at=checked_at,error='Dispatch denied: '||deny_reason where id=c.id;
+      if c.action='dial_lead' and a.ended_at is null then
+        update public.call_attempts set status='canceled',ended_at=checked_at,
+          termination_reason=coalesce(termination_reason,'dispatch_denied: '||deny_reason),
+          technical_state=case when s.active_call_id is not null then 'canceled_after_winner' else 'canceled_before_answer' end
+          where id=a.id;
+      end if;
+    end if;
+    -- Keep dial_session_targets: a denied reservation is never recycled into a
+    -- duplicate attempt in the same session, even if eligibility later changes.
+    insert into public.dial_audit_events(session_id,attempt_id,event_type,details)
+      values(s.id,c.attempt_id,'dispatch_denied',jsonb_build_object('commandId',c.id,'reason',deny_reason));
+    return jsonb_build_object('allowed',false,'reason',deny_reason);
+  end if;
+  return jsonb_build_object('allowed',true,'session',to_jsonb(s),'attempt',to_jsonb(a));
+end $$;
+
+revoke all on function public.portive_parallel_command(text,uuid,text,boolean,text,text,integer,text,boolean,jsonb),
+  public.portive_orchestration_authorize(uuid) from public,anon,authenticated;
+grant execute on function public.portive_parallel_command(text,uuid,text,boolean,text,text,integer,text,boolean,jsonb),
+  public.portive_orchestration_authorize(uuid) to service_role;
+commit;

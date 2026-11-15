@@ -59,6 +59,16 @@ it('does not send a dial if final PostgreSQL authorization cancels it',async()=>
  await executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e));
  expect(spy.mock.calls.some(([url])=>String(url).includes('/v2/'))).toBe(false);
 });
+it.each(['destination_suppressed','outside_calling_window','invalid_timezone','session_not_dispatchable'])('denied %s dispatch never reaches Telnyx or overwrites the SQL cancellation',async(reason)=>{
+ spy.mockImplementation(async(input:any,init:any)=>{
+  const url=String(input);calls.push({url,body:init?.body?JSON.parse(init.body):{}});
+  if(url.endsWith('portive_orchestration_authorize'))return Response.json({allowed:false,reason});
+  throw Error('Unexpected request after denied authorization');
+ });
+ await executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e));
+ expect(calls).toHaveLength(1);
+ expect(calls[0].url).toContain('/rpc/portive_orchestration_authorize');
+});
 it('handles an authenticated late request after completed-object storage cleanup',async()=>{
  work.session.status='completed';work.deadlines=[];
  await (await request({kind:'wake'})).text();

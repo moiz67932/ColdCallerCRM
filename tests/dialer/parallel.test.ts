@@ -25,7 +25,7 @@ test("a feature flag alone cannot satisfy controlled-provider verification", () 
   assert(evidenceBlockers({suite:"portive-parallel-v1",passed:true}).length);
 });
 test("verification requires first-answer, collision-hangup, and recovery scenarios plus measured audio latency", () => {
-  const evidence={suite:"portive-parallel-v1",passed:true,scenarios:Object.fromEntries(controlledScenarios.map((key)=>[key,true])),max_answer_to_audio_ms:1000,provider_call_ids:["one","two","three","four"]};
+  const evidence={suite:"portive-parallel-v1",passed:true,scenarios:Object.fromEntries(controlledScenarios.map((key)=>[key,true])),max_answer_to_audio_ms:1000,peak_concurrent_legs:5,provider_call_ids:["one","two","three","four"]};
   assert.deepEqual(evidenceBlockers(evidence),[]);
   assert(evidenceBlockers({...evidence,max_answer_to_audio_ms:2000}).length);
   assert(evidenceBlockers({...evidence,scenarios:{}}).length);
@@ -33,4 +33,14 @@ test("verification requires first-answer, collision-hangup, and recovery scenari
 test("verification binds to caller, connection, credential and webhook configuration", () => {
   assert.equal(parallelFingerprint({connection:"a",caller:"b"}),parallelFingerprint({caller:"b",connection:"a"}));
   assert.notEqual(parallelFingerprint({connection:"a"}),parallelFingerprint({connection:"b"}));
+});
+
+test("the importer/readiness evidence validator rejects missing, nonfinite, nonnumeric and fractional peak legs", () => {
+  const evidence = { suite: "portive-parallel-v1", passed: true,
+    scenarios: Object.fromEntries(controlledScenarios.map(key => [key, true])),
+    max_answer_to_audio_ms: 1000, provider_call_ids: ["one", "two", "three", "four"] };
+  for (const peak of [undefined, null, NaN, Infinity, -Infinity, "invalid", "5", true, 0, 4, 4.9, 5.1]) {
+    assert(evidenceBlockers({ ...evidence, peak_concurrent_legs: peak }).some(reason => reason.includes("five concurrent legs")), String(peak));
+  }
+  for (const peak of [5, 6, 10]) assert.deepEqual(evidenceBlockers({ ...evidence, peak_concurrent_legs: peak }), []);
 });

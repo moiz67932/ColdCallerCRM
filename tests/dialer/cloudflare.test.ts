@@ -15,7 +15,7 @@ test('expired and malformed orchestration signatures fail closed',async()=>{
  assert.equal(await verifyInternal(secret,'/route','{}',headers),false);
  assert.equal(await verifyInternal(secret,'/route','{}',new Headers()),false);
 });
-const evidence={suite:'portive-parallel-v1',passed:true,scenarios:Object.fromEntries(controlledScenarios.map(s=>[s,true])),max_answer_to_audio_ms:1000,provider_call_ids:['a','b','c','d']};
+const evidence={suite:'portive-parallel-v1',passed:true,scenarios:Object.fromEntries(controlledScenarios.map(s=>[s,true])),max_answer_to_audio_ms:1000,peak_concurrent_legs:5,provider_call_ids:['a','b','c','d']};
 test('existing Node verification cannot authorize a new Cloudflare runtime',()=>{assert.deepEqual(evidenceBlockers(evidence),[]);assert(evidenceBlockers(evidence,'cloudflare').length>0);});
 test('Cloudflare release needs provider tests plus measured p50 p95 and maximum',()=>{
  const report={...evidence,orchestration_backend:'cloudflare',scenarios:{...evidence.scenarios,...Object.fromEntries(cloudflareScenarios.map(s=>[s,true]))},cloudflare_latency:{p50_ms:500,p95_ms:900,max_ms:1200}};
