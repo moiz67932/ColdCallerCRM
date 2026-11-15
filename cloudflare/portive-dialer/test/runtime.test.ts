@@ -59,6 +59,30 @@ it('does not send a dial if final PostgreSQL authorization cancels it',async()=>
  await executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e));
  expect(spy.mock.calls.some(([url])=>String(url).includes('/v2/'))).toBe(false);
 });
+it('inspects configuration without preparing SQL work or calling a provider',async()=>{
+ const path='/internal/inspect',body='{}';
+ const r=await worker.fetch(new Request('https://worker.example'+path,{method:'POST',body,headers:await signInternal(e.DIALER_CLOUDFLARE_SECRET,path,body)}),e);
+ expect(r.status).toBe(200);expect((await r.json() as any).fingerprint).toBe(await fingerprint(e));
+ expect(calls).toHaveLength(0);
+});
+it.each(['disabled','expired','wrong-grant','unapproved-destination','missing-proof','unrestricted-enabled'])('restricted acceptance fails closed for %s',async(failure)=>{
+ const grant=id();work.session.acceptance_grant_id=grant;work.session.parallel_options.ringTimeout=15;work.session.parallel_options.maxCallSeconds=60;
+ const config={...e,DIALER_PARALLEL_ENABLED:'false',DIALER_ACCEPTANCE_ENABLED:'true'};
+ const proof={id:grant,expiresAt:new Date(Date.now()+60000).toISOString(),destinations:[{phone_number:'+12125550101'}],operatorSipUri:work.session.parallel_options.operatorSipUri,maxSpendCents:50};
+ if(failure==='disabled')config.DIALER_ACCEPTANCE_ENABLED='false';
+ if(failure==='expired')proof.expiresAt=new Date(0).toISOString();
+ if(failure==='wrong-grant')proof.id=id();
+ if(failure==='unapproved-destination')proof.destinations[0].phone_number='+12125550102';
+ if(failure==='unrestricted-enabled')config.DIALER_PARALLEL_ENABLED='true';
+ spy.mockImplementation(async(input:any,init:any)=>{const url=String(input);calls.push({url,body:init?.body?JSON.parse(init.body):{}});return Response.json(url.endsWith('portive_orchestration_authorize')?{allowed:true,session:work.session,acceptance:failure==='missing-proof'?null:proof}:null);});
+ await executeCommand(cmd('dial_lead'),config,new Database(config),new TelnyxApi(config));
+ expect(calls.some(c=>c.url.includes('/v2/'))).toBe(false);
+});
+it('acceptance flag alone cannot release an ordinary Parallel session',async()=>{
+ const config={...e,DIALER_PARALLEL_ENABLED:'false',DIALER_ACCEPTANCE_ENABLED:'true'};
+ await executeCommand(cmd('dial_lead'),config,new Database(config),new TelnyxApi(config));
+ expect(calls.some(c=>c.url.includes('/v2/'))).toBe(false);
+});
 it.each(['destination_suppressed','outside_calling_window','invalid_timezone','session_not_dispatchable'])('denied %s dispatch never reaches Telnyx or overwrites the SQL cancellation',async(reason)=>{
  spy.mockImplementation(async(input:any,init:any)=>{
   const url=String(input);calls.push({url,body:init?.body?JSON.parse(init.body):{}});

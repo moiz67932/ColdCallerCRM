@@ -8,6 +8,7 @@ import { checkVoiceWebhookReachability } from "@/lib/telnyx/helpers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { parallelReadiness } from "@/lib/dialer/parallel-readiness";
 import { defaultParallelOptions } from "@/lib/dialer/parallel-policy";
+import { env } from "@/lib/env";
 
 export const runtime = "nodejs";
 
@@ -18,7 +19,15 @@ export async function GET(request: NextRequest) {
     const [session, lists] = await Promise.all([getCurrentSession(), getSupabaseAdmin().from("lead_lists").select("id,name").order("created_at", { ascending: false })]);
     if (lists.error) throw new Error(lists.error.message);
     const readiness = await parallelReadiness();
-    return NextResponse.json({ session, lists: lists.data, capabilities: { ...dialerCapabilities(), parallel: readiness.enabled, parallelBlockers: readiness.blockers } });
+    let acceptanceAuthorization = null;
+    const grantId = request.nextUrl.searchParams.get("acceptanceGrantId"), controllerId = request.nextUrl.searchParams.get("controllerId");
+    if (env.DIALER_ACCEPTANCE_ENABLED === "true" && env.DIALER_PARALLEL_ENABLED === "false" && z.uuid().safeParse(grantId).success && z.uuid().safeParse(controllerId).success) {
+      const { data } = await getSupabaseAdmin().from("dialer_acceptance_grants")
+        .select("id,list_id,time_zone,destinations,max_spend_cents,expires_at").eq("id", grantId!).eq("controller_id", controllerId!)
+        .is("revoked_at", null).is("consumed_session_id", null).gt("expires_at", new Date().toISOString()).maybeSingle();
+      if (data) acceptanceAuthorization = { ...data, destinations: data.destinations.map((d: {phone_number:string;time_zone:string}) => ({phone_number:d.phone_number,time_zone:d.time_zone})) };
+    }
+    return NextResponse.json({ session, lists: lists.data, acceptanceAuthorization, capabilities: { ...dialerCapabilities(), parallel: readiness.enabled, parallelBlockers: readiness.blockers } });
   } catch (error) { return jsonError(formatUnknownError(error), 503); }
 }
 
@@ -28,6 +37,7 @@ const schema = z.object({
   listId: z.string().optional(), location: z.string().optional(), attemptLimit: z.number().int().min(1).max(500).optional(),
   mode: z.enum(["power", "parallel"]).optional(), maxLines: z.number().int().min(1).max(4).optional(),
   timeZone: z.string().optional(), reviewed: z.boolean().optional(),
+  acceptanceGrantId: z.uuid().optional(),
   callControlId: z.string().optional(),
   transportReady: z.boolean().optional(),
   options: z.object({

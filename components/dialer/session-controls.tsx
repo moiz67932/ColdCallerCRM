@@ -28,6 +28,7 @@ export function SessionControls(props: Props) {
   const [lines, setLines] = useState(4);
   const [options, setOptions] = useState(defaultParallelOptions);
   const [parallelBlockers, setParallelBlockers] = useState<string[]>(["Provider readiness has not loaded."]);
+  const [acceptance, setAcceptance] = useState<{id:string;list_id:string;time_zone:string;destinations:Array<{phone_number:string;time_zone:string}>;max_spend_cents:number;expires_at:string}|null>(null);
   const transportReady = useRef(false);
   const [timeZone, setTimeZone] = useState("America/New_York");
   const [reviewed, setReviewed] = useState(false);
@@ -48,13 +49,21 @@ export function SessionControls(props: Props) {
   useEffect(() => {
     controller.current = sessionStorage.getItem("portive-controller") ?? crypto.randomUUID();
     sessionStorage.setItem("portive-controller", controller.current);
-    void fetch("/api/dial-sessions", { cache: "no-store" }).then(async (response) => {
+    const grantId = new URLSearchParams(window.location.search).get("parallelAcceptance");
+    const query = grantId ? `?${new URLSearchParams({acceptanceGrantId:grantId,controllerId:controller.current})}` : "";
+    void fetch(`/api/dial-sessions${query}`, { cache: "no-store" }).then(async (response) => {
       const data = await response.json();
       if (!response.ok) { setError(data.error); return; }
       setControllerId(controller.current);
       setLists(data.lists ?? []);
       setParallelBlockers(data.capabilities?.parallelBlockers ?? ["Provider readiness unavailable."]);
       setListId(data.session?.selected_list_id ?? data.lists?.[0]?.id ?? "");
+      if (data.acceptanceAuthorization && !data.session) {
+        const approved = data.acceptanceAuthorization;
+        setAcceptance(approved); setMode("parallel"); setListId(approved.list_id); setTimeZone(approved.time_zone);
+        setLines(Math.max(2,approved.destinations.length));
+        setOptions({...defaultParallelOptions,ringTimeout:15,maxCallSeconds:60,attemptLimit:approved.destinations.length,maxSpendCents:approved.max_spend_cents,autoContinue:false});
+      }
       if (data.session) { acceptSession(data.session); setMode(data.session.mode); }
     }).catch(() => setError("Unable to recover dial sessions. Manual calling remains available."));
   }, [acceptSession]);
@@ -115,6 +124,7 @@ export function SessionControls(props: Props) {
 
   const active = session && !["completed", "stopped"].includes(session.status);
   const owned = !session || session.controller_id === controllerId;
+  const restricted = Boolean(acceptance || session?.acceptance_grant_id);
   return (
     <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900/90">
       <div className="flex flex-wrap items-center gap-2">
@@ -128,31 +138,31 @@ export function SessionControls(props: Props) {
       {mode !== "manual" ? (
         <>
           <div className="flex flex-wrap items-center gap-3 text-sm">
-            <label>Lead list <select aria-label="Dial session lead list" className="rounded border bg-background p-2" disabled={Boolean(active)} value={listId} onChange={(e) => setListId(e.target.value)}>
+            <label>Lead list <select aria-label="Dial session lead list" className="rounded border bg-background p-2" disabled={Boolean(active) || restricted} value={listId} onChange={(e) => setListId(e.target.value)}>
               <option value="">Choose list</option>{lists.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}
             </select></label>
-            <label>List local timezone <select aria-label="List local timezone" className="rounded border bg-background p-2" value={timeZone} disabled={Boolean(active)} onChange={(e) => setTimeZone(e.target.value)}>
+            <label>List local timezone <select aria-label="List local timezone" className="rounded border bg-background p-2" value={timeZone} disabled={Boolean(active) || restricted} onChange={(e) => setTimeZone(e.target.value)}>
               {["America/New_York", "America/Chicago", "America/Denver", "America/Phoenix", "America/Los_Angeles", "America/Anchorage", "Pacific/Honolulu"].map((zone) => <option key={zone}>{zone}</option>)}
             </select></label>
-            {mode === "parallel" ? <label>Maximum lines <select aria-label="Maximum lines" className="rounded border bg-background p-2" value={lines} onChange={(e) => setLines(Number(e.target.value))}>{[2, 3, 4].map((n) => <option key={n}>{n}</option>)}</select></label> : null}
+            {mode === "parallel" ? <label>Maximum lines <select aria-label="Maximum lines" className="rounded border bg-background p-2" value={lines} disabled={Boolean(active) || restricted} onChange={(e) => setLines(Number(e.target.value))}>{[2, 3, 4].map((n) => <option key={n}>{n}</option>)}</select></label> : null}
             <label className="flex items-center gap-2"><input type="checkbox" checked={reviewed} disabled={Boolean(active)} onChange={(e) => setReviewed(e.target.checked)} />I reviewed this list’s eligibility, DNC screening and local calling restrictions.</label>
           </div>
           {mode === "parallel" ? <>
-            {parallelBlockers.length ? <div role="status" className="text-sm text-amber-700 dark:text-amber-300"><p>Parallel technical blockers:</p><ul className="list-inside list-disc">{parallelBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div> : <p className="text-sm text-green-600">Controlled provider configuration verified. Capacity is checked again at Start and Resume.</p>}
+            {restricted ? <p role="status" className="text-sm text-amber-700">Restricted acceptance: one batch, no retry or resume, 120-second operator limit. {acceptance ? `Only ${acceptance.destinations.map(d=>`${d.phone_number} (${d.time_zone})`).join(", ")}; budget $${(acceptance.max_spend_cents/100).toFixed(2)}; authorization expires ${acceptance.expires_at}.` : "Use Stop after the controlled conversation and reconcile all legs."}</p> : parallelBlockers.length ? <div role="status" className="text-sm text-amber-700 dark:text-amber-300"><p>Parallel technical blockers:</p><ul className="list-inside list-disc">{parallelBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div> : <p className="text-sm text-green-600">Controlled provider configuration verified. Capacity is checked again at Start and Resume.</p>}
             <div className="flex flex-wrap gap-3 text-sm">
-              {([['ringTimeout','Ring timeout (seconds)',15,120],['maxCallSeconds','Maximum call seconds',30,1800],['batchDelaySeconds','Batch delay (seconds)',0,60],['attemptLimit','Attempt limit',1,500],['maxSpendCents','Maximum spend (cents)',1,100000]] as const).map(([key,label,min,max]) => <label key={key}>{label}<input className="ml-2 w-20 rounded border bg-background p-1" type="number" min={min} max={max} value={options[key]} disabled={Boolean(active)} onChange={(event) => setOptions((current) => ({ ...current, [key]: Number(event.target.value) }))} /></label>)}
-              <label><input type="checkbox" checked={options.autoContinue} disabled={Boolean(active)} onChange={(event) => setOptions((current) => ({ ...current, autoContinue: event.target.checked }))} /> Automatically continue after saved disposition</label>
+              {([['ringTimeout','Ring timeout (seconds)',15,120],['maxCallSeconds','Maximum call seconds',30,1800],['batchDelaySeconds','Batch delay (seconds)',0,60],['attemptLimit','Attempt limit',1,500],['maxSpendCents','Maximum spend (cents)',1,100000]] as const).map(([key,label,min,max]) => <label key={key}>{label}<input className="ml-2 w-20 rounded border bg-background p-1" type="number" min={min} max={max} value={options[key]} disabled={Boolean(active) || restricted} onChange={(event) => setOptions((current) => ({ ...current, [key]: Number(event.target.value) }))} /></label>)}
+              <label><input type="checkbox" checked={options.autoContinue} disabled={Boolean(active) || restricted} onChange={(event) => setOptions((current) => ({ ...current, autoContinue: event.target.checked }))} /> Automatically continue after saved disposition</label>
               <label><input type="checkbox" checked={options.silentRingback} disabled={Boolean(active)} onChange={(event) => setOptions((current) => ({ ...current, silentRingback: event.target.checked }))} /> Silent local ringback</label>
               <span>Batch mode · Continuous refill unavailable</span>
             </div>
           </> : null}
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" disabled={Boolean(active) || !props.ready || !props.idle || !reviewed || !listId || mode === "parallel" && parallelBlockers.length > 0 || busy}
-              onClick={() => void command("start", { listId, timeZone, reviewed, mode, options, maxLines: mode === "parallel" ? lines : 1 })}>Start Session</Button>
+            <Button size="sm" disabled={Boolean(active) || !props.ready || !props.idle || !reviewed || !listId || mode === "parallel" && !acceptance && parallelBlockers.length > 0 || busy}
+              onClick={() => void command("start", { listId, timeZone, reviewed, mode, options, maxLines: mode === "parallel" ? lines : 1, ...(mode === "parallel" && acceptance ? {acceptanceGrantId:acceptance.id} : {}) })}>{mode === "parallel" && acceptance ? "Start approved acceptance batch" : "Start Session"}</Button>
             <Button size="sm" variant="outline" disabled={!active || !owned || busy || session.status !== "running"} onClick={() => void command("pause")}>Pause</Button>
-            <Button size="sm" variant="outline" disabled={!active || !owned || busy || session.status !== "paused" || !props.ready || session.mode === "parallel" && props.operatorMediaReady !== true} onClick={() => void command("resume")}>Resume</Button>
+            <Button size="sm" variant="outline" disabled={restricted || !active || !owned || busy || session.status !== "paused" || !props.ready || session.mode === "parallel" && props.operatorMediaReady !== true} onClick={() => void command("resume")}>Resume</Button>
             <Button size="sm" variant="destructive" disabled={!active || !owned || busy} onClick={() => void command("stop")}>Stop Session</Button>
-            {session?.mode === "parallel" ? <Button size="sm" variant="outline" disabled={busy || !owned || !["awaiting_disposition", "ready"].includes(session.phase)} onClick={() => void command("continue")}>Continue next batch</Button> : null}
+            {session?.mode === "parallel" && !restricted ? <Button size="sm" variant="outline" disabled={busy || !owned || !["awaiting_disposition", "ready"].includes(session.phase)} onClick={() => void command("continue")}>Continue next batch</Button> : null}
             <Button size="sm" variant="outline" disabled={!active || !owned || !session.active_call_id || busy || props.idle} onClick={() => void props.onEndCall()}>End Active Call</Button>
             <Button size="sm" variant="outline" disabled={!active || !owned || (session.mode === "parallel" ? session.phase !== "awaiting_disposition" : !props.idle) || busy} onClick={() => void command("skip")}>Skip Lead</Button>
           </div>

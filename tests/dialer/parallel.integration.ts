@@ -75,6 +75,7 @@ test("parallel migrations apply on top of the Power schema and rerun without los
   sql("delete from public.dialer_provider_verifications where config_fingerprint='rerun-marker'");
   sql(readFileSync("supabase/migrations/202611140002_cloudflare_orchestration.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611150001_parallel_dispatch_safety.sql", "utf8"));
+  sql(readFileSync("supabase/migrations/202611150002_parallel_acceptance.sql", "utf8"));
 });
 test("no prospects are reserved until both provider answer and browser media acknowledgement", () => {
   setup(); const s=invoke("start").id; invoke("tick",s); assert.equal(sql("select count(*) from public.call_attempts"),"0");

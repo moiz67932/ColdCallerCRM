@@ -40,6 +40,10 @@ export class SessionCoordinator extends DurableObject<Env> {
         if([...sql.exec('SELECT nonce FROM nonces WHERE nonce = ?',nonce)].length) return Response.json({error:'Replay rejected'},{status:409});
         sql.exec('INSERT INTO nonces VALUES (?, ?)',nonce,Date.now()+120_000);
       }
+      if(path==='/internal/inspect') {
+        // Read-only configuration comparison: no activation, tick or provider I/O.
+        return Response.json({backend:'cloudflare',fingerprint:await fingerprint(this.env),parallelEnabled:this.env.DIALER_PARALLEL_ENABLED==='true',acceptanceEnabled:this.env.DIALER_ACCEPTANCE_ENABLED==='true'});
+      }
       if(path==='/internal/prepare') {
         // Rescue an activation lost between Vercel creating a session and delivering its wake.
         await this.arm(Date.now()+60_000);
@@ -160,10 +164,10 @@ export default {
   fetch(request: Request, env: Env): Promise<Response>|Response {
     const path=new URL(request.url).pathname;
     if(request.method==='GET'&&path==='/health') return Response.json({service:'portive-dialer',environment:env.DEPLOYMENT_ENV});
-    if(request.method!=='POST'||!/^\/internal\/(prepare|session\/[a-f0-9-]{36})$/.test(path)) return Response.json({error:'Not found'},{status:404});
+    if(request.method!=='POST'||!/^\/internal\/(prepare|inspect|session\/[a-f0-9-]{36})$/.test(path)) return Response.json({error:'Not found'},{status:404});
     if(!request.headers.has('x-portive-signature'))return Response.json({error:'Unauthorized'},{status:401});
     // No JSON parsing, crypto, or provider SDK on the ordinary Worker's 10 ms CPU budget.
-    const name=path==='/internal/prepare'?'control':path.split('/').pop()!;
+    const name=['/internal/prepare','/internal/inspect'].includes(path)?'control':path.split('/').pop()!;
     if(Number(request.headers.get('content-length')??0)>256_000) return Response.json({error:'Payload too large'},{status:413});
     const headers=new Headers(request.headers);headers.set('x-portive-cf-arrival',String(Date.now()));
     return env.SESSIONS.get(env.SESSIONS.idFromName(name)).fetch(new Request(request,{headers}));

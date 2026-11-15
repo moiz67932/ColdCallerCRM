@@ -6,12 +6,14 @@ import type { DialSession, SessionCommandResult } from "./types";
 import { parallelReadiness } from "./parallel-readiness";
 import { assertOrchestrationBackend, orchestrationBackend, prepareOrchestration, wakeOrchestration } from "./orchestration";
 import type { ParallelOptions } from "./parallel-policy";
+import { acceptanceStartOptions } from "./acceptance";
 
 export function dialerCapabilities() {
   return {
     power: env.DIALER_POWER_ENABLED !== "false" && getTelnyxManualDialFlow() === "browser_first",
     parallel: env.DIALER_PARALLEL_ENABLED === "true",
     parallelPreview: env.DIALER_PARALLEL_ENABLED === "true",
+    acceptance: env.DIALER_ACCEPTANCE_ENABLED === "true" && env.DIALER_PARALLEL_ENABLED === "false" && orchestrationBackend() === "cloudflare",
   };
 }
 
@@ -21,11 +23,22 @@ export async function sessionCommand(input: {
   timeZone?: string; reviewed?: boolean;
   options?: ParallelOptions; callControlId?: string;
   transportReady?: boolean;
+  acceptanceGrantId?: string;
 }) {
   await assertOrchestrationBackend(input.sessionId);
   if (["start", "resume", "next", "continue", "skip"].includes(input.action)) await prepareOrchestration();
   const existing = input.sessionId ? await getCurrentSession() : null;
   if (input.mode === "parallel" || existing?.mode === "parallel") {
+    if (input.action === "start" && input.acceptanceGrantId) {
+      const options = await acceptanceStartOptions(input.acceptanceGrantId, input.controllerId);
+      const { data, error } = await getSupabaseAdmin().rpc("portive_parallel_command", {
+        p_session: null, p_controller: input.controllerId, p_action: "start", p_ready: input.ready,
+        p_reviewed: input.reviewed ?? false, p_options: options,
+      });
+      if (error) throw new Error(error.message);
+      await wakeOrchestration(data.id);
+      return { session: data, dispatch: false } as SessionCommandResult;
+    }
     const starting = input.action === "start" || input.action === "resume";
     const readiness = starting ? await parallelReadiness(true) : null;
     if (readiness && !readiness.enabled) throw new Error(readiness.blockers.join(" "));

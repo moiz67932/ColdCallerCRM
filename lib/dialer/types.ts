@@ -15,6 +15,7 @@ export type DialSession = {
   parallel_batch?: number;
   parallel_options?: Record<string, unknown>;
   reserved_cost_cents?: number;
+  acceptance_grant_id?: string | null;
 };
 
 export type ParallelAttempt = {

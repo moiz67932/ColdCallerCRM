@@ -7,11 +7,20 @@ export async function executeCommand(command: Command, env: Env, db: Database, a
   try {
     if(s.orchestration_backend!=='cloudflare') throw new Error('Backend ownership mismatch');
     // A database guard on every claim and completion fences a stale process during rollback.
-    const authorization=await db.rpc<{allowed:boolean;session?:typeof s;attempt?:typeof a}>('portive_orchestration_authorize',{p_command:command.id});
+    const authorization=await db.rpc<{allowed:boolean;session?:typeof s;attempt?:typeof a;acceptance?:{id:string;expiresAt:string;destinations:Array<{phone_number:string}>;operatorSipUri:string;maxSpendCents:number}}>('portive_orchestration_authorize',{p_command:command.id});
     if(!authorization?.allowed)return;
     s=authorization.session??s;a=authorization.attempt??a;
     if(command.action==='dial_operator'||command.action==='dial_lead') {
-      if(env.DIALER_PARALLEL_ENABLED!=='true'||s.parallel_options.fingerprint!==await fingerprint(env)) throw new Error('Parallel configuration changed or dialing disabled');
+      const acceptance=s.acceptance_grant_id ? authorization.acceptance : undefined;
+      if(s.acceptance_grant_id) {
+        if(env.DIALER_ACCEPTANCE_ENABLED!=='true'||env.DIALER_PARALLEL_ENABLED!=='false'||!acceptance||acceptance.id!==s.acceptance_grant_id||
+          !Number.isFinite(Date.parse(acceptance.expiresAt))||Date.parse(acceptance.expiresAt)<=Date.now()||
+          ![1,4].includes(acceptance.destinations.length)||acceptance.maxSpendCents<1||acceptance.maxSpendCents>200||
+          s.parallel_options.ringTimeout!==15||s.parallel_options.maxCallSeconds!==60||
+          (command.action==='dial_operator'?s.parallel_options.operatorSipUri!==acceptance.operatorSipUri:
+            !/^\+1[2-9]\d{2}[2-9]\d{6}$/.test(command.parameters.to)||!acceptance.destinations.some(d=>d.phone_number===command.parameters.to))) throw new Error('Restricted acceptance not authorized');
+      } else if(env.DIALER_PARALLEL_ENABLED!=='true') throw new Error('Parallel dialing disabled');
+      if(s.parallel_options.fingerprint!==await fingerprint(env)) throw new Error('Parallel configuration changed');
       if(command.action==='dial_operator'&&s.status!=='running') throw new Error('Operator dialing suspended');
       if(command.action==='dial_lead'&&(s.status!=='running'||s.active_call_id||!s.browser_media_ready||a?.termination_reason)) return complete(true,{canceledBeforeDispatch:true});
       const operator=command.action==='dial_operator';
@@ -21,7 +30,7 @@ export async function executeCommand(command: Command, env: Env, db: Database, a
         connection_id:env.TELNYX_PARALLEL_CONNECTION_ID,from:env.TELNYX_FROM_NUMBER,
         to:operator?s.parallel_options.operatorSipUri:command.parameters.to,
         webhook_url:env.VERCEL_VOICE_WEBHOOK_URL,client_state:state,command_id:command.id,
-        timeout_secs:operator?20:s.parallel_options.ringTimeout,time_limit_secs:operator?1800:s.parallel_options.maxCallSeconds,
+        timeout_secs:operator?20:s.parallel_options.ringTimeout,time_limit_secs:operator?(acceptance?120:1800):s.parallel_options.maxCallSeconds,
         ...(operator?{}:{answering_machine_detection:'premium'})
       });
       if(!response.data?.call_control_id) throw new Error('Provider omitted call identity');

@@ -30,6 +30,7 @@ const envSchema = z
     TELNYX_API_KEY: z.string().optional(),
     DIALER_POWER_ENABLED: z.enum(["true", "false"]).default("true"),
     DIALER_PARALLEL_ENABLED: z.enum(["true", "false"]).default("false"),
+    DIALER_ACCEPTANCE_ENABLED: z.enum(["true", "false"]).default("false"),
     DIALER_ORCHESTRATION_BACKEND: z.enum(["node", "cloudflare"]).default("node"),
     DIALER_CLOUDFLARE_ENABLED: z.enum(["true", "false"]).default("false"),
     DIALER_CLOUDFLARE_URL: z.string().url().optional(),
