@@ -20,7 +20,7 @@ async function delivery(){
  return {kind:'event',eventId:JSON.parse(rawBody).data.id,delivery:{rawBody,signature:btoa(String.fromCharCode(...sig)),timestamp,sessionId:work.session.id,attemptId:id(),role:'lead',vercelArrival:Date.now(),vercelAuthenticated:Date.now()}};
 }
 beforeEach(async()=>{
- calls=[];commands=[];work={session:{id:id(),mode:'parallel',status:'running',controller_id:id(),active_call_id:null,operator_call_control_id:'operator',browser_media_ready:true,orchestration_backend:'cloudflare',parallel_options:{fingerprint:await fingerprint(e),operatorSipUri:'sip:operator@sip.telnyx.com',ringTimeout:30,maxCallSeconds:300}},commands:[],deadlines:[new Date(Date.now()+10000).toISOString()]};
+ calls=[];commands=[];work={session:{id:id(),mode:'parallel',status:'running',controller_id:id(),active_call_id:null,operator_call_control_id:'operator',browser_media_ready:true,orchestration_backend:'cloudflare',parallel_options:{fingerprint:await fingerprint(e),operatorSipUri:'sip:operator@sip.telnyx.com',ringTimeout:30,maxCallSeconds:300,budgetVersion:"exposure-v1",sessionSeconds:600,deadlineAt:new Date(Date.now()+600000).toISOString()}},commands:[],deadlines:[new Date(Date.now()+10000).toISOString()]};
  spy=vi.spyOn(globalThis,'fetch').mockImplementation(async(input:any,init:any)=>{const url=String(input),body=init?.body?JSON.parse(init.body):{};calls.push({url,body});if(url.endsWith('portive_orchestration_work')||url.endsWith('portive_cloudflare_event')){const r={...work,commands};commands=[];return Response.json(r);}if(url.endsWith('portive_orchestration_authorize'))return Response.json({allowed:true});if(url.includes('/rest/v1/'))return Response.json(null);if(url.includes('/v2/'))return Response.json({data:{call_control_id:id(),is_alive:true}});throw Error('Unexpected network');});
 });
 afterEach(()=>vi.restoreAllMocks());
@@ -114,3 +114,24 @@ it('does not hang up an operator whose terminal evidence is already recorded',as
 it('explains an answered collision using provider speech before terminal cleanup',async()=>{const a=attempt();await executeCommand(cmd('failure_playback',a),e,new Database(e),new TelnyxApi(e));const speech=calls.find(c=>c.url.endsWith('/prospect/actions/speak'));expect(speech?.body.payload).toContain('Fixture Business');expect(speech?.body.payload).toContain('telemarketing');expect(calls.some(c=>c.url.endsWith('/actions/hangup'))).toBe(false);});
 it('never explains a collision to the winning prospect',async()=>{const a=attempt();work.session.active_call_id=a.id;await executeCommand(cmd('failure_playback',a),e,new Database(e),new TelnyxApi(e));expect(calls.some(c=>c.url.includes('/v2/'))).toBe(false);expect(calls.some(c=>c.body.p_ok===false)).toBe(true);});
 it('never speaks an undefined caller identity',async()=>{await executeCommand(cmd('failure_playback'),{...e,DIALER_CALLER_NAME:undefined},new Database(e),new TelnyxApi(e));expect(calls.some(c=>c.url.includes('/v2/'))).toBe(false);});
+
+it('funds each prospect provider hard cap including cleanup grace',async()=>{
+ await executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e));
+ const call=calls.find(c=>c.url.endsWith('/v2/calls'));expect(call?.body.time_limit_secs).toBe(315);
+});
+it('caps the operator from the immutable remaining session deadline',async()=>{
+ await executeCommand(cmd('dial_operator'),e,new Database(e),new TelnyxApi(e));
+ const limit=calls.find(c=>c.url.endsWith('/v2/calls'))?.body.time_limit_secs;
+ expect(limit).toBeGreaterThanOrEqual(570);expect(limit).toBeLessThanOrEqual(572);
+});
+it('does not start an unfunded call near the deadline even after SQL authorization',async()=>{
+ work.session.parallel_options.deadlineAt=new Date(Date.now()+100000).toISOString();
+ await executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e));expect(calls.some(c=>c.url.includes('/v2/'))).toBe(false);
+});
+it('does not reinterpret legacy sessions as funded under the new tariff',async()=>{
+ delete work.session.parallel_options.budgetVersion;await executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e));expect(calls.some(c=>c.url.includes('/v2/'))).toBe(false);
+});
+it('collision TTS cannot exceed its reserved text length',async()=>{
+ const a=attempt();work.session.active_call_id='other';await executeCommand(cmd('failure_playback',a),{...e,DIALER_CALLER_NAME:'Company'.repeat(200)},new Database(e),new TelnyxApi(e));
+ expect(calls.find(c=>c.url.endsWith('/actions/speak'))?.body.payload.length).toBeLessThanOrEqual(400);
+});

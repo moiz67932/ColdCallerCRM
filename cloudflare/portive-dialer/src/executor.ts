@@ -21,6 +21,13 @@ export async function executeCommand(command: Command, env: Env, db: Database, a
             !/^\+1[2-9]\d{2}[2-9]\d{6}$/.test(command.parameters.to)||!acceptance.destinations.some(d=>d.phone_number===command.parameters.to))) throw new Error('Restricted acceptance not authorized');
       } else if(env.DIALER_PARALLEL_ENABLED!=='true') throw new Error('Parallel dialing disabled');
       if(s.parallel_options.fingerprint!==await fingerprint(env)) throw new Error('Parallel configuration changed');
+      let fundedLimit: number|undefined;
+      if(!acceptance && s.mode==='parallel') {
+        const left=Math.floor((Date.parse(s.parallel_options.deadlineAt??'')-Date.now())/1000);
+        const required=command.action==='dial_operator'?28:s.parallel_options.maxCallSeconds+s.parallel_options.ringTimeout+23;
+        if(s.parallel_options.budgetVersion!=='exposure-v1'||!Number.isFinite(left)||left<required) throw new Error('Funded session deadline cannot cover another call');
+        fundedLimit=command.action==='dial_operator'?Math.max(1,left-28):s.parallel_options.maxCallSeconds+15;
+      }
       if(command.action==='dial_operator'&&s.status!=='running') throw new Error('Operator dialing suspended');
       if(command.action==='dial_lead'&&(s.status!=='running'||s.active_call_id||!s.browser_media_ready||a?.termination_reason)) return complete(true,{canceledBeforeDispatch:true});
       const operator=command.action==='dial_operator';
@@ -30,7 +37,7 @@ export async function executeCommand(command: Command, env: Env, db: Database, a
         connection_id:env.TELNYX_PARALLEL_CONNECTION_ID,from:env.TELNYX_FROM_NUMBER,
         to:operator?s.parallel_options.operatorSipUri:command.parameters.to,
         webhook_url:env.VERCEL_VOICE_WEBHOOK_URL,client_state:state,command_id:command.id,
-        timeout_secs:operator?20:s.parallel_options.ringTimeout,time_limit_secs:operator?(acceptance?120:1800):s.parallel_options.maxCallSeconds,
+        timeout_secs:operator?20:s.parallel_options.ringTimeout,time_limit_secs:acceptance?(operator?120:s.parallel_options.maxCallSeconds):s.mode==='parallel'?fundedLimit:s.parallel_options.maxCallSeconds,
         ...(operator?{}:{answering_machine_detection:'premium'})
       });
       if(!response.data?.call_control_id) throw new Error('Provider omitted call identity');
@@ -49,7 +56,7 @@ export async function executeCommand(command: Command, env: Env, db: Database, a
       if(!env.DIALER_CALLER_NAME?.trim()) throw new Error('Calling business name is required for collision explanation');
       providerSent=true;
       return complete(true,await api.action(a.telnyx_call_control_id,'speak',{
-        payload:`This is ${env.DIALER_CALLER_NAME}. This call was for telemarketing purposes. No operator is available. You can reach us at ${env.TELNYX_FROM_NUMBER.split('').join(' ')}. Goodbye.`,
+        payload:`This is ${env.DIALER_CALLER_NAME.slice(0,80)}. This call was for telemarketing purposes. No operator is available. You can reach us at ${env.TELNYX_FROM_NUMBER.split('').join(' ')}. Goodbye.`.slice(0,400),
         payload_type:'text',voice:'female',language:'en-US',command_id:command.id,
       }));
     }

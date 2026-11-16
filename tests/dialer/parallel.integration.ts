@@ -21,6 +21,7 @@ function sql(query: string, database = dbName) {
 function fixture() {
   sql(`truncate public.dial_audit_events,public.dial_session_targets,public.dial_sessions,public.lead_lists cascade;
     select public.portive_set_orchestration_backend('node',false);
+    insert into public.app_settings(key,value_json) values('dialer_cost_profile','${JSON.stringify(costProfile)}') on conflict(key) do update set value_json=excluded.value_json;
     delete from public.dial_suppressions; delete from public.dialer_calling_consents;
     insert into public.app_settings(key,value_json) values('dialer_watchdog_heartbeat',jsonb_build_object('at',now()))
       on conflict(key) do update set value_json=excluded.value_json;
@@ -32,7 +33,8 @@ function fixture() {
 }
 
 const verificationId = "33333333-3333-4333-8333-333333333333";
-const options = { accountChannels:5, rateCeilingCents:1, fingerprint: "controlled-fixture", operatorSipUri: "sip:test@sip.telnyx.com", ringTimeout: 30,
+const costProfile={version:'exposure-v1',currency:'USD',source:'Synthetic disposable test tariff',reviewedAt:new Date(Date.now()-1000).toISOString(),expiresAt:new Date(Date.now()+86400000).toISOString(),destinationPrefixes:['+1212'],sipPerMinuteMicros:5000,operatorSipPerMinuteMicros:2000,callControlPerMinuteMicros:2000,webrtcPerMinuteMicros:2000,bridgePerMinuteMicros:0,recordingPerMinuteMicros:0,otherPerMinuteMicros:0,amdPerCallMicros:6500,ttsPerCharacterMicros:9,operatorFixedMicros:0,prospectFixedMicros:0,minimumSeconds:60,incrementSeconds:60};
+const options = { costProfile,availableCreditCents:100000,dailyHeadroomCents:100000,sessionSeconds:600,accountChannels:5, fingerprint: "controlled-fixture", operatorSipUri: "sip:test@sip.telnyx.com", ringTimeout: 30,
   maxCallSeconds: 300, batchDelaySeconds: 0, attemptLimit: 100, maxSpendCents: 5000, autoContinue: true, autoRefill: false };
 function invoke(action: string, session: string | null = null, extra: Record<string, unknown> = {}) {
   return JSON.parse(sql(`select public.portive_parallel_command(${session ? `'${session}'` : "null"},'${controller}','${action}',true,'list',null,4,'${zone}',true,'${JSON.stringify({ ...options,...extra })}')`));
@@ -78,6 +80,7 @@ test("parallel migrations apply on top of the Power schema and rerun without los
   sql(readFileSync("supabase/migrations/202611150002_parallel_acceptance.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611160001_regular_parallel.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611160002_default_calling_policy.sql", "utf8"));
+  sql(readFileSync("supabase/migrations/202611160003_parallel_exposure_budget.sql", "utf8"));
 });
 test("no prospects are reserved until both provider answer and browser media acknowledgement", () => {
   setup(); const s=invoke("start").id; invoke("tick",s); assert.equal(sql("select count(*) from public.call_attempts"),"0");
@@ -200,7 +203,7 @@ test("five provider channels cover four prospects and the operator without overf
 });
 test("spend ceiling remains enforced inside the database", () => {
   setup();
-  assert.throws(()=>start({maxSpendCents:31}),/Budget must cover/);
+  assert.throws(()=>start({maxSpendCents:29}),/First batch requires/);
 });
 test("two workers claim each provider command at most once", async () => {
   setup(); start(); const run=promisify(execFile);
@@ -349,7 +352,7 @@ test('Cloudflare migration reruns safely after its own readiness replacements',(
   assert.throws(()=>sql("set role anon; select public.portive_orchestration_prepare('cloudflare')"),/permission denied/);
 });
 test('Cloudflare bounded operator recovery cleans a parked leg without changing winner rules',()=>{
- const s=cloudflareStart();sql(`update public.dial_sessions set started_at=now()-interval '31 minutes' where id='${s}'`);
+ const s=cloudflareStart();sql(`update public.dial_sessions set started_at=now()-interval '31 minutes',parallel_options=jsonb_set(parallel_options,'{deadlineAt}',to_jsonb((now()-interval '30 seconds')::text)) where id='${s}'`);
  const work=cloudflareWork(s);assert.equal(work.operator_reconcile,true);
  sql(`select public.portive_orchestration_operator('${s}','operator',true)`);
  assert.equal(sql(`select count(*) from public.dial_commands where session_id='${s}' and action='hangup_operator'`),'1');
@@ -613,7 +616,7 @@ test('regular Start creates a real ledger session without a report or grant',()=
  assert.equal(sql('select count(*) from public.dialer_provider_verifications'),'0');
 });
 test('regular Start rejects missing actual provider configuration and an empty list before operator dialing',()=>{
- setup();assert.throws(()=>invoke('start',null,{rateCeilingCents:null}),/cost ceiling/);
+ setup();assert.throws(()=>invoke('start',null,{costProfile:null}),/account tariff/);
  sql('delete from public.leads');assert.throws(()=>invoke('start'),/has no leads/);
  assert.equal(sql('select count(*) from public.dial_commands'),'0');
 });
@@ -715,4 +718,59 @@ test('Colorado address corrects the session timezone default, explicit recipient
  sql(`update public.leads set custom_fields_json='{"timeZone":"America/New_York"}'`);
  assert.equal(sql("select public.portive_calling_hours('first','America/Denver','2026-11-16T13:00:00Z') is null"),'t');
  assert.equal(sql("select public.portive_calling_hours('first','America/Denver',null)"),'invalid_calling_time');
+});
+
+test('SQL and application agree on independently funded operator and all four failure caps',()=>{
+ setup();const s=start();
+ assert.equal(sql(`select reserved_cost_cents from public.dial_sessions where id='${s}'`),'30');
+ assert.equal(sql(`select count(*)||':'||sum(cap_cents) from public.dialer_cost_holds where session_id='${s}'`),'5:30');
+ for(const seconds of [60,120,300]){
+  const o={...options,maxCallSeconds:seconds,sessionSeconds:seconds+75,ringTimeout:15};
+  const expected=seconds===60?14:seconds===120?19:29;
+  assert.equal(Number(sql(`select public.portive_leg_cap('${JSON.stringify(o)}','operator')+4*public.portive_leg_cap('${JSON.stringify(o)}','prospect')`)),expected);
+ }
+});
+test('incomplete billing and terminal events do not release funded loser exposure',()=>{
+ setup();const s=start(),a=attempts(s)[0];
+ event(s,a.id,'lead','call.initiated',{call_control_id:a.id,call_leg_id:'billing-leg'});
+ event(s,a.id,'lead','call.hangup');
+ const record={id:'invoice-record-1',product:'sip-trunking',callLegId:'billing-leg',currency:'USD',costMicros:5000};
+ sql(`select public.portive_reconcile_cost('${a.id}','${JSON.stringify([record])}')`);
+ assert.equal(sql(`select state||':'||cap_cents||':'||billed_micros from public.dialer_cost_holds where id='${a.id}'`),'held:6:5000');
+ assert.throws(()=>sql(`select public.portive_reconcile_cost('${a.id}','[]',true,'complete invoice reference')`),/settled commands/);
+ assert.throws(()=>sql(`select public.portive_reconcile_cost('${a.id}','${JSON.stringify([{...record,id:'foreign',callLegId:'wrong-leg'}])}')`),/Invalid provider billing/);
+ sql(`update public.dial_commands set state='confirmed' where session_id='${s}';select public.portive_reconcile_cost('${a.id}','[]',true,'actual complete invoice reference')`);
+ assert.equal(sql(`select state||':'||billed_micros from public.dialer_cost_holds where id='${a.id}'`),'reconciled:5000');
+ assert.equal(sql(`select reserved_cost_cents from public.dial_sessions where id='${s}'`),'25');
+ sql(`select public.portive_reconcile_cost('${a.id}','${JSON.stringify([record])}',true,'actual complete invoice reference')`);
+ assert.equal(sql(`select count(*) from public.dialer_billing_records where hold_id='${a.id}'`),'1');
+});
+test('session hard deadline stops dispatch and forces all already answered legs to end',()=>{
+ setup();const s=start(),a=attempts(s)[0];answer(s,a.id);
+ sql(`update public.dial_sessions set parallel_options=jsonb_set(parallel_options,'{deadlineAt}',to_jsonb((now()-interval '1 second')::text)) where id='${s}'`);
+ invoke('tick',s);
+ assert.equal(sql(`select browser_media_ready from public.dial_sessions where id='${s}'`),'f');
+ assert.equal(sql(`select count(*) from public.dial_commands where session_id='${s}' and action='hangup' and parameters->>'force'='true'`),'4');
+ assert.equal(sql(`select count(*) from public.dialer_cost_holds where session_id='${s}' and state='held'`),'5');
+});
+test('subsequent batches stop atomically at the maximum without releasing incomplete first-batch bills',()=>{
+ setup();const s=start({maxSpendCents:30});
+ sql("insert into public.leads(id,lead_list_id,phone_number,business_name) values('fifth','list','+12125550105','Fifth')");
+ for(const a of attempts(s))event(s,a.id,'lead','call.hangup',{hangup_cause:'timeout'});
+ invoke('tick',s);assert.equal(attempts(s).length,4);
+ assert.equal(sql(`select reserved_cost_cents from public.dial_sessions where id='${s}'`),'30');
+});
+test('a proven unsent final denial releases only that hold and retains duplicate protection',()=>{
+ const {session,work}=cloudflareReserved(),c=work.commands[0];
+ sql(`update public.leads set custom_fields_json='{"doNotCall":"true"}' where id='${c.attempt.lead_id}'`);assert.equal(authorize(c).allowed,false);
+ cloudflareWork(session);
+ assert.equal(sql(`select state||':'||cap_cents from public.dialer_cost_holds where id='${c.attempt_id}'`),'canceled:0');
+ assert.equal(sql(`select count(*) from public.dial_session_targets where session_id='${session}'`),'4');
+});
+test('next allowed Colorado window uses the actual Denver clock and honors suppression',()=>{
+ setup();sql("delete from public.dialer_campaign_calling_policies;update public.leads set state='Colorado'");
+ assert.equal(sql("select public.portive_next_calling_time('first','America/New_York','2026-11-16T13:00:00Z')"),'2026-11-16 15:00:00+00');
+ assert.equal(sql("select public.portive_next_calling_time('first','America/New_York','2026-07-15T12:00:00Z')"),'2026-07-15 14:00:00+00');
+ sql("update public.leads set custom_fields_json='{"+'"doNotCall":true'+"}'");
+ assert.equal(sql("select public.portive_next_calling_window('list','America/Denver')->>'at' is null"),'t');
 });

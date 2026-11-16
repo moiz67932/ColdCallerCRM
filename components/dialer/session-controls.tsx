@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {BudgetPreflight} from "./budget-preflight";
 import { Button } from "@/components/ui/button";
 import type { DialSession, SessionCommandResult, ParallelAttempt } from "@/lib/dialer/types";
 import { defaultParallelOptions } from "@/lib/dialer/parallel-policy";
@@ -33,6 +34,7 @@ export function SessionControls(props: Props) {
   const [timeZone, setTimeZone] = useState("America/New_York");
   const [reviewed, setReviewed] = useState(false);
   const [error, setError] = useState("");
+  const [budgetReady,setBudgetReady]=useState(false);
   const [busy, setBusy] = useState(false);
   const [controllerId, setControllerId] = useState("");
   const controller = useRef("");
@@ -57,6 +59,7 @@ export function SessionControls(props: Props) {
       setControllerId(controller.current);
       setLists(data.lists ?? []);
       setParallelBlockers(data.capabilities?.parallelBlockers ?? ["Provider readiness unavailable."]);
+      if(data.session?.mode==='parallel'&&data.session.parallel_options?.budgetVersion==='exposure-v1')setOptions({...defaultParallelOptions,...data.session.parallel_options});
       setListId(data.session?.selected_list_id ?? data.lists?.[0]?.id ?? "");
       if (data.acceptanceAuthorization && !data.session) {
         const approved = data.acceptanceAuthorization;
@@ -150,14 +153,15 @@ export function SessionControls(props: Props) {
           {mode === "parallel" ? <>
             {restricted ? <p role="status" className="text-sm text-amber-700">Restricted acceptance: one batch, no retry or resume, 120-second operator limit. {acceptance ? `Only ${acceptance.destinations.map(d=>`${d.phone_number} (${d.time_zone})`).join(", ")}; budget $${(acceptance.max_spend_cents/100).toFixed(2)}; authorization expires ${acceptance.expires_at}.` : "Use Stop after the controlled conversation and reconcile all legs."}</p> : parallelBlockers.length ? <div role="status" className="text-sm text-amber-700 dark:text-amber-300"><p>Parallel technical blockers:</p><ul className="list-inside list-disc">{parallelBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div> : <p className="text-sm text-green-600">Provider capacity, operator connection and credit are checked at Start and Resume.</p>}
             <div className="flex flex-wrap gap-3 text-sm">
-              {([['ringTimeout','Ring timeout (seconds)',15,120],['maxCallSeconds','Maximum call seconds',30,1800],['batchDelaySeconds','Batch delay (seconds)',0,60],['attemptLimit','Attempt limit',1,500],['maxSpendCents','Maximum spend (cents)',1,100000]] as const).map(([key,label,min,max]) => <label key={key}>{label}<input className="ml-2 w-20 rounded border bg-background p-1" type="number" min={min} max={max} value={options[key]} disabled={Boolean(active) || restricted} onChange={(event) => setOptions((current) => ({ ...current, [key]: Number(event.target.value) }))} /></label>)}
+              {([['ringTimeout','Ring timeout (seconds)',15,120],['maxCallSeconds','Maximum call seconds',30,1800],['batchDelaySeconds','Batch delay (seconds)',0,60],['attemptLimit','Attempt limit',1,500],['maxSpendCents','Maximum spend (cents)',1,100000]] as const).map(([key,label,min,max]) => <label key={key}>{label}<input className="ml-2 w-20 rounded border bg-background p-1" type="number" min={min} max={max} value={options[key]} disabled={Boolean(active) || restricted} onChange={(event) => setOptions((current) => ({ ...current, [key]: Number(event.target.value), ...(["maxCallSeconds","ringTimeout"].includes(key)?{sessionSeconds:Math.max(current.sessionSeconds??0,(key==="maxCallSeconds"?Number(event.target.value):current.maxCallSeconds)+(key==="ringTimeout"?Number(event.target.value):current.ringTimeout)+60)}:{}) }))} /></label>)}
               <label><input type="checkbox" checked={options.autoContinue} disabled={Boolean(active) || restricted} onChange={(event) => setOptions((current) => ({ ...current, autoContinue: event.target.checked }))} /> Automatically continue after saved disposition</label>
               <label><input type="checkbox" checked={options.silentRingback} disabled={Boolean(active)} onChange={(event) => setOptions((current) => ({ ...current, silentRingback: event.target.checked }))} /> Silent local ringback</label>
               <span>Batch mode · Continuous refill unavailable</span>
             </div>
           </> : null}
+          {mode === "parallel" && !restricted ? <BudgetPreflight listId={listId} timeZone={timeZone} lines={lines} options={options} sessionId={active?session?.id:undefined} onOptions={setOptions} onReady={setBudgetReady} onBlockers={setParallelBlockers}/> : null}
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" disabled={Boolean(active) || !props.ready || !props.idle || !reviewed || !listId || mode === "parallel" && !acceptance && parallelBlockers.length > 0 || busy}
+            <Button size="sm" disabled={Boolean(active) || !props.ready || !props.idle || !reviewed || !listId || mode === "parallel" && !acceptance && (parallelBlockers.length > 0 || !budgetReady) || busy}
               onClick={() => void command("start", { listId, timeZone, reviewed, mode, options, maxLines: mode === "parallel" ? lines : 1, ...(mode === "parallel" && acceptance ? {acceptanceGrantId:acceptance.id} : {}) })}>{mode === "parallel" && acceptance ? "Start approved acceptance batch" : "Start Session"}</Button>
             <Button size="sm" variant="outline" disabled={!active || !owned || busy || session.status !== "running"} onClick={() => void command("pause")}>Pause</Button>
             <Button size="sm" variant="outline" disabled={restricted || !active || !owned || busy || session.status !== "paused" || !props.ready || session.mode === "parallel" && props.operatorMediaReady !== true} onClick={() => void command("resume")}>Resume</Button>

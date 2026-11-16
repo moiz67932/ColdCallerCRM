@@ -14,7 +14,7 @@ function fixture(authenticated=true) {
  '@/lib/http':{jsonError:(error:string,status:number)=>NextResponse.json({error},{status}),formatUnknownError:String},
  '@/lib/telnyx/call-flow':{},'@/lib/telnyx/helpers':{},
  '@/lib/supabase-admin':{getSupabaseAdmin:()=>({from:(table:string)=>{assert.equal(table,'lead_lists');return {select:()=>({order:async()=>({data:[]})})};}})},
- '@/lib/dialer/parallel-readiness':{parallelReadiness:async(live:boolean)=>{diagnostics.push(live);return {enabled:true,blockers:[],channels:5,availableCreditCents:400,fingerprint:'fixture'};}},
+ '@/lib/dialer/parallel-readiness':{parallelReadiness:async(live:boolean)=>{diagnostics.push(live);return {enabled:true,blockers:[],channels:5,availableCreditCents:400,fingerprint:'fixture',budget:{availableChannels:5,capacity:{verification:'manual'}}};}},
  '@/lib/dialer/parallel-policy':{defaultParallelOptions:{}},'@/lib/env':{env:{DIALER_ACCEPTANCE_ENABLED:'false'}},
  };
  const code=ts.transpileModule(readFileSync('app/api/dial-sessions/route.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;

@@ -31,7 +31,7 @@ export async function GET(request: NextRequest) {
       if (data) acceptanceAuthorization = { ...data, destinations: data.destinations.map((d: {phone_number:string;time_zone:string}) => ({phone_number:d.phone_number,time_zone:d.time_zone})) };
     }
     return NextResponse.json({ session, lists: lists.data, acceptanceAuthorization,
-      ...(verifyProvider ? { providerReadiness: { channelScope: "application_and_profile", accountWideCapacityVerified: false, channels: readiness.channels, availableCreditCents: readiness.availableCreditCents, fingerprint: readiness.fingerprint } } : {}),
+      ...(verifyProvider ? { providerReadiness: { channelScope: "application_profile_and_manual_account_headroom", accountWideCapacityApiVerified: false, accountWideCapacityManuallyVerified: readiness.budget.availableChannels>0, capacityConfirmation:readiness.budget.capacity, channels: readiness.channels, availableCreditCents: readiness.availableCreditCents, fingerprint: readiness.fingerprint } } : {}),
       capabilities: { ...dialerCapabilities(), parallel: readiness.enabled, parallelBlockers: readiness.blockers } });
   } catch (error) { return jsonError(formatUnknownError(error), 503); }
 }
@@ -46,6 +46,7 @@ const schema = z.object({
   callControlId: z.string().optional(),
   transportReady: z.boolean().optional(),
   options: z.object({
+    sessionSeconds: z.number().int().min(60).max(3600).optional(),
     ringTimeout: z.number().int().min(15).max(120), maxCallSeconds: z.number().int().min(30).max(1800),
     batchDelaySeconds: z.number().int().min(0).max(60), attemptLimit: z.number().int().min(1).max(500),
     maxSpendCents: z.number().int().min(1).max(100000), autoContinue: z.boolean(),

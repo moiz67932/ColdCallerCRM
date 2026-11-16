@@ -6,6 +6,9 @@ import type { DialSession, SessionCommandResult } from "./types";
 import { parallelReadiness } from "./parallel-readiness";
 import { assertOrchestrationBackend, orchestrationBackend, prepareOrchestration, wakeOrchestration } from "./orchestration";
 import type { ParallelOptions } from "./parallel-policy";
+import {budgetQuote} from './budget';
+import {parallelFingerprint} from './parallel-fingerprint';
+import {dailyHeadroom} from './funding';
 import { acceptanceStartOptions } from "./acceptance";
 
 export function dialerCapabilities() {
@@ -44,12 +47,19 @@ export async function sessionCommand(input: {
     if (readiness && !readiness.enabled) throw new Error(readiness.blockers.join(" "));
     if (input.action === "resume" && existing?.parallel_options?.fingerprint !== readiness?.fingerprint) throw new Error("Provider configuration changed; stop and reconcile this session before starting a new one");
     if (starting && readiness!.channels < (input.maxLines ?? existing?.max_lines ?? 4) + 1) throw new Error("Provider channels must cover each prospect line and the operator leg");
-    if (starting && readiness!.availableCreditCents < (input.options?.maxSpendCents ?? (Number(existing?.parallel_options?.maxSpendCents) || 5000))) throw new Error("Requested session spend exceeds provider available credit");
+    const funding=input.action==='start'?await dailyHeadroom(readiness!.dailyLimitCents):null;
+    const pricedOptions=input.options??existing?.parallel_options;
+    const quote=input.action==='start'&&readiness!.budget.profile?budgetQuote(readiness!.budget.profile,pricedOptions as unknown as Parameters<typeof budgetQuote>[1],input.maxLines??existing?.max_lines??4):null;
+    if(quote&&quote.shortfallCents)throw Error(`Session requires ${quote.requiredCents} cents; increase maximum spend by ${quote.shortfallCents} cents or reduce duration/lines`);
+    if(quote&&quote.requiredCents+readiness!.budget.heldCents>readiness!.availableCreditCents)throw Error(`Funded exposure requires ${quote.requiredCents} cents plus ${readiness!.budget.heldCents} cents of unsettled prior calls; available ${readiness!.availableCreditCents} cents`);
+    if(quote&&quote.requiredCents+readiness!.budget.heldCents>funding!.cents)throw Error(`Remaining provider daily headroom is ${funding!.cents} cents; funded exposure needs ${quote.requiredCents+readiness!.budget.heldCents} cents`);
+    const fundedBudget=quote?Math.min(input.options!.maxSpendCents,readiness!.availableCreditCents-readiness!.budget.heldCents,funding!.cents-readiness!.budget.heldCents):undefined;
+    if(input.action==='resume'&&parallelFingerprint(existing?.parallel_options?.costProfile as Record<string,unknown>??{})!==parallelFingerprint(readiness?.budget.profile??{}))throw Error('Tariff changed; stop and reconcile before funding a new session');
     const { data, error } = await getSupabaseAdmin().rpc("portive_parallel_command", {
       p_session: input.sessionId ?? null, p_controller: input.controllerId, p_action: input.action,
       p_ready: input.ready, p_list: input.listId ?? null, p_location: input.location ?? null,
       p_lines: input.maxLines ?? 4, p_timezone: input.timeZone ?? null, p_reviewed: input.reviewed ?? false,
-      p_options: { ...input.options, accountChannels: readiness?.channels, rateCeilingCents: readiness?.rateCeilingCents, fingerprint: readiness?.fingerprint,
+      p_options: { ...input.options, ...(fundedBudget!==undefined?{maxSpendCents:fundedBudget}:{}), accountChannels: readiness?.channels, costProfile: readiness?.budget.profile, sessionSeconds:quote?.sessionSeconds, availableCreditCents:readiness?.availableCreditCents, dailyHeadroomCents:funding?.cents, fingerprint: readiness?.fingerprint,
         operatorSipUri: readiness?.sipUri, callControlId: input.callControlId, transportReady: input.transportReady ?? true },
     });
     if (error) throw new Error(error.message);

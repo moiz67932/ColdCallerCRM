@@ -27,7 +27,8 @@ try {
     else if(path==="/api/dial-sessions") {
       if(request.method()==="POST") { const data=request.postDataJSON();writes.push({path,...data}); if(data.action==="stop") session={...session,status:"stopping"};result={session,dispatch:false}; }
       else result={session,lists:[{id:"list",name:"Controlled list"}],capabilities:{parallel:true,parallelBlockers:[]}};
-    } else if(path==="/api/leads") result={leads};
+    } else if(path==="/api/dial-sessions/quote") result={quote:null,presets:[],blockers:[],eligibility:{eligible:4,reasons:{}},nextWindow:null,billing:null,capacity:{availableChannels:10,totalChannels:10,confirmedAt:new Date().toISOString(),expiresAt:new Date(Date.now()+3600000).toISOString()},authorizedCents:100};
+    else if(path==="/api/leads") result={leads};
     else if(path==="/api/calls") {historyUrl=request.url();result={calls:[{id:"attempt-0",status:"canceled",technicalState:"canceled_after_winner",outcome:null,createdAt:new Date().toISOString(),lead:{id:"lead-0",businessName:leads[0].businessName,phoneNumber:leads[0].phoneNumber,niche:"Aesthetics",leadList:{id:"list",name:"Controlled list"}}}]};}
     else if(/^\/api\/calls\//.test(path)) {
       const attempt=attempts.find(item=>item.id===path.split("/").pop());result={callAttempt:{...attempt,leadId:attempt.lead_id,rawSummaryJson:{progressState:attempt.was_bridged_to_operator?"bridged":"lead_ringing"}}};

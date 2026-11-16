@@ -66,12 +66,14 @@ async function execute(command: ParallelCommand) {
     const leg = attempt?.telnyx_call_control_id;
     if (command.action === "dial_operator" || command.action === "dial_lead") {
       const operator = command.action === "dial_operator";
+      const remaining=Math.floor((Date.parse(session.parallel_options.deadlineAt??'')-Date.now())/1000);
+      if(session.parallel_options.budgetVersion!=='exposure-v1'||!Number.isFinite(remaining)||remaining<(operator?28:session.parallel_options.maxCallSeconds+session.parallel_options.ringTimeout+23))throw Error('Funded session deadline cannot cover another call');
       const result = await client.calls.dial({
         connection_id: env.TELNYX_PARALLEL_CONNECTION_ID || env.TELNYX_CONNECTION_ID!, from: env.TELNYX_FROM_NUMBER!,
         to: operator ? session.parallel_options.operatorSipUri : command.parameters.to,
         webhook_url: getVoiceWebhookUrl(), client_state: clientState(operator ? "operator" : "lead"),
         command_id: command.id, timeout_secs: operator ? 20 : session.parallel_options.ringTimeout,
-        time_limit_secs: operator ? 1800 : session.parallel_options.maxCallSeconds,
+        time_limit_secs: operator ? remaining-28 : session.parallel_options.maxCallSeconds+15,
         ...(operator ? {} : { answering_machine_detection: "premium" as const }),
       });
       const ids = result.data;
