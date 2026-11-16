@@ -3,6 +3,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import test from "node:test";
+import {costProfileSchema} from "../../lib/dialer/budget";
 import { createRequire } from "node:module";
 import { chromium } from "playwright";
 import ts from "typescript";
@@ -773,4 +774,16 @@ test('next allowed Colorado window uses the actual Denver clock and honors suppr
  assert.equal(sql("select public.portive_next_calling_time('first','America/New_York','2026-07-15T12:00:00Z')"),'2026-07-15 14:00:00+00');
  sql("update public.leads set custom_fields_json='{"+'"doNotCall":true'+"}'");
  assert.equal(sql("select public.portive_next_calling_window('list','America/Denver')->>'at' is null"),'t');
+});
+
+test('provisional migration requires spending approval and keeps stale pricing dispatchable within funded caps',()=>{
+ setup();sql(readFileSync('supabase/migrations/202611160004_provisional_parallel_pricing.sql','utf8'));
+ costProfileSchema.parse(JSON.parse(sql("select value_json from public.app_settings where key='dialer_cost_profile'")));
+ const p={...costProfile,pricingMode:'owner-provisional',reviewedAt:'2020-01-01T00:00:00Z',expiresAt:'2020-01-08T00:00:00Z'};
+ sql(`update public.app_settings set value_json='${JSON.stringify(p)}' where key='dialer_cost_profile'`);
+ assert.throws(()=>invoke('start',null,{costProfile:p}),/Accept the bounded/);
+ const s=start({costProfile:p,spendingApproved:true});assert.equal(attempts(s).length,4);
+ assert.equal(invoke('tick',s).status,'running');
+ assert.equal(sql(`select reserved_cost_cents from public.dial_sessions where id='${s}'`),'30');
+ assert.throws(()=>sql(`set role anon; select public.portive_validate_cost('{}',4)`),/permission denied/);
 });

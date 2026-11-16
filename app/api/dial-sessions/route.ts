@@ -46,6 +46,7 @@ const schema = z.object({
   callControlId: z.string().optional(),
   transportReady: z.boolean().optional(),
   options: z.object({
+    spendingApproved:z.boolean().optional(),
     sessionSeconds: z.number().int().min(60).max(3600).optional(),
     ringTimeout: z.number().int().min(15).max(120), maxCallSeconds: z.number().int().min(30).max(1800),
     batchDelaySeconds: z.number().int().min(0).max(60), attemptLimit: z.number().int().min(1).max(500),

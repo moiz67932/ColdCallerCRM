@@ -8,7 +8,7 @@ export const controlledScenarios = [
 
 export type ParallelOptions = {
   ringTimeout: number; maxCallSeconds: number; batchDelaySeconds: number; attemptLimit: number;
-  sessionSeconds?: number;
+  sessionSeconds?: number; spendingApproved?: boolean;
   maxSpendCents: number; autoContinue: boolean; autoRefill: false; silentRingback: boolean;
 };
 export const defaultParallelOptions: ParallelOptions = {

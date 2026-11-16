@@ -27,6 +27,6 @@ export async function GET(request:NextRequest){
   return NextResponse.json({quote,presets,authorizedCents,shortfallCents:quote?Math.max(0,quote.requiredCents-authorizedCents):null,
    availableCreditCents:r.availableCreditCents,dailyHeadroomCents:funding.cents,dailyUsageScope:funding.scope,
    eligibility:eligibility.data,nextWindow:next.data,billing:billing.data,
-   pricingSource:r.budget.profile?.source??null,capacity:r.budget.capacity,blockers});
+   warnings:r.budget.warnings??[],pricingMode:r.budget.profile?.pricingMode??'verified',pricingSource:r.budget.profile?.source??null,capacity:r.budget.capacity,blockers});
  }catch(e){live=null;return NextResponse.json({error:e instanceof Error?e.message:'Preflight unavailable'},{status:503});}
 }

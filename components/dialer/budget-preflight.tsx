@@ -4,7 +4,7 @@ import type {ParallelOptions} from '@/lib/dialer/parallel-policy';
 import type {budgetQuote,CapacityConfirmation} from '@/lib/dialer/budget';
 import {Button} from '@/components/ui/button';
 type Quote=ReturnType<typeof budgetQuote>;
-type Data={quote:Quote|null;presets:Array<Quote&{maxCallSeconds:number}>;authorizedCents:number;shortfallCents:number|null;availableCreditCents:number;dailyHeadroomCents:number;pricingSource:string|null;capacity:CapacityConfirmation|null;blockers:string[];eligibility:{eligible:number;reasons:Record<string,number>}|null;nextWindow:{at:string|null;timeZone:string}|null;billing:{heldCents:number;actualObservedMicros:number;reconciledCents:number;billingComplete:boolean}|null};
+type Data={warnings?:string[];pricingMode?:string;quote:Quote|null;presets:Array<Quote&{maxCallSeconds:number}>;authorizedCents:number;shortfallCents:number|null;availableCreditCents:number;dailyHeadroomCents:number;pricingSource:string|null;capacity:CapacityConfirmation|null;blockers:string[];eligibility:{eligible:number;reasons:Record<string,number>}|null;nextWindow:{at:string|null;timeZone:string}|null;billing:{heldCents:number;actualObservedMicros:number;reconciledCents:number;billingComplete:boolean}|null};
 export function BudgetPreflight(p:{listId:string;timeZone:string;lines:number;options:ParallelOptions;sessionId?:string;onOptions:(v:ParallelOptions)=>void;onReady:(v:boolean)=>void;onBlockers:(v:string[])=>void}){
  const [data,setData]=useState<Data|null>(null),[error,setError]=useState(''),[nonce,setNonce]=useState(0),[capacityExpired,setCapacityExpired]=useState(true);
  const [total,setTotal]=useState(''),[available,setAvailable]=useState(''),[reference,setReference]=useState(''),[saving,setSaving]=useState(false);
@@ -16,7 +16,7 @@ export function BudgetPreflight(p:{listId:string;timeZone:string;lines:number;op
   async function refresh(){try{
    const params=new URLSearchParams({listId,timeZone,lines:String(lines),maxCallSeconds:String(options.maxCallSeconds),sessionSeconds:String(options.sessionSeconds??options.maxCallSeconds+options.ringTimeout+60),ringTimeout:String(options.ringTimeout),maxSpendCents:String(options.maxSpendCents),...(sessionId?{sessionId}:{}),...(nonce?{fresh:'true'}:{})});
    const response=await fetch('/api/dial-sessions/quote?'+params,{cache:'no-store',signal:abort.signal});const d=await response.json();if(closed)return;if(!response.ok)throw Error(d.error);
-   setData(d);setCapacityExpired(!d.capacity||Date.parse(d.capacity.expiresAt)<=Date.now());setError('');onBlockers(d.blockers);onReady(Boolean(d.quote)&&d.shortfallCents===0&&d.blockers.length===0&&d.eligibility?.eligible>0);
+   setData(d);setCapacityExpired(!d.capacity||Date.parse(d.capacity.expiresAt)<=Date.now());setError('');onBlockers(d.blockers);onReady(Boolean(d.quote)&&d.shortfallCents===0&&d.blockers.length===0&&d.eligibility?.eligible>0&&(d.pricingMode!=='owner-provisional'||options.spendingApproved===true));
    if(next)clearTimeout(next);
    if(d.eligibility?.eligible===0&&d.nextWindow?.at){const delay=Date.parse(d.nextWindow.at)-Date.now()+300;if(delay>0&&delay<2147483647)next=setTimeout(refresh,delay);}
   }catch(e){if(!closed){setError(e instanceof Error?e.message:'Cost preflight unavailable');onReady(false);}}}
@@ -28,6 +28,8 @@ export function BudgetPreflight(p:{listId:string;timeZone:string;lines:number;op
   const r=await fetch('/api/dial-sessions/capacity',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({totalChannels:Number(total),availableChannels:Number(available),reference})});const d=await r.json();if(!r.ok)throw Error(d.error);setNonce(Date.now());
  }catch(e){setError(e instanceof Error?e.message:'Capacity confirmation failed');}finally{setSaving(false);}}
  return <div className="space-y-2 rounded border border-slate-500/30 p-3 text-sm" aria-label="Parallel cost preflight">
+  {data?.warnings?.map(w=><p key={w} role="status">{w}</p>)}
+  {data?.pricingMode==='owner-provisional'?<label><input type="checkbox" checked={options.spendingApproved===true} disabled={Boolean(sessionId)} onChange={e=>p.onOptions({...options,spendingApproved:e.target.checked})}/> I approve a session spending limit of {dollars(options.maxSpendCents)} using the disclosed provisional estimates. Actual charges may differ.</label>:null}
   <div className="flex flex-wrap gap-2">{[60,120,300].map(seconds=><Button key={seconds} size="sm" variant="outline" disabled={Boolean(sessionId)} onClick={()=>p.onOptions({...options,maxCallSeconds:seconds,sessionSeconds:seconds+options.ringTimeout+60})}>{seconds/60}-minute conversation</Button>)}
    <label>Session hard limit (seconds) <input aria-label="Session hard limit" type="number" min={60} max={3600} className="w-24 rounded border bg-background p-1" disabled={Boolean(sessionId)} value={options.sessionSeconds??options.maxCallSeconds+options.ringTimeout+60} onChange={e=>p.onOptions({...options,sessionSeconds:Number(e.target.value)})}/></label>
   </div>

@@ -1,3 +1,21 @@
+# Owner-approved provisional mode (202611160004)
+
+Normal operation can use `pricingMode: "owner-provisional"`. This is explicitly an estimate, not verified account pricing. The owner authorized this risk-buffer mode in the development session. Migration 202611160004 installs it once; no rate CSV or support ticket is required per session. Verified mode remains available separately. The older verified-tariff instructions below describe that optional workflow.
+
+Initial destination scope is Colorado +1303/+1720, covering Greenwood Village; this does not authorize other NANP destinations. All existing DNC, recipient timezone/hours, suppression and consent checks remain authoritative. Other destination coverage can be added to the account configuration with appropriately assessed allowances; no campaign policy row is required.
+
+Allowances in USD: SIP .010/min (2x public starting .005); Voice API, WebRTC, operator SIP and automatic recording .003/min each (1.5x public .002); bridge .002/min; other/taxes/surcharges .003/min on each leg; AMD .010/call versus published .0065; TTS .000048/character up to 400 characters (an allowance benchmarked to published HD TTS, not a claim that the female voice uses that engine); operator fixed .010/session and prospect fixed .010/attempt. Bridge/other/fixed components are explicit uncertain-cost allowances, not assertions of actual provider fees. Minimum/increment 60/60 follows public billing guidance and observed outbound records. Unusual routing or unmodeled charges can exceed these assumptions; no estimator guarantees an invoice cap.
+
+Four-line maximum initial reserves (15-second ringing, session duration conversation+75 seconds): 60 seconds 42 cents, 120 seconds 51 cents, 300 seconds 80 cents. Estimates assuming prompt loser cleanup are 36/39/50 cents. The default 180-second session with a 60-second conversation also reserves 42 cents. The $1 default session ceiling covers these examples, subject to fresh provider funds, daily headroom and unsettled prior exposure. No provider spending limit is changed.
+
+The user must explicitly accept the numeric session spending ceiling before Start; API and SQL enforce this for provisional mode. Increasing the spend field clears that approval. This approves estimated exposure, not an assurance that actual Telnyx charges cannot differ. SQL/Worker hard-duration caps, atomic reservations, held uncertain commands, reconciliation and Stop remain unchanged.
+
+Provisional assumptions expire into a visible warning after seven days; they do not disable Start, Resume or later batches. Verified-mode expiration remains strict. A stale warning is not an acceptance report or a manual grant.
+
+Account-wide capacity retains the existing manual four-hour confirmation. Application/profile values do not prove the account limit or free channels. Record the real available count and a dated screenshot/support reference in the existing CRM. A missing screenshot is never reported as inspected evidence. No capacity value is seeded by this migration.
+
+---
+
 # Parallel exposure budget
 
 Normal Parallel has no acceptance-report/grant dependency. The old `DIALER_RATE_CEILING_CENTS` is ignored for ordinary component-priced sessions. Manual and Power retain their existing behavior.

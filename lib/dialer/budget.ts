@@ -5,6 +5,7 @@ import {z} from 'zod';
 // is used as an authorization tariff.
 const money=z.number().int().min(0).max(100_000_000);
 export const costProfileSchema=z.object({
+  pricingMode:z.enum(['verified','owner-provisional']).optional(),
   version:z.literal('exposure-v1'),currency:z.literal('USD'),
   source:z.string().min(8),reviewedAt:z.iso.datetime(),expiresAt:z.iso.datetime(),
   destinationPrefixes:z.array(z.string().regex(/^\+1\d{2,13}$/)).min(1),
@@ -40,6 +41,7 @@ export function budgetQuote(p:CostProfile,o:BudgetOptions,lines:number){
     explanation:'Expected assumes one winner and prompt loser cleanup. Maximum funds every provider hard cap, including delayed/failed loser hangups. Uncertain charges stay reserved.'};
 }
 export function pricingProblems(p:CostProfile,now=Date.now()){
+  if(p.pricingMode==='owner-provisional')return [];
   return Date.parse(p.reviewedAt)>now||Date.parse(p.expiresAt)<=now||Date.parse(p.expiresAt)>Date.parse(p.reviewedAt)+7*86400000
     ?['Refresh the account tariff components and source reference (maximum seven-day freshness).']:[];
 }
@@ -55,4 +57,10 @@ export function usdCentsFloor(value:string){
  if(!match)throw Error('Invalid nonnegative USD amount');
  const cents=Number(match[1])*100+Number((match[2]??'').padEnd(2,'0').slice(0,2));
  if(!Number.isSafeInteger(cents))throw Error('USD amount exceeds safe ledger range');return cents;
+}
+
+export function pricingWarnings(p:CostProfile,now=Date.now()){
+ return p.pricingMode==='owner-provisional' ? [
+ 'Owner-approved provisional estimates with padded allowances; actual provider charges may differ. Internal reservations do not guarantee a provider invoice ceiling.',
+ ...(Date.parse(p.expiresAt)<=now?['Pricing assumptions are stale; review recommended. Calling remains available within funded limits.']:[])] : [];
 }
