@@ -39,7 +39,7 @@ export async function GET(request: NextRequest) {
 const schema = z.object({
   action: z.enum(["start", "next", "pause", "resume", "stop", "heartbeat", "continue", "skip", "operator_ready"]),
   controllerId: z.uuid(), sessionId: z.string().optional(), ready: z.boolean().default(false),
-  listId: z.string().optional(), location: z.string().optional(), attemptLimit: z.number().int().min(1).max(500).optional(),
+  listId: z.string().optional(), location: z.string().optional(), parallelLocation: z.string().optional(), attemptLimit: z.number().int().min(1).max(500).optional(),
   mode: z.enum(["power", "parallel"]).optional(), maxLines: z.number().int().min(1).max(4).optional(),
   timeZone: z.string().optional(), reviewed: z.boolean().optional(),
   acceptanceGrantId: z.uuid().optional(),

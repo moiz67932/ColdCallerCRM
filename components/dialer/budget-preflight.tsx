@@ -5,16 +5,16 @@ import type {budgetQuote,CapacityConfirmation} from '@/lib/dialer/budget';
 import {Button} from '@/components/ui/button';
 type Quote=ReturnType<typeof budgetQuote>;
 type Data={warnings?:string[];pricingMode?:string;quote:Quote|null;presets:Array<Quote&{maxCallSeconds:number}>;authorizedCents:number;shortfallCents:number|null;availableCreditCents:number;dailyHeadroomCents:number;pricingSource:string|null;capacity:CapacityConfirmation|null;blockers:string[];eligibility:{eligible:number;reasons:Record<string,number>}|null;nextWindow:{at:string|null;timeZone:string}|null;billing:{heldCents:number;actualObservedMicros:number;reconciledCents:number;billingComplete:boolean}|null};
-export function BudgetPreflight(p:{listId:string;timeZone:string;lines:number;options:ParallelOptions;sessionId?:string;onOptions:(v:ParallelOptions)=>void;onReady:(v:boolean)=>void;onBlockers:(v:string[])=>void}){
+export function BudgetPreflight(p:{listId:string;parallelLocation?:string;timeZone:string;lines:number;options:ParallelOptions;sessionId?:string;onOptions:(v:ParallelOptions)=>void;onReady:(v:boolean)=>void;onBlockers:(v:string[])=>void}){
  const [data,setData]=useState<Data|null>(null),[error,setError]=useState(''),[nonce,setNonce]=useState(0),[capacityExpired,setCapacityExpired]=useState(true);
  const [total,setTotal]=useState(''),[available,setAvailable]=useState(''),[reference,setReference]=useState(''),[saving,setSaving]=useState(false);
- const {listId,timeZone,lines,options,sessionId,onReady,onBlockers}=p;
+ const {listId,parallelLocation,timeZone,lines,options,sessionId,onReady,onBlockers}=p;
  useEffect(()=>{
   if(!listId){onReady(false);return;}
   let closed=false,next:ReturnType<typeof setTimeout>|undefined;const abort=new AbortController();
   onReady(false);
   async function refresh(){try{
-   const params=new URLSearchParams({listId,timeZone,lines:String(lines),maxCallSeconds:String(options.maxCallSeconds),sessionSeconds:String(options.sessionSeconds??options.maxCallSeconds+options.ringTimeout+60),ringTimeout:String(options.ringTimeout),maxSpendCents:String(options.maxSpendCents),...(sessionId?{sessionId}:{}),...(nonce?{fresh:'true'}:{})});
+   const params=new URLSearchParams({listId,...(parallelLocation?{parallelLocation}:{}),timeZone,lines:String(lines),maxCallSeconds:String(options.maxCallSeconds),sessionSeconds:String(options.sessionSeconds??options.maxCallSeconds+options.ringTimeout+60),ringTimeout:String(options.ringTimeout),maxSpendCents:String(options.maxSpendCents),...(sessionId?{sessionId}:{}),...(nonce?{fresh:'true'}:{})});
    const response=await fetch('/api/dial-sessions/quote?'+params,{cache:'no-store',signal:abort.signal});const d=await response.json();if(closed)return;if(!response.ok)throw Error(d.error);
    setData(d);setCapacityExpired(!d.capacity||Date.parse(d.capacity.expiresAt)<=Date.now());setError('');onBlockers(d.blockers);onReady(Boolean(d.quote)&&d.shortfallCents===0&&d.blockers.length===0&&d.eligibility?.eligible>0&&(d.pricingMode!=='owner-provisional'||options.spendingApproved===true));
    if(next)clearTimeout(next);
@@ -22,7 +22,7 @@ export function BudgetPreflight(p:{listId:string;timeZone:string;lines:number;op
   }catch(e){if(!closed){setError(e instanceof Error?e.message:'Cost preflight unavailable');onReady(false);}}}
   const debounce=setTimeout(refresh,350),poll=setInterval(refresh,15000);
   return()=>{closed=true;abort.abort();clearTimeout(debounce);clearInterval(poll);if(next)clearTimeout(next);};
- },[listId,timeZone,lines,options,sessionId,nonce,onReady,onBlockers]);
+ },[listId,parallelLocation,timeZone,lines,options,sessionId,nonce,onReady,onBlockers]);
  const dollars=(c:number)=>'$'+(c/100).toFixed(2);
  async function confirm(){setSaving(true);try{
   const r=await fetch('/api/dial-sessions/capacity',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({totalChannels:Number(total),availableChannels:Number(available),reference})});const d=await r.json();if(!r.ok)throw Error(d.error);setNonce(Date.now());

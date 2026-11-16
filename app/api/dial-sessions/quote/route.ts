@@ -5,8 +5,9 @@ import {getSupabaseAdmin} from '@/lib/supabase-admin';
 import {parallelReadiness} from '@/lib/dialer/parallel-readiness';
 import {budgetQuote} from '@/lib/dialer/budget';
 import {dailyHeadroom} from '@/lib/dialer/funding';
+import {parallelLeadFilters} from '@/lib/dialer/parallel-filters';
 
-const schema=z.object({listId:z.string().min(1),timeZone:z.string().min(1),lines:z.coerce.number().int().min(2).max(4),maxCallSeconds:z.coerce.number().int().min(30).max(1800),sessionSeconds:z.coerce.number().int().min(60).max(3600),ringTimeout:z.coerce.number().int().min(15).max(120),maxSpendCents:z.coerce.number().int().min(1).max(100000)});
+const schema=z.object({listId:z.string().min(1),parallelLocation:z.string().optional(),timeZone:z.string().min(1),lines:z.coerce.number().int().min(2).max(4),maxCallSeconds:z.coerce.number().int().min(30).max(1800),sessionSeconds:z.coerce.number().int().min(60).max(3600),ringTimeout:z.coerce.number().int().min(15).max(120),maxSpendCents:z.coerce.number().int().min(1).max(100000)});
 let live:{at:number;promise:ReturnType<typeof parallelReadiness>}|null=null;
 export async function GET(request:NextRequest){
  const auth=await requireApiAuth(request);if(auth)return auth;
@@ -15,7 +16,7 @@ export async function GET(request:NextRequest){
   const q=parsed.data;if(request.nextUrl.searchParams.get('fresh')==='true'||!live||Date.now()-live.at>15000)live={at:Date.now(),promise:parallelReadiness(true)};
   const r=await live.promise;const db=getSupabaseAdmin();
   const [eligibility,next,billing,funding]=await Promise.all([
-   db.rpc('portive_parallel_eligibility',{p_list:q.listId,p_location:null,p_timezone:q.timeZone}),
+   db.rpc('portive_parallel_eligibility',{...parallelLeadFilters(q),p_timezone:q.timeZone}),
    db.rpc('portive_next_calling_window',{p_list:q.listId,p_timezone:q.timeZone}),
    db.rpc('portive_budget_status',{p_session:request.nextUrl.searchParams.get('sessionId')??null}),
    r.availableCreditCents>0?dailyHeadroom(r.dailyLimitCents):Promise.resolve({cents:0,observedCents:0,scope:'unavailable'}),

@@ -10,6 +10,7 @@ import {budgetQuote} from './budget';
 import {parallelFingerprint} from './parallel-fingerprint';
 import {dailyHeadroom} from './funding';
 import { acceptanceStartOptions } from "./acceptance";
+import { parallelLeadFilters } from "./parallel-filters";
 
 export function dialerCapabilities() {
   return {
@@ -22,7 +23,7 @@ export function dialerCapabilities() {
 
 export async function sessionCommand(input: {
   action: string; sessionId?: string; controllerId: string; ready: boolean;
-  listId?: string; location?: string; attemptLimit?: number; mode?: string; maxLines?: number;
+  listId?: string; location?: string; parallelLocation?: string; attemptLimit?: number; mode?: string; maxLines?: number;
   timeZone?: string; reviewed?: boolean;
   options?: ParallelOptions; callControlId?: string;
   transportReady?: boolean;
@@ -58,7 +59,7 @@ export async function sessionCommand(input: {
     if(input.action==='resume'&&parallelFingerprint(existing?.parallel_options?.costProfile as Record<string,unknown>??{})!==parallelFingerprint(readiness?.budget.profile??{}))throw Error('Tariff changed; stop and reconcile before funding a new session');
     const { data, error } = await getSupabaseAdmin().rpc("portive_parallel_command", {
       p_session: input.sessionId ?? null, p_controller: input.controllerId, p_action: input.action,
-      p_ready: input.ready, p_list: input.listId ?? null, p_location: input.location ?? null,
+      p_ready: input.ready, ...parallelLeadFilters(input),
       p_lines: input.maxLines ?? 4, p_timezone: input.timeZone ?? null, p_reviewed: input.reviewed ?? false,
       p_options: { ...input.options, ...(fundedBudget!==undefined?{maxSpendCents:fundedBudget}:{}), accountChannels: readiness?.channels, costProfile: readiness?.budget.profile, sessionSeconds:quote?.sessionSeconds, availableCreditCents:readiness?.availableCreditCents, dailyHeadroomCents:funding?.cents, fingerprint: readiness?.fingerprint,
         operatorSipUri: readiness?.sipUri, callControlId: input.callControlId, transportReady: input.transportReady ?? true },

@@ -26,6 +26,7 @@ export function SessionControls(props: Props) {
   const [session, setSession] = useState<DialSession | null>(null);
   const [lists, setLists] = useState<Array<{ id: string; name: string }>>([]);
   const [listId, setListId] = useState("");
+  const [parallelLocation, setParallelLocation] = useState("");
   const [lines, setLines] = useState(4);
   const [options, setOptions] = useState(defaultParallelOptions);
   const [parallelBlockers, setParallelBlockers] = useState<string[]>(["Provider readiness has not loaded."]);
@@ -61,6 +62,7 @@ export function SessionControls(props: Props) {
       setParallelBlockers(data.capabilities?.parallelBlockers ?? ["Provider readiness unavailable."]);
       if(data.session?.mode==='parallel'&&data.session.parallel_options?.budgetVersion==='exposure-v1')setOptions({...defaultParallelOptions,...data.session.parallel_options});
       setListId(data.session?.selected_list_id ?? data.lists?.[0]?.id ?? "");
+      setParallelLocation(data.session?.mode === "parallel" ? data.session.location ?? "" : "");
       if (data.acceptanceAuthorization && !data.session) {
         const approved = data.acceptanceAuthorization;
         setAcceptance(approved); setMode("parallel"); setListId(approved.list_id); setTimeZone(approved.time_zone);
@@ -90,7 +92,13 @@ export function SessionControls(props: Props) {
         }),
       });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? "Session command failed");
+      if (!response.ok) {
+        const message = result.error ?? "Session command failed";
+        const hint = message === "Selected list/location has no leads"
+          ? " Choose a populated lead list or clear the Parallel location filter."
+          : "";
+        throw new Error(`HTTP ${response.status}: ${message}${hint}`);
+      }
       acceptSession(result.session);
       setError("");
       if (result.dispatch) await current.current.onDispatch(result);
@@ -144,6 +152,7 @@ export function SessionControls(props: Props) {
             <label>Lead list <select aria-label="Dial session lead list" className="rounded border bg-background p-2" disabled={Boolean(active) || restricted} value={listId} onChange={(e) => setListId(e.target.value)}>
               <option value="">Choose list</option>{lists.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}
             </select></label>
+            {mode === "parallel" ? <label>Parallel location (optional) <input aria-label="Parallel location filter" className="rounded border bg-background p-2" placeholder="All locations in selected list" disabled={Boolean(active) || restricted} value={parallelLocation} onChange={(e) => setParallelLocation(e.target.value)} /></label> : null}
             <label>List local timezone <select aria-label="List local timezone" className="rounded border bg-background p-2" value={timeZone} disabled={Boolean(active) || restricted} onChange={(e) => setTimeZone(e.target.value)}>
               {["America/New_York", "America/Chicago", "America/Denver", "America/Phoenix", "America/Los_Angeles", "America/Anchorage", "Pacific/Honolulu"].map((zone) => <option key={zone}>{zone}</option>)}
             </select></label>
@@ -159,10 +168,10 @@ export function SessionControls(props: Props) {
               <span>Batch mode · Continuous refill unavailable</span>
             </div>
           </> : null}
-          {mode === "parallel" && !restricted ? <BudgetPreflight listId={listId} timeZone={timeZone} lines={lines} options={options} sessionId={active?session?.id:undefined} onOptions={setOptions} onReady={setBudgetReady} onBlockers={setParallelBlockers}/> : null}
+          {mode === "parallel" && !restricted ? <BudgetPreflight listId={listId} parallelLocation={parallelLocation} timeZone={timeZone} lines={lines} options={options} sessionId={active?session?.id:undefined} onOptions={setOptions} onReady={setBudgetReady} onBlockers={setParallelBlockers}/> : null}
           <div className="flex flex-wrap gap-2">
             <Button size="sm" disabled={Boolean(active) || !props.ready || !props.idle || !reviewed || !listId || mode === "parallel" && !acceptance && (parallelBlockers.length > 0 || !budgetReady) || busy}
-              onClick={() => void command("start", { listId, timeZone, reviewed, mode, options, maxLines: mode === "parallel" ? lines : 1, ...(mode === "parallel" && acceptance ? {acceptanceGrantId:acceptance.id} : {}) })}>{mode === "parallel" && acceptance ? "Start approved acceptance batch" : "Start Session"}</Button>
+              onClick={() => void command("start", { listId, parallelLocation, timeZone, reviewed, mode, options, maxLines: mode === "parallel" ? lines : 1, ...(mode === "parallel" && acceptance ? {acceptanceGrantId:acceptance.id} : {}) })}>{mode === "parallel" && acceptance ? "Start approved acceptance batch" : "Start Session"}</Button>
             <Button size="sm" variant="outline" disabled={!active || !owned || busy || session.status !== "running"} onClick={() => void command("pause")}>Pause</Button>
             <Button size="sm" variant="outline" disabled={restricted || !active || !owned || busy || session.status !== "paused" || !props.ready || session.mode === "parallel" && props.operatorMediaReady !== true} onClick={() => void command("resume")}>Resume</Button>
             <Button size="sm" variant="destructive" disabled={!active || !owned || busy} onClick={() => void command("stop")}>Stop Session</Button>
