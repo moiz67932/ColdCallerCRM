@@ -31,7 +31,7 @@ export async function GET(request: NextRequest) {
       if (data) acceptanceAuthorization = { ...data, destinations: data.destinations.map((d: {phone_number:string;time_zone:string}) => ({phone_number:d.phone_number,time_zone:d.time_zone})) };
     }
     return NextResponse.json({ session, lists: lists.data, acceptanceAuthorization,
-      ...(verifyProvider ? { providerReadiness: { channels: readiness.channels, availableCreditCents: readiness.availableCreditCents, fingerprint: readiness.fingerprint } } : {}),
+      ...(verifyProvider ? { providerReadiness: { channelScope: "application_and_profile", accountWideCapacityVerified: false, channels: readiness.channels, availableCreditCents: readiness.availableCreditCents, fingerprint: readiness.fingerprint } } : {}),
       capabilities: { ...dialerCapabilities(), parallel: readiness.enabled, parallelBlockers: readiness.blockers } });
   } catch (error) { return jsonError(formatUnknownError(error), 503); }
 }

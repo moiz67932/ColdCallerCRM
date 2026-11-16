@@ -33,8 +33,8 @@ async function mediaSession(n=1){const g=issue(manifest(n)),s=begin(g);const w=w
 
 test('acceptance migration applies twice without manufacturing verification evidence',async()=>{
  sql(`create database ${dbName}`,'postgres');
- for(const file of ['202604260001_colcaller_workstation.sql','202606240001_lead_locations.sql','202611130001_dial_sessions.sql','202611130002_parallel_engine.sql','202611140001_single_operator_collisions.sql','202611140002_cloudflare_orchestration.sql','202611150001_parallel_dispatch_safety.sql','202611150002_parallel_acceptance.sql','202611160001_regular_parallel.sql'])sql(readFileSync(`supabase/migrations/${file}`,'utf8'));
- sql(readFileSync('supabase/migrations/202611160001_regular_parallel.sql','utf8'));
+ for(const file of ['202604260001_colcaller_workstation.sql','202606240001_lead_locations.sql','202611130001_dial_sessions.sql','202611130002_parallel_engine.sql','202611140001_single_operator_collisions.sql','202611140002_cloudflare_orchestration.sql','202611150001_parallel_dispatch_safety.sql','202611150002_parallel_acceptance.sql','202611160001_regular_parallel.sql','202611160002_default_calling_policy.sql'])sql(readFileSync(`supabase/migrations/${file}`,'utf8'));
+ sql(readFileSync('supabase/migrations/202611160002_default_calling_policy.sql','utf8'));
  assert.equal(sql('select count(*) from public.dialer_provider_verifications'),'0');fp=await fingerprint(env);
 });
 test('issuance rejects missing consent, duplicate/non-US destinations, stale review and unsafe budgets',()=>{

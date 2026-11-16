@@ -28,7 +28,7 @@ export async function parallelReadiness(verifyProvider = false) {
   if (!rateCeilingCents) blockers.push("Configure DIALER_RATE_CEILING_CENTS with an all-inclusive calling cost ceiling for spend reservations.");
   if (env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY) {
     const schema = await getSupabaseAdmin().rpc("portive_regular_parallel_status");
-    if (schema.error || schema.data?.schemaVersion !== "202611160001" || schema.data?.reportRequired !== false) blockers.push("Apply database migration 202611160001_regular_parallel.sql before starting regular Parallel sessions.");
+    if (schema.error || schema.data?.schemaVersion !== "202611160001" || schema.data?.reportRequired !== false || schema.data?.hoursPolicyVersion !== "202611160002") blockers.push("Apply database migration 202611160002_default_calling_policy.sql for automatic calling-policy fallback.");
     const transport = await getSupabaseAdmin().rpc("portive_parallel_transport_ready");
     if (transport.error || transport.data !== true) blockers.push("Supabase Realtime publication for sessions and attempts is unavailable.");
   } else blockers.push("Supabase configuration is missing.");
@@ -62,7 +62,7 @@ export async function parallelReadiness(verifyProvider = false) {
         const profile = await client.outboundVoiceProfiles.retrieve(profileId);
         const profileLimit = profile.data?.concurrent_call_limit;
         const connectionLimit = application.data?.outbound?.channel_limit;
-        if (profileLimit == null || profileLimit <= 0 || !connectionLimit || connectionLimit <= 0) blockers.push("Provider profile/connection channel limits are not explicitly verifiable.");
+        if (profileLimit == null || profileLimit <= 0 || !connectionLimit || connectionLimit <= 0) blockers.push(`Explicit channel limits are required: Voice API application ${config.connection} outbound.channel_limit=${connectionLimit ?? "unset"}; outbound profile ${profileId} concurrent_call_limit=${profileLimit ?? "unset"}. Each must cover prospect lines plus the operator; the account-wide limit also applies.`);
         else channels = Math.min(profileLimit, connectionLimit);
         if (!profile.data?.enabled || !application.data?.active) blockers.push("Provider application or outbound profile is disabled.");
       }

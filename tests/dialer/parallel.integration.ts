@@ -77,6 +77,7 @@ test("parallel migrations apply on top of the Power schema and rerun without los
   sql(readFileSync("supabase/migrations/202611150001_parallel_dispatch_safety.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611150002_parallel_acceptance.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611160001_regular_parallel.sql", "utf8"));
+  sql(readFileSync("supabase/migrations/202611160002_default_calling_policy.sql", "utf8"));
 });
 test("no prospects are reserved until both provider answer and browser media acknowledgement", () => {
   setup(); const s=invoke("start").id; invoke("tick",s); assert.equal(sql("select count(*) from public.call_attempts"),"0");
@@ -343,7 +344,7 @@ test('Cloudflare alarms only receive future relevant deadlines',()=>{
   for(const deadline of work.deadlines)assert(Date.parse(deadline)>Date.now()-1000);
 });
 test('Cloudflare migration reruns safely after its own readiness replacements',()=>{
-  setup();sql(readFileSync('supabase/migrations/202611160001_regular_parallel.sql','utf8'));
+  setup();sql(readFileSync('supabase/migrations/202611160002_default_calling_policy.sql','utf8'));
   assert.doesNotThrow(()=>sql("select public.portive_orchestration_guard('node')"));
   assert.throws(()=>sql("set role anon; select public.portive_orchestration_prepare('cloudflare')"),/permission denied/);
 });
@@ -463,7 +464,7 @@ test('startup heartbeats cannot substitute for verified operator media, and medi
 });
 test('safety migration reruns without losing reservations or server-only grants',()=>{
   const {session}=cloudflareReserved();
-  sql(readFileSync('supabase/migrations/202611160001_regular_parallel.sql','utf8'));
+  sql(readFileSync('supabase/migrations/202611160002_default_calling_policy.sql','utf8'));
   assert.equal(sql(`select count(*) from public.dial_session_targets where session_id='${session}'`),'4');
   assert.throws(()=>sql('set role anon;select public.portive_orchestration_authorize(gen_random_uuid())'),/permission denied/);
   assert.equal(sql("select public.portive_orchestrator_ready(3)"),'t');
@@ -660,4 +661,49 @@ test('answered collision explains first, then speak-ended enqueues forced cleanu
  assert.equal(sql(`select count(*) from public.dial_commands where attempt_id='${a[1].id}' and action='failure_playback'`),'1');
  event(s,a[1].id,'lead','call.speak.ended',{call_control_id:a[1].id});
  assert.equal(sql(`select count(*) from public.dial_commands where attempt_id='${a[1].id}' and action='hangup' and parameters->>'force'='true'`),'1');
+});
+
+test('default policy needs no campaign row, infers only structured US address, and enforces its window',()=>{
+ setup();sql("delete from public.dialer_campaign_calling_policies;update public.leads set state='Colorado',custom_fields_json='{}'");
+ const hours=(at:string)=>sql(`select coalesce(public.portive_calling_hours('first','America/Denver','${at}'),'allowed')`);
+ assert.equal(hours('2026-11-16T14:59:00Z'),'outside_calling_window');
+ assert.equal(hours('2026-11-16T15:00:00Z'),'allowed');
+ assert.equal(hours('2026-11-17T03:59:00Z'),'allowed');
+ assert.equal(hours('2026-11-17T04:00:00Z'),'outside_calling_window');
+ assert.equal(hours('2026-07-15T15:00:00Z'),'allowed');
+ assert.equal(hours('2026-11-22T19:00:00Z'),'allowed');
+ assert.equal(hours('2026-11-26T19:00:00Z'),'outside_default_calling_days');
+ assert.equal(hours('2026-07-03T18:00:00Z'),'outside_default_calling_days');
+ assert.equal(sql("select count(*) from public.dialer_campaign_calling_policies"),'0');
+});
+test('no-policy regular Start reserves four actual ledger prospects after media acknowledgement',t=>{
+ setup();sql("delete from public.dialer_campaign_calling_policies;update public.leads set state='Colorado'");
+ const reason=sql(`select coalesce(public.portive_calling_hours('first','${zone}'),'')`);
+ if(reason==='outside_default_calling_days'){t.skip('Default is correctly closed today; fixed-date policy cases run separately');return;}
+ const s=start();assert.equal(attempts(s).length,4);
+ assert.equal(sql('select count(*) from public.dialer_campaign_calling_policies'),'0');
+ assert.equal(sql(`select count(*) from public.dial_commands where session_id='${s}' and action='dial_lead'`),'4');
+});
+test('missing optional policy never implies business-line status, consent or inferred geography from list labels',()=>{
+ setup();sql(`delete from public.dialer_campaign_calling_policies;update public.leads set state=null,custom_fields_json='{"countryCode":"US","businessLandline":true,"consent":true}'`);
+ assert.equal(sql("select public.portive_calling_hours('first','America/Denver','2026-11-16T10:00:00Z')"),'outside_calling_window');
+ sql("update public.leads set custom_fields_json='{}';update public.lead_lists set name='Colorado businesses' where id='list'");
+ assert.equal(sql("select public.portive_calling_hours('first','America/Denver','2026-11-16T19:00:00Z')"),'destination_country_unknown');
+ sql(`update public.leads set state='Colorado',custom_fields_json='{"countryCode":"CA"}'`);
+ assert.equal(sql("select public.portive_calling_hours('first','America/Denver','2026-11-16T19:00:00Z')"),'unsupported_destination_country');
+});
+test('automatic address state restrictions intersect optional wider campaigns and documented exceptions remain revocable',()=>{
+ setup();sql("update public.leads set state='Pennsylvania'");
+ assert.equal(sql("select public.portive_calling_hours('first','America/New_York','2026-11-22T19:00:00Z')"),'outside_jurisdiction_calling_days');
+ sql(`insert into public.dialer_calling_consents values('first','list','+12125550101','2026-11-22T19:00:00Z','2026-11-22T20:00:00Z','offline invitation record','offline lawful exception scope',null)`);
+ assert.equal(sql("select public.portive_calling_hours('first','America/New_York','2026-11-22T19:30:00Z') is null"),'t');
+ sql('update public.dialer_calling_consents set revoked_at=now()');
+ assert.equal(sql("select public.portive_calling_hours('first','America/New_York','2026-11-22T19:30:00Z')"),'outside_jurisdiction_calling_days');
+});
+test('fallback is rechecked immediately before provider I/O, preserving late DNC and closed-window cancellation',()=>{
+ const {session,work}=cloudflareReserved(),c=work.commands[0];
+ sql(`delete from public.dialer_campaign_calling_policies;update public.leads set state='Colorado',custom_fields_json=jsonb_build_object('timeZone','${zoneAtHour(22)}') where id='${c.attempt.lead_id}'`);
+ assert.equal(authorize(c).reason,'outside_calling_window');
+ assert.equal(sql(`select state from public.dial_commands where id='${c.id}'`),'canceled');
+ assert.equal(sql(`select count(*) from public.dial_session_targets where session_id='${session}'`),'4');
 });
