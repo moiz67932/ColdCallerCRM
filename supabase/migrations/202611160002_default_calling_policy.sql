@@ -35,13 +35,16 @@ grant execute on function public.portive_us_state(text),public.portive_default_c
 create or replace function public.portive_calling_hours(p_lead text,p_timezone text,p_at timestamptz default clock_timestamp())
 returns text language plpgsql security definer set search_path=public as $$
 declare l public.leads; p public.dialer_campaign_calling_policies; r public.dialer_calling_rules;
-  local_at timestamp; minute integer; v_jurisdiction text; jurisdictions text[]; start_at integer; end_at integer; destination_state text; country text; default_known boolean:=false;
+  local_at timestamp; minute integer; v_jurisdiction text; jurisdictions text[]; start_at integer; end_at integer; destination_state text; country text; default_known boolean:=false; effective_timezone text;
 begin
   select * into l from public.leads where id=p_lead;
   if l.id is null then return 'lead_missing'; end if;
+  destination_state:=public.portive_us_state(coalesce(nullif(l.state,''),nullif(l.custom_fields_json->>'state',''),l.custom_fields_json->>'stateCode'));
+  effective_timezone:=coalesce(nullif(l.custom_fields_json->>'timeZone',''),case when destination_state='CO' then 'America/Denver' else p_timezone end);
+  if p_at is null then return 'invalid_calling_time'; end if;
   begin
-    if nullif(p_timezone,'') is null then return 'invalid_timezone'; end if;
-    local_at:=p_at at time zone p_timezone;
+    if nullif(effective_timezone,'') is null then return 'invalid_timezone'; end if;
+    local_at:=p_at at time zone effective_timezone;
   exception when invalid_parameter_value then return 'invalid_timezone'; end;
   minute:=extract(hour from local_at)::integer*60+extract(minute from local_at)::integer;
   select * into p from public.dialer_campaign_calling_policies where list_id=l.lead_list_id;
@@ -50,7 +53,6 @@ begin
   if exists(select 1 from public.dialer_calling_consents c where c.lead_id=l.id and c.list_id=l.lead_list_id
     and c.phone_number=public.portive_phone(l.phone_number) and c.revoked_at is null and p_at>=c.starts_at and p_at<c.ends_at) then return null; end if;
   -- No campaign row is required. Unknown line type remains residential.
-  destination_state:=public.portive_us_state(coalesce(nullif(l.state,''),nullif(l.custom_fields_json->>'state',''),l.custom_fields_json->>'stateCode'));
   country:=upper(trim(coalesce(l.custom_fields_json->>'countryCode','')));
   if country<>'' and country not in ('US','USA') then return 'unsupported_destination_country'; end if;
   if p.list_id is null then

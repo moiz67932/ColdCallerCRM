@@ -93,8 +93,10 @@ Other known-US destinations use a conservative 09:00–19:00 Monday–Saturday
 default. Defaults close on US federal holidays and their standard observed days.
 This calendar is a conservative product choice, not a statement that federal
 holidays prohibit every call. It follows https://www.opm.gov/policy-data-oversight/pay-leave/federal-holidays/.
-Choose the actual recipient-local timezone; IANA conversion honors DST. A
-per-lead timezone overrides the selected session timezone.
+IANA conversion honors DST. An explicit per-lead timezone takes precedence.
+Without one, a structured Colorado address uses America/Denver automatically;
+other destinations use the selected recipient-local session timezone. Neither a
+list name nor an area code is used to infer a recipient timezone.
 
 This is not an exhaustive state/local/industry legal database. The documented
 fallback is not a certification of lawfulness. Reviewed stricter jurisdiction

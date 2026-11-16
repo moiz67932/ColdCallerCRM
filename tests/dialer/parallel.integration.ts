@@ -677,7 +677,7 @@ test('default policy needs no campaign row, infers only structured US address, a
  assert.equal(sql("select count(*) from public.dialer_campaign_calling_policies"),'0');
 });
 test('no-policy regular Start reserves four actual ledger prospects after media acknowledgement',t=>{
- setup();sql("delete from public.dialer_campaign_calling_policies;update public.leads set state='Colorado'");
+ setup();sql(`delete from public.dialer_campaign_calling_policies;update public.leads set state=null,custom_fields_json='{"countryCode":"US"}'`);
  const reason=sql(`select coalesce(public.portive_calling_hours('first','${zone}'),'')`);
  if(reason==='outside_default_calling_days'){t.skip('Default is correctly closed today; fixed-date policy cases run separately');return;}
  const s=start();assert.equal(attempts(s).length,4);
@@ -706,4 +706,13 @@ test('fallback is rechecked immediately before provider I/O, preserving late DNC
  assert.equal(authorize(c).reason,'outside_calling_window');
  assert.equal(sql(`select state from public.dial_commands where id='${c.id}'`),'canceled');
  assert.equal(sql(`select count(*) from public.dial_session_targets where session_id='${session}'`),'4');
+});
+
+test('Colorado address corrects the session timezone default, explicit recipient timezone wins, and null time fails closed',()=>{
+ setup();sql("delete from public.dialer_campaign_calling_policies;update public.leads set state='Colorado'");
+ assert.equal(sql("select public.portive_calling_hours('first','America/New_York','2026-11-16T13:00:00Z')"),'outside_calling_window');
+ assert.equal(sql("select public.portive_calling_hours('first','America/New_York','2026-11-17T03:30:00Z') is null"),'t');
+ sql(`update public.leads set custom_fields_json='{"timeZone":"America/New_York"}'`);
+ assert.equal(sql("select public.portive_calling_hours('first','America/Denver','2026-11-16T13:00:00Z') is null"),'t');
+ assert.equal(sql("select public.portive_calling_hours('first','America/Denver',null)"),'invalid_calling_time');
 });
