@@ -18,7 +18,10 @@ export async function GET(request: NextRequest) {
   try {
     const [session, lists] = await Promise.all([getCurrentSession(), getSupabaseAdmin().from("lead_lists").select("id,name").order("created_at", { ascending: false })]);
     if (lists.error) throw new Error(lists.error.message);
-    const readiness = await parallelReadiness();
+    // Explicit authenticated diagnostics use provider GETs and Worker inspect only.
+    // Never call Start/prepare merely to verify a production deployment.
+    const verifyProvider = request.nextUrl.searchParams.get("verifyProvider") === "true";
+    const readiness = await parallelReadiness(verifyProvider);
     let acceptanceAuthorization = null;
     const grantId = request.nextUrl.searchParams.get("acceptanceGrantId"), controllerId = request.nextUrl.searchParams.get("controllerId");
     if (env.DIALER_ACCEPTANCE_ENABLED === "true" && env.DIALER_PARALLEL_ENABLED === "false" && z.uuid().safeParse(grantId).success && z.uuid().safeParse(controllerId).success) {
@@ -27,7 +30,9 @@ export async function GET(request: NextRequest) {
         .is("revoked_at", null).is("consumed_session_id", null).gt("expires_at", new Date().toISOString()).maybeSingle();
       if (data) acceptanceAuthorization = { ...data, destinations: data.destinations.map((d: {phone_number:string;time_zone:string}) => ({phone_number:d.phone_number,time_zone:d.time_zone})) };
     }
-    return NextResponse.json({ session, lists: lists.data, acceptanceAuthorization, capabilities: { ...dialerCapabilities(), parallel: readiness.enabled, parallelBlockers: readiness.blockers } });
+    return NextResponse.json({ session, lists: lists.data, acceptanceAuthorization,
+      ...(verifyProvider ? { providerReadiness: { channels: readiness.channels, availableCreditCents: readiness.availableCreditCents, fingerprint: readiness.fingerprint } } : {}),
+      capabilities: { ...dialerCapabilities(), parallel: readiness.enabled, parallelBlockers: readiness.blockers } });
   } catch (error) { return jsonError(formatUnknownError(error), 503); }
 }
 

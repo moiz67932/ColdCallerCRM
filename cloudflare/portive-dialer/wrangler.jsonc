@@ -60,7 +60,8 @@
       },
       "vars": {
         "DEPLOYMENT_ENV": "production",
-        "DIALER_PARALLEL_ENABLED": "false"
+        "DIALER_PARALLEL_ENABLED": "true",
+        "DIALER_CALLER_NAME": "Portive"
       },
       "triggers": {
         "crons": [
