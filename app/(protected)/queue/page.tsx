@@ -1749,17 +1749,19 @@ export default function QueuePage() {
     return () => { canceled = true; };
   }, [dialSession?.active_call_id]);
 
-  const parallelMediaSessionId = dialSession?.mode === "parallel" ? dialSession.id : null;
+  const parallelMediaSessionId = dialSession?.mode === "parallel" && dialSession.status === "running" ? dialSession.id : null;
+  const parallelMediaDeadline = Date.parse(String(dialSession?.parallel_options?.deadlineAt ?? ""));
   useEffect(() => {
     if (!parallelMediaSessionId) { setParallelMediaStatus("pending"); return; }
     let stopped = false;
     let sending = false;
     let dirty = false;
+    let unavailable = false;
     let status: ParallelMediaStatus = "pending";
     let observed: { audio: HTMLAudioElement; stream: MediaStream; monitor: ReturnType<typeof watchParallelOperatorMedia> } | null = null;
     async function acknowledge() {
       dirty = true;
-      if (sending || stopped) return;
+      if (sending || stopped || unavailable || Number.isFinite(parallelMediaDeadline) && Date.now() >= parallelMediaDeadline) return;
       sending = true;
       try {
         do {
@@ -1772,14 +1774,21 @@ export default function QueuePage() {
           // While the operator is still ringing, the ordinary heartbeat keeps
           // the browser lease alive. It must not claim operator media readiness.
           if (!ready && status === "pending" && connected) break;
-          await fetch("/api/dial-sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+          const response = await fetch("/api/dial-sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
             action: ready ? "operator_ready" : "heartbeat", sessionId: parallelMediaSessionId,
             controllerId: sessionStorage.getItem("portive-controller"), ready, callControlId: controlId,
           }) });
+          const result = await response.json();
+          if (result.session) setDialSession(result.session);
+          if (!response.ok || result.recoveryPending) {
+            unavailable = true;
+            setError(result.warning ?? result.error ?? "Session orchestration unavailable; recovery is pending.");
+            break;
+          }
           // Loss during an in-flight ready acknowledgement is sent next, never
           // dropped behind the earlier request.
         } while (dirty && !stopped);
-      } catch { /* The normal heartbeat/lease still fails closed on transport loss. */ }
+      } catch { unavailable = true; setError("Session orchestration unavailable; recovery is pending."); }
       finally { sending = false; }
     }
     const changed = (next: ParallelMediaStatus) => {
@@ -1810,7 +1819,7 @@ export default function QueuePage() {
       stopped = true; clearInterval(timer); observed?.monitor.dispose();
       refreshParallelMediaRef.current = () => {};
     };
-  }, [parallelMediaSessionId, micPermission]);
+  }, [parallelMediaSessionId, parallelMediaDeadline, micPermission]);
 
   const audioReportedAttempts = useRef(new Set<string>());
   useEffect(() => {

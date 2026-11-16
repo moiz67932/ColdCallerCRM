@@ -18,7 +18,8 @@ function fixture(patch:Record<string,unknown>={},limits:{application:number|null
  '@/lib/supabase-admin':{getSupabaseAdmin:()=>({rpc:async(name:string)=>{if(name==='portive_regular_parallel_status')return {data:{schemaVersion:'202611160001',hoursPolicyVersion:'202611160002',reportRequired:false}};assert.equal(name,'portive_parallel_transport_ready');return {data:true};}})},
  '@/lib/telnyx/client':{getTelnyxClient:()=>({
  callControlApplications:retrieve('application',{active:true,webhook_event_url:'https://app.invalid/voice',outbound:{outbound_voice_profile_id:'profile',channel_limit:limits.application}}),
- telephonyCredentials:retrieve('credential',{sip_username:'operator'}),balance:retrieve('balance',{currency:'USD',available_credit:'4.02'}),
+ telephonyCredentials:retrieve('credential',{sip_username:'operator',resource_id:'connection:sip-connection'}),balance:retrieve('balance',{currency:'USD',available_credit:'4.02'}),
+ credentialConnections:retrieve('sip-connection',{active:true,sip_uri_calling_preference:patch.sipPreference??'internal'}),
  outboundVoiceProfiles:retrieve('profile',{enabled:true,concurrent_call_limit:limits.profile}),})},
  '@/lib/telnyx/helpers':{getVoiceWebhookUrl:()=> 'https://app.invalid/voice'},
  './orchestration':{orchestrationBackend:()=> 'cloudflare',cloudflareRequest:async(path:string)=>{assert.equal(path,'/internal/inspect');calls.push(path);return {parallelEnabled:true,fingerprint:'fp',callerName:'Fixture Company'};}},
@@ -34,7 +35,11 @@ function fixture(patch:Record<string,unknown>={},limits:{application:number|null
 test('normal readiness passes without report or grant, using only live provider reads',async()=>{
  const f=fixture(),r=await f.ready(true);assert.equal(r.enabled,true);assert.equal(r.channels,5);assert.equal(r.budget.profile.source,"fixture");
  assert.equal(r.availableCreditCents,402);assert.equal(r.sipUri,'sip:operator@sip.telnyx.com');
- assert.deepEqual(f.calls,['/internal/inspect','application','credential','balance','profile']);
+ assert.deepEqual(f.calls,['/internal/inspect','application','credential','balance','profile','sip-connection']);
+});
+test('registered credentials cannot authorize Start while inbound operator SIP calls are disabled',async()=>{
+ const r=await fixture({sipPreference:''}).ready(true);
+ assert.equal(r.enabled,false);assert(r.blockers.some((v:string)=>v.includes('Receive SIP URI calls')));
 });
 test('missing component tariff or caller identity explains the actual configuration problem',async()=>{
  for(const patch of [{budgetMissing:true},{DIALER_CALLER_NAME:''}]){

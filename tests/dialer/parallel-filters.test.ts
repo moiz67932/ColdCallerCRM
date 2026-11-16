@@ -6,6 +6,7 @@ import {NextRequest,NextResponse} from 'next/server';
 import {z} from 'zod';
 import {parallelLeadFilters} from '../../lib/dialer/parallel-filters';
 import {defaultParallelOptions} from '../../lib/dialer/parallel-policy';
+import {safeDiagnostic} from '../../lib/dialer/diagnostics';
 
 const listId='e0a75bf6-654c-4918-a46c-c7b0b33d3acb';
 const controllerId='9fb31be0-6677-4490-b9f0-1471129f585d';
@@ -18,16 +19,16 @@ function load(path:string,modules:Record<string,unknown>):Record<string,any>{
  return result;
 }
 
-function fixture(legacy=false){
+function fixture(legacy=false,wakeDown=false){
  const calls:Array<{name:string;args:Record<string,any>}>=[];
  const db={rpc:async(name:string,args:Record<string,any>)=>{
   calls.push({name,args});
   const matches=args.p_list===lead.lead_list_id&&(args.p_location===null||args.p_location===lead.location);
   if(name==='portive_parallel_eligibility')return {data:{eligible:matches?18:0,reasons:{}}};
-  if(name==='portive_parallel_command')return matches?{data:{id:'fixture-session',mode:'parallel',status:'running'}}:{error:{message:'Selected list/location has no leads'}};
+  if(name==='portive_parallel_command')return args.p_action==='stop'?{data:{id:'fixture-session',mode:'parallel',status:'stopping'}}:matches?{data:{id:'fixture-session',mode:'parallel',status:'running'}}:{error:{message:'Selected list/location has no leads'}};
   if(name==='portive_session_command')return {data:{session:{id:'power-session',mode:'power'},dispatch:false}};
   return {data:null};
- }};
+ },from:()=>{const query:any={};for(const name of ['select','eq','in','order','limit'])query[name]=()=>query;query.maybeSingle=async()=>({data:{id:'fixture-session',mode:'parallel',status:'stopping'}});return query;}};
  const readiness={enabled:true,channels:5,blockers:[],availableCreditCents:500,dailyLimitCents:500,budget:{profile:null,heldCents:0}};
  const modules:Record<string,unknown>={
   '@/lib/env':{env:{DIALER_PARALLEL_ENABLED:'true',TELNYX_PUBLIC_KEY:'fixture',TELNYX_SKIP_SIGNATURE_VERIFICATION:'false'}},
@@ -35,7 +36,7 @@ function fixture(legacy=false){
   '@/lib/telnyx/helpers':{getTelnyxManualDialFlow:()=> 'browser_first',getOutboundCallerId:()=>'+12025550123'},
   '@/lib/telnyx/call-flow':{},
   './parallel-readiness':{parallelReadiness:async()=>readiness},
-  './orchestration':{assertOrchestrationBackend:async()=>{},prepareOrchestration:async()=>{},wakeOrchestration:async()=>{},orchestrationBackend:()=> 'cloudflare'},
+  './orchestration':{assertOrchestrationBackend:async()=>{},prepareOrchestration:async()=>{},wakeOrchestration:async()=>{if(wakeDown)throw Error('Worker unavailable');},orchestrationBackend:()=> 'cloudflare'},
   './budget':{budgetQuote:()=>null},'./parallel-fingerprint':{},
   './funding':{dailyHeadroom:async()=>({cents:500})},'./acceptance':{},
   './parallel-filters':{parallelLeadFilters:legacy?(input:{listId:string;location:string})=>({p_list:input.listId,p_location:input.location??null}):parallelLeadFilters},
@@ -59,8 +60,9 @@ function fixture(legacy=false){
   '@/lib/dialer/parallel-readiness':modules['./parallel-readiness'],
   '@/lib/dialer/budget':modules['./budget'],'@/lib/dialer/funding':modules['./funding'],
   '@/lib/dialer/parallel-filters':{parallelLeadFilters},
+  '@/lib/dialer/diagnostics':{safeDiagnostic},
  });
- return {calls,post:(location:string,parallelLocation?:string,mode='parallel')=>route.POST(new NextRequest('https://fixture.invalid/api/dial-sessions',{
+ return {calls,service,post:(location:string,parallelLocation?:string,mode='parallel')=>route.POST(new NextRequest('https://fixture.invalid/api/dial-sessions',{
   method:'POST',body:JSON.stringify({action:'start',controllerId,listId,location,parallelLocation,mode,ready:true,reviewed:true,timeZone:'America/New_York',maxLines:4,options:defaultParallelOptions}),
  })),quote:(parallelLocation?:string)=>quote.GET(new NextRequest('https://fixture.invalid/api/dial-sessions/quote?'+new URLSearchParams({listId,timeZone:'America/New_York',lines:'4',maxCallSeconds:'60',sessionSeconds:'180',ringTimeout:'15',maxSpendCents:'500',...(parallelLocation?{parallelLocation}:{})})))};
 }
@@ -99,4 +101,12 @@ test('only an explicit Parallel location restricts both quote and Start; blank m
 test('Power still receives the original workspace location',async()=>{
  const f=fixture();assert.equal((await f.post('Round_Rock_Texas',undefined,'power')).status,200);
  assert.equal(f.calls.find(c=>c.name==='portive_session_command')!.args.p_location,'Round_Rock_Texas');
+});
+
+test('committed Stop returns durable stopping state and recovery warning when Worker wake fails',async()=>{
+ const f=fixture(false,true);
+ const result=await f.service.sessionCommand({action:'stop',sessionId:'fixture-session',controllerId,ready:false});
+ assert.equal(result.session.status,'stopping');assert.equal(result.dispatch,false);
+ assert.equal(result.recoveryPending,true);assert.match(result.warning,/command saved/);
+ assert.equal(f.calls.filter(c=>c.name==='portive_parallel_command').length,1);
 });

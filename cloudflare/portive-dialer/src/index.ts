@@ -3,6 +3,7 @@ import { verifyInternal } from '../../../lib/dialer/internal-auth';
 import { Database, TelnyxApi, verifyProvider } from './adapters';
 import { executeCommand } from './executor';
 import { HttpError, fingerprint, validateEnv, type Env, type Work, type Delivery, type Attempt } from './types';
+import { safeDiagnostic } from '../../../lib/dialer/diagnostics';
 
 export function earliestDeadline(deadlines: string[], now=Date.now()) {
   const times=deadlines.map(Date.parse).filter(Number.isFinite).filter(t=>t>now);
@@ -18,6 +19,8 @@ export class SessionCoordinator extends DurableObject<Env> {
   }
   async fetch(request: Request): Promise<Response> {
     const arrival=Number(request.headers.get('x-portive-cf-arrival'))||Date.now();
+    let operation='environment_validation';
+    const sessionId=new URL(request.url).pathname.match(/\/session\/([a-f0-9-]{36})$/)?.[1];
     try {
       validateEnv(this.env);
       const path=new URL(request.url).pathname;
@@ -26,6 +29,7 @@ export class SessionCoordinator extends DurableObject<Env> {
       raw+=decoder.decode();
       if(raw.length>256_000) return Response.json({error:'Payload too large'},{status:413});
       if(!await verifyInternal(this.env.DIALER_CLOUDFLARE_SECRET,path,raw,request.headers)) return Response.json({error:'Unauthorized'},{status:401});
+      operation='storage_nonce';
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS nonces (nonce TEXT PRIMARY KEY, expires INTEGER NOT NULL)');
       const authenticated=Date.now(), nonce=request.headers.get('x-portive-nonce')!;
       const body=JSON.parse(raw),sql=this.ctx.storage.sql;
@@ -45,17 +49,20 @@ export class SessionCoordinator extends DurableObject<Env> {
         return Response.json({backend:'cloudflare',fingerprint:await fingerprint(this.env),parallelEnabled:this.env.DIALER_PARALLEL_ENABLED==='true',acceptanceEnabled:this.env.DIALER_ACCEPTANCE_ENABLED==='true',callerName:this.env.DIALER_CALLER_NAME??null});
       }
       if(path==='/internal/prepare') {
+        operation='prepare';
         // Rescue an activation lost between Vercel creating a session and delivering its wake.
         await this.arm(Date.now()+60_000);
         await this.db.rpc('portive_orchestration_prepare',{p_backend:'cloudflare'});
         return Response.json({backend:'cloudflare',fingerprint:await fingerprint(this.env),parallelEnabled:this.env.DIALER_PARALLEL_ENABLED==='true'});
       }
-      const sessionId=path.split('/').pop()!;
+      if(!sessionId)return Response.json({error:'Invalid session'},{status:400});
+      operation='storage_session';
       const bound=await this.ctx.storage.get<string>('sessionId');
       if(bound && bound!==sessionId)return Response.json({error:'Object session mismatch'},{status:409});
       if(!bound) await this.ctx.storage.put('sessionId',sessionId);
       await this.arm(Date.now()+60_000); // Crash recovery is persisted before network side effects.
       let work: Work;
+      operation=body.kind==='event'?'event_rpc':'work_rpc';
       if(body.kind==='event') {
         const d=body.delivery as Delivery;
         if(d.sessionId!==sessionId||!await verifyProvider(d.rawBody,d.signature,d.timestamp,this.env.TELNYX_PUBLIC_KEY)) return Response.json({error:'Invalid provider signature'},{status:401});
@@ -78,10 +85,11 @@ export class SessionCoordinator extends DurableObject<Env> {
         if(event.data.event_type==='call.bridged') console.log(JSON.stringify({event:'bridge_confirmed',sessionId,attemptId:body.delivery.attemptId,providerAt:event.data.occurred_at,at:Date.now()}));
         if(work.session.active_call_id===body.delivery.attemptId && event.data.event_type.startsWith('call.machine.')) console.log(JSON.stringify({event:'winner_claimed',sessionId,attemptId:work.session.active_call_id,at:Date.now()}));
       }
+      operation='execute_or_reconcile';
       await this.run(work);
       return Response.json({accepted:true});
     } catch(error) {
-      console.log(JSON.stringify({event:'orchestration_request_failed',at:Date.now(),error:error instanceof Error?error.name:'Error'}));
+      console.log(JSON.stringify({event:'orchestration_request_failed',sessionId,operation,at:Date.now(),...safeDiagnostic(error,Object.values(this.env).filter((v):v is string=>typeof v==='string'))}));
       return Response.json({error:'Orchestration unavailable; dialing remains reserved'},{status:503});
     }
   }
@@ -144,7 +152,7 @@ export class SessionCoordinator extends DurableObject<Env> {
       await this.ctx.storage.put('failures',failures);
       // Bounded backoff continues past the platform's six automatic alarm retries.
       await this.ctx.storage.setAlarm(Date.now()+Math.min(300_000,5000*2**Math.min(failures,6)));
-      console.log(JSON.stringify({event:'alarm_recovery_scheduled',failures,at:Date.now()}));
+      console.log(JSON.stringify({event:'alarm_recovery_scheduled',sessionId:await this.ctx.storage.get('sessionId'),failures,at:Date.now(),...safeDiagnostic(error,Object.values(this.env).filter((v):v is string=>typeof v==='string'))}));
     }
   }
   async recover() {
@@ -173,6 +181,6 @@ export default {
     return env.SESSIONS.get(env.SESSIONS.idFromName(name)).fetch(new Request(request,{headers}));
   },
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(env.SESSIONS.get(env.SESSIONS.idFromName('control')).recover().catch(()=>console.log(JSON.stringify({event:'recovery_scan_unavailable'}))));
+    ctx.waitUntil(env.SESSIONS.get(env.SESSIONS.idFromName('control')).recover().catch(error=>console.log(JSON.stringify({event:'recovery_scan_unavailable',operation:'recovery_scan',...safeDiagnostic(error,Object.values(env).filter((v):v is string=>typeof v==='string'))}))));
   }
 } satisfies ExportedHandler<Env>;

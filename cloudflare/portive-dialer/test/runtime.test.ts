@@ -24,6 +24,14 @@ beforeEach(async()=>{
  spy=vi.spyOn(globalThis,'fetch').mockImplementation(async(input:any,init:any)=>{const url=String(input),body=init?.body?JSON.parse(init.body):{};calls.push({url,body});if(url.endsWith('portive_orchestration_work')||url.endsWith('portive_cloudflare_event')){const r={...work,commands};commands=[];return Response.json(r);}if(url.endsWith('portive_orchestration_authorize'))return Response.json({allowed:true});if(url.includes('/rest/v1/'))return Response.json(null);if(url.includes('/v2/'))return Response.json({data:{call_control_id:id(),is_alive:true}});throw Error('Unexpected network');});
 });
 afterEach(()=>vi.restoreAllMocks());
+it('logs the failing RPC and sanitized SQLSTATE when terminal hold permissions fail',async()=>{
+ const log=vi.spyOn(console,'log').mockImplementation(()=>{});
+ spy.mockImplementation(async()=>Response.json({code:'42501',message:`permission denied for table dialer_cost_holds ${e.SUPABASE_SERVICE_ROLE_KEY}`},{status:403}));
+ expect((await request({kind:'wake'})).status).toBe(503);
+ const entries=log.mock.calls.map(([line])=>JSON.parse(String(line)));
+ expect(entries.some(v=>v.event==='supabase_request_failed'&&v.operation==='rpc/portive_orchestration_work'&&v.code==='42501'&&v.message.includes('permission denied'))).toBe(true);
+ expect(JSON.stringify(entries)).not.toContain(e.SUPABASE_SERVICE_ROLE_KEY);
+});
 it('rejects unsigned requests before database or telephony',async()=>{expect((await request({kind:'wake'},{})).status).toBe(401);expect(calls).toHaveLength(0);});
 it('rejects repeated authenticated wakes in a live object',async()=>{const b={kind:'wake'},h=await signInternal(e.DIALER_CLOUDFLARE_SECRET,`/internal/session/${work.session.id}`,JSON.stringify(b));expect((await request(b,h)).status).toBe(200);expect((await request(b,h)).status).toBe(409);});
 it('binds HMAC to path, body, and request freshness',async()=>{const h=new Headers(await signInternal(e.DIALER_CLOUDFLARE_SECRET,'/one','{}'));expect(await verifyInternal(e.DIALER_CLOUDFLARE_SECRET,'/two','{}',h)).toBe(false);expect(await verifyInternal(e.DIALER_CLOUDFLARE_SECRET,'/one','changed',h)).toBe(false);expect(await verifyInternal(e.DIALER_CLOUDFLARE_SECRET,'/one','{}',h,Date.now()+120000)).toBe(false);});

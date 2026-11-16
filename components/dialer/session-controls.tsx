@@ -40,6 +40,7 @@ export function SessionControls(props: Props) {
   const [controllerId, setControllerId] = useState("");
   const controller = useRef("");
   const inFlight = useRef(false);
+  const [recoveryPending, setRecoveryPending] = useState(false);
   const current = useRef(props);
   useEffect(() => { current.current = props; });
 
@@ -100,9 +101,11 @@ export function SessionControls(props: Props) {
         throw new Error(`HTTP ${response.status}: ${message}${hint}`);
       }
       acceptSession(result.session);
-      setError("");
+      setRecoveryPending(Boolean(result.recoveryPending));
+      setError(result.warning ?? "");
       if (result.dispatch) await current.current.onDispatch(result);
     } catch (err) {
+      setRecoveryPending(true);
       setError(err instanceof Error ? err.message : "Dial session failed");
       // A failed/uncertain dispatch is never retried. Keep its durable reservation for recovery.
     } finally { inFlight.current = false; setBusy(false); }
@@ -111,11 +114,22 @@ export function SessionControls(props: Props) {
   useEffect(() => {
     if (!commandSessionId || ["completed", "stopped"].includes(commandStatus ?? "") || commandController !== controller.current) return;
     const timer = setInterval(() => {
+      const deadline = Date.parse(String(session?.parallel_options?.deadlineAt ?? ""));
+      if (commandMode === "parallel" && (commandStatus !== "running" || recoveryPending || Number.isFinite(deadline) && Date.now() >= deadline)) {
+        // Observe durable recovery without extending a lease or waking the Worker.
+        void fetch("/api/dial-sessions", { cache: "no-store" }).then(async r => {
+          if (r.ok) {
+            const data = await r.json(); acceptSession(data.session);
+            if (!data.session) { setRecoveryPending(false); setError(""); }
+          }
+        }).catch(() => {});
+        return;
+      }
       const action = commandMode === "parallel" ? "heartbeat" : commandStatus === "running" && current.current.idle ? "next" : "heartbeat";
       void command(action);
-    }, 2500);
+    }, commandMode === "parallel" && (commandStatus !== "running" || recoveryPending) ? 15000 : 2500);
     return () => clearInterval(timer);
-  }, [command, commandSessionId, commandStatus, commandController, commandMode]);
+  }, [command, commandSessionId, commandStatus, commandController, commandMode, recoveryPending, acceptSession, session?.parallel_options?.deadlineAt]);
 
   const streamSessionId = session?.mode === "parallel" ? session.id : null;
   useEffect(() => {

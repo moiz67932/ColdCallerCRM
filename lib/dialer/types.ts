@@ -27,6 +27,8 @@ export type ParallelAttempt = {
 };
 
 export type SessionCommandResult = {
+  warning?: string;
+  recoveryPending?: boolean;
   session: DialSession;
   dispatch: boolean;
   attempt?: { id: string; lead_id: string; ended_at: string | null; answered_at: string | null };

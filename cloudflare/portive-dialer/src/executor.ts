@@ -1,5 +1,6 @@
 import { Database, TelnyxApi } from './adapters';
 import { fingerprint, HttpError, type Command, type Env } from './types';
+import { safeDiagnostic } from '../../../lib/dialer/diagnostics';
 export async function executeCommand(command: Command, env: Env, db: Database, api: TelnyxApi) {
   let s=command.session,a=command.attempt;
   const complete=(ok: boolean,response: unknown={},status=0,defer=false)=>db.rpc('portive_orchestration_complete',{p_command:command.id,p_ok:ok,p_response:response,p_status:status,p_defer:defer});
@@ -78,7 +79,7 @@ export async function executeCommand(command: Command, env: Env, db: Database, a
     throw new Error(`Unsupported command on Cloudflare: ${command.action}`);
   } catch(error) {
     const status=error instanceof HttpError?error.status:0;
-    console.log(JSON.stringify({event:'command_failed',sessionId:s.id,commandId:command.id,status,providerSent}));
+    console.log(JSON.stringify({event:'command_failed',sessionId:s.id,commandId:command.id,action:command.action,providerSent,...safeDiagnostic(error,Object.values(env).filter((v):v is string=>typeof v==='string')),status}));
     await complete(false,{},status);
   }
 }

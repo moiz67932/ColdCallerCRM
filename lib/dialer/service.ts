@@ -12,6 +12,21 @@ import {dailyHeadroom} from './funding';
 import { acceptanceStartOptions } from "./acceptance";
 import { parallelLeadFilters } from "./parallel-filters";
 
+// The database command is already committed. A failed wake cannot undo Stop
+// or justify replaying Start. The Worker alarm/cron owns bounded recovery.
+async function committedResult(result: SessionCommandResult) {
+  try { await wakeOrchestration(result.session.id); return result; }
+  catch {
+    let session = result.session;
+    try {
+      const { data } = await getSupabaseAdmin().from("dial_sessions").select("*").eq("id", result.session.id).maybeSingle();
+      session = data ?? session;
+    } catch { /* The committed command remains authoritative during a read outage. */ }
+    return { ...result, session, dispatch: false,
+      recoveryPending: true, warning: "Session command saved. Orchestration recovery is pending; do not start another session. Recovery retries automatically." };
+  }
+}
+
 export function dialerCapabilities() {
   return {
     power: env.DIALER_POWER_ENABLED !== "false" && getTelnyxManualDialFlow() === "browser_first",
@@ -40,8 +55,7 @@ export async function sessionCommand(input: {
         p_reviewed: input.reviewed ?? false, p_options: options,
       });
       if (error) throw new Error(error.message);
-      await wakeOrchestration(data.id);
-      return { session: data, dispatch: false } as SessionCommandResult;
+      return committedResult({ session: data, dispatch: false } as SessionCommandResult);
     }
     const starting = input.action === "start" || input.action === "resume";
     const readiness = starting ? await parallelReadiness(true) : null;
@@ -65,8 +79,7 @@ export async function sessionCommand(input: {
         operatorSipUri: readiness?.sipUri, callControlId: input.callControlId, transportReady: input.transportReady ?? true },
     });
     if (error) throw new Error(error.message);
-    await wakeOrchestration(data.id);
-    return { session: data, dispatch: false } as SessionCommandResult;
+    return committedResult({ session: data, dispatch: false } as SessionCommandResult);
   }
   const capabilities = dialerCapabilities();
   if (["start", "next", "resume", "continue", "skip"].includes(input.action)) {
@@ -83,8 +96,7 @@ export async function sessionCommand(input: {
     p_timezone: input.timeZone ?? null, p_reviewed: input.reviewed ?? false,
   });
   if (error) throw new Error(error.message);
-  await wakeOrchestration(data.session.id);
-  return { ...data, ...(data.dispatch ? { callerNumber: getOutboundCallerId() } : {}) } as SessionCommandResult;
+  return committedResult({ ...data, ...(data.dispatch ? { callerNumber: getOutboundCallerId() } : {}) } as SessionCommandResult);
 }
 
 export async function getCurrentSession() {

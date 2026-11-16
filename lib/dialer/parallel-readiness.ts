@@ -74,7 +74,17 @@ export async function parallelReadiness(verifyProvider = false) {
       }
       if (application.data?.webhook_event_url !== config.webhook) blockers.push("The Call Control application's webhook URL differs from this deployment.");
       if (!credential.data?.sip_username || credential.data.expired || (credential.data.expires_at && Date.parse(credential.data.expires_at) <= Date.now())) blockers.push("WebRTC credential has no SIP username.");
-      else sipUri = `sip:${credential.data.sip_username}@sip.telnyx.com`;
+      else {
+        const connectionId = credential.data.resource_id?.replace(/^connection:/, "");
+        if (!connectionId) blockers.push("WebRTC credential has no associated SIP connection.");
+        else {
+          const connection = await client.credentialConnections.retrieve(connectionId);
+          if (!connection.data?.active || !["internal", "unrestricted"].includes(connection.data.sip_uri_calling_preference ?? "")) {
+            blockers.push("Operator SIP connection must be active and allow Receive SIP URI calls from your own connections. WebRTC registration alone does not enable incoming operator calls.");
+          }
+        }
+        sipUri = `sip:${credential.data.sip_username}@sip.telnyx.com`;
+      }
     } catch (error) { blockers.push(`Provider readiness check failed: ${error instanceof Error ? error.message : "Unknown error"}`); }
   }
   blockers.push(...budget.blockers);

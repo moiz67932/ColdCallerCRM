@@ -1,4 +1,5 @@
 import { HttpError, type Env } from './types';
+import { safeDiagnostic } from '../../../lib/dialer/diagnostics';
 export class Database {
   constructor(private env: Env) {}
   async rpc<T = unknown>(name: string, args: Record<string,unknown>): Promise<T> {
@@ -6,22 +7,36 @@ export class Database {
   }
   async rows<T>(table: string, query: string): Promise<T[]> { return this.request<T[]>(`${table}?${query}`); }
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const operation=path.split('?')[0];
+    try {
     const response=await fetch(`${this.env.SUPABASE_URL.replace(/\/$/,'')}/rest/v1/${path}`, {
       ...init, headers:{apikey:this.env.SUPABASE_SERVICE_ROLE_KEY,authorization:`Bearer ${this.env.SUPABASE_SERVICE_ROLE_KEY}`,'content-type':'application/json'}, signal:AbortSignal.timeout(8000)
     });
     if(!response.ok) {
       const errorBody=await response.text();
       const inactive=errorBody.includes('Orchestration backend mismatch')||errorBody.includes('Cloudflare orchestration is disabled');
-      throw new HttpError(response.status,'Supabase request failed',inactive?'backend_inactive':undefined);
+      let details: {message?:string;code?:string}={};
+      try { details=JSON.parse(errorBody); } catch { /* Do not log non-JSON proxy responses. */ }
+      throw new HttpError(response.status,details.message??'Supabase request failed',inactive?'backend_inactive':details.code);
     }
     const text=await response.text(); return (text?JSON.parse(text):null) as T;
+    } catch(error) {
+      console.log(JSON.stringify({event:'supabase_request_failed',operation,...safeDiagnostic(error,Object.values(this.env).filter((v):v is string=>typeof v==='string'))}));
+      throw error;
+    }
   }
 }
 export class TelnyxApi {
   constructor(private env: Env) {}
   async request(path: string, body?: Record<string,unknown>): Promise<{data?: Record<string,unknown>}> {
     const response=await fetch(`https://api.telnyx.com/v2/${path}`, {method:body?'POST':'GET',headers:{authorization:`Bearer ${this.env.TELNYX_API_KEY}`,'content-type':'application/json'},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(8000)});
-    if(!response.ok) { await response.body?.cancel(); throw new HttpError(response.status,'Telnyx request failed'); }
+    if(!response.ok) {
+      let error: {code?:string;title?:string;detail?:string}={};
+      try { const body=await response.json() as {errors?:typeof error[]};error=body.errors?.[0]??{}; } catch { /* Never log raw responses. */ }
+      const failure=new HttpError(response.status,error.detail??error.title??'Telnyx request failed',error.code);
+      console.log(JSON.stringify({event:'provider_request_failed',operation:body?`action:${path.split('/').pop()}`:'call_status',...safeDiagnostic(failure,Object.values(this.env).filter((v):v is string=>typeof v==='string'))}));
+      throw failure;
+    }
     return response.json();
   }
   action(id: string, action: string, body: Record<string,unknown>) { return this.request(`calls/${encodeURIComponent(id)}/actions/${action}`,body); }
