@@ -18,6 +18,7 @@ function fixture(){sql(`truncate public.dial_audit_events,public.dial_session_ta
  delete from public.dial_suppressions;
  select public.portive_set_orchestration_backend('cloudflare',true);select public.portive_orchestration_prepare('cloudflare');
  insert into public.lead_lists(id,name,source_file_name) values('controlled','Consenting fixtures','fixture.csv');
+ insert into public.dialer_campaign_calling_policies(list_id,jurisdictions,legal_basis) values('controlled',array['US'],'Offline federal-only fixture jurisdiction');
  insert into public.leads(id,lead_list_id,phone_number,business_name) values('one','controlled','+12125550101','One'),('two','controlled','+12125550102','Two'),('three','controlled','+12125550103','Three'),('four','controlled','+12125550104','Four'),('unapproved','controlled','+12125550105','Unapproved');`);}
 function manifest(n=1){return {controller_id:controller,list_id:'controlled',time_zone:zone,config_fingerprint:fp,profile_id:'fixture-profile',operator_sip_uri:'sip:fixture@sip.telnyx.com',account_channels:5,rate_ceiling_cents:1,max_spend_cents:50,remaining_daily_cents:100,approval_reference:'offline-explicit-approval',capacity_reference:'offline-provider-capacity',rate_reference:'offline-all-inclusive-rate',reviewed_at:new Date().toISOString(),destinations:['one','two','three','four'].slice(0,n).map((id,i)=>({lead_id:id,phone_number:`+1212555010${i+1}`,time_zone:zone,consent_reference:`offline-consent-${id}`}))};}
 function issue(m=manifest()){return sql(`select public.portive_acceptance_issue(${literal(m)})`);}
@@ -32,8 +33,8 @@ async function mediaSession(n=1){const g=issue(manifest(n)),s=begin(g);const w=w
 
 test('acceptance migration applies twice without manufacturing verification evidence',async()=>{
  sql(`create database ${dbName}`,'postgres');
- for(const file of ['202604260001_colcaller_workstation.sql','202606240001_lead_locations.sql','202611130001_dial_sessions.sql','202611130002_parallel_engine.sql','202611140001_single_operator_collisions.sql','202611140002_cloudflare_orchestration.sql','202611150001_parallel_dispatch_safety.sql','202611150002_parallel_acceptance.sql'])sql(readFileSync(`supabase/migrations/${file}`,'utf8'));
- sql(readFileSync('supabase/migrations/202611150002_parallel_acceptance.sql','utf8'));
+ for(const file of ['202604260001_colcaller_workstation.sql','202606240001_lead_locations.sql','202611130001_dial_sessions.sql','202611130002_parallel_engine.sql','202611140001_single_operator_collisions.sql','202611140002_cloudflare_orchestration.sql','202611150001_parallel_dispatch_safety.sql','202611150002_parallel_acceptance.sql','202611160001_regular_parallel.sql'])sql(readFileSync(`supabase/migrations/${file}`,'utf8'));
+ sql(readFileSync('supabase/migrations/202611160001_regular_parallel.sql','utf8'));
  assert.equal(sql('select count(*) from public.dialer_provider_verifications'),'0');fp=await fingerprint(env);
 });
 test('issuance rejects missing consent, duplicate/non-US destinations, stale review and unsafe budgets',()=>{

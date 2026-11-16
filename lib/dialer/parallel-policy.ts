@@ -12,7 +12,7 @@ export type ParallelOptions = {
 };
 export const defaultParallelOptions: ParallelOptions = {
   ringTimeout: 30, maxCallSeconds: 300, batchDelaySeconds: 2, attemptLimit: 100,
-  maxSpendCents: 5000, autoContinue: true, autoRefill: false, silentRingback: false,
+  maxSpendCents: 100, autoContinue: true, autoRefill: false, silentRingback: false,
 };
 
 export const cloudflareScenarios = ["cloudflare_four_dispatch", "cloudflare_collision_hangup", "cloudflare_restart_recovery", "cloudflare_alarm_delay", "cloudflare_quota_fail_closed", "cloudflare_rollback_fence"] as const;

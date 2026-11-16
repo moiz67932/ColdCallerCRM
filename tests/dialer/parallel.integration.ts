@@ -21,26 +21,26 @@ function sql(query: string, database = dbName) {
 function fixture() {
   sql(`truncate public.dial_audit_events,public.dial_session_targets,public.dial_sessions,public.lead_lists cascade;
     select public.portive_set_orchestration_backend('node',false);
-    delete from public.dial_suppressions;
+    delete from public.dial_suppressions; delete from public.dialer_calling_consents;
     insert into public.app_settings(key,value_json) values('dialer_watchdog_heartbeat',jsonb_build_object('at',now()))
       on conflict(key) do update set value_json=excluded.value_json;
     insert into public.lead_lists(id,name,source_file_name) values('list','Test list','test.csv');
     insert into public.leads(id,lead_list_id,phone_number,business_name,created_at) values
       ('first','list','+12125550101','First',now()),('second','list','+12125550102','Second',now()-interval '1 day'),
-      ('third','list','+12125550103','Third',now()-interval '2 days');`);
+      ('third','list','+12125550103','Third',now()-interval '2 days');
+    insert into public.dialer_campaign_calling_policies(list_id,jurisdictions,legal_basis) values('list',array['US'],'Offline federal-only fixture jurisdiction');`);
 }
 
 const verificationId = "33333333-3333-4333-8333-333333333333";
-const options = { verificationId, fingerprint: "controlled-fixture", operatorSipUri: "sip:test@sip.telnyx.com", ringTimeout: 30,
+const options = { accountChannels:5, rateCeilingCents:1, fingerprint: "controlled-fixture", operatorSipUri: "sip:test@sip.telnyx.com", ringTimeout: 30,
   maxCallSeconds: 300, batchDelaySeconds: 0, attemptLimit: 100, maxSpendCents: 5000, autoContinue: true, autoRefill: false };
 function invoke(action: string, session: string | null = null, extra: Record<string, unknown> = {}) {
   return JSON.parse(sql(`select public.portive_parallel_command(${session ? `'${session}'` : "null"},'${controller}','${action}',true,'list',null,4,'${zone}',true,'${JSON.stringify({ ...options,...extra })}')`));
 }
 function setup() {
-  fixture(); sql(`insert into public.leads(id,lead_list_id,phone_number,business_name,created_at) values('fourth','list','+12125550104','Fourth',now()-interval '3 days');
-    insert into public.dialer_provider_verifications(id,config_fingerprint,connection_id,profile_id,account_channels,overflow_slots,rate_ceiling_cents,evidence,expires_at)
-    values('${verificationId}','controlled-fixture','connection','profile',5,0,1,'{"suite":"portive-parallel-v1","passed":true}',now()+interval '1 day') on conflict(id) do nothing;`);
+  fixture(); sql(`insert into public.leads(id,lead_list_id,phone_number,business_name,created_at) values('fourth','list','+12125550104','Fourth',now()-interval '3 days')`);
 }
+
 function start(extra: Record<string,unknown> = {}) {
   const s = invoke("start",null,extra);
   event(s.id,null,"operator","call.initiated",{call_control_id:"operator"});
@@ -76,6 +76,7 @@ test("parallel migrations apply on top of the Power schema and rerun without los
   sql(readFileSync("supabase/migrations/202611140002_cloudflare_orchestration.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611150001_parallel_dispatch_safety.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611150002_parallel_acceptance.sql", "utf8"));
+  sql(readFileSync("supabase/migrations/202611160001_regular_parallel.sql", "utf8"));
 });
 test("no prospects are reserved until both provider answer and browser media acknowledgement", () => {
   setup(); const s=invoke("start").id; invoke("tick",s); assert.equal(sql("select count(*) from public.call_attempts"),"0");
@@ -114,14 +115,14 @@ test("carrier answer and voicemail never claim the primary operator", () => {
   assert.equal(sql(`select outcome from public.call_attempts where id='${a[0].id}'`),"voicemail");
   answer(s,a[1].id); assert.equal(sql(`select active_call_id from public.dial_sessions where id='${s}'`),a[1].id);
 });
-test("two near-simultaneous answers produce one bridge and automatically hang up the collision", async () => {
+test("two near-simultaneous answers produce one bridge and explain the collision before cleanup", async () => {
   setup(); const s=start(); const a=attempts(s);
   for (const item of a.slice(0,2)) event(s,item.id,"lead","call.answered",{call_control_id:item.id});
   const run=promisify(execFile);
   await Promise.all(a.slice(0,2).map((item: { id: string }) => run("docker",["exec",container,"psql","-X","-qAt","-U","postgres","-d",dbName,"-v","ON_ERROR_STOP=1","-c",
     `select public.portive_parallel_event('${s}','${item.id}','lead','call.machine.premium.detection.ended','{"result":"human_business"}',now(),'${crypto.randomUUID()}')`])));
   assert.equal(sql("select count(*) from public.dial_commands where action='bridge'"),"1");
-  assert.equal(sql(`select count(*) from public.dial_commands where action='hangup' and attempt_id in ('${a[0].id}','${a[1].id}')`),"1");
+  assert.equal(sql(`select count(*) from public.dial_commands where action='failure_playback' and attempt_id in ('${a[0].id}','${a[1].id}')`),"1");
   assert.equal(sql("select count(*) from public.call_attempts where technical_state='answer_collision'"),"1");
   const winner=sql(`select active_call_id from public.dial_sessions where id='${s}'`);
   assert([a[0].id,a[1].id].includes(winner));
@@ -193,12 +194,12 @@ test("suppression and future callbacks exclude destinations", () => {
   assert.equal(attempts(start()).length,2);
 });
 test("five provider channels cover four prospects and the operator without overflow staffing", () => {
-  setup(); assert.equal(sql(`select account_channels from public.dialer_provider_verifications where id='${verificationId}'`),"5");
+  setup(); assert.equal(options.accountChannels,5);
   assert.equal(attempts(start()).length,4);
 });
 test("spend ceiling remains enforced inside the database", () => {
   setup();
-  const s=start({maxSpendCents:31}); assert.equal(attempts(s),null);
+  assert.throws(()=>start({maxSpendCents:31}),/Budget must cover/);
 });
 test("two workers claim each provider command at most once", async () => {
   setup(); start(); const run=promisify(execFile);
@@ -342,8 +343,7 @@ test('Cloudflare alarms only receive future relevant deadlines',()=>{
   for(const deadline of work.deadlines)assert(Date.parse(deadline)>Date.now()-1000);
 });
 test('Cloudflare migration reruns safely after its own readiness replacements',()=>{
-  setup();sql(readFileSync('supabase/migrations/202611140002_cloudflare_orchestration.sql','utf8'));
-  sql(readFileSync('supabase/migrations/202611150001_parallel_dispatch_safety.sql','utf8'));
+  setup();sql(readFileSync('supabase/migrations/202611160001_regular_parallel.sql','utf8'));
   assert.doesNotThrow(()=>sql("select public.portive_orchestration_guard('node')"));
   assert.throws(()=>sql("set role anon; select public.portive_orchestration_prepare('cloudflare')"),/permission denied/);
 });
@@ -417,12 +417,12 @@ test('current per-lead DNC and suppression flags block an already queued prospec
     assert.deepEqual(authorize(command),{allowed:false,reason:'destination_suppressed'});
   }
 });
-test('final calling-hour gate allows 9 and 19, denies 8 and 20 and honors lead overrides',()=>{
-  for(const hour of [9,19,8,20]) {
+test('final calling-hour gate allows 8 through 20, denies 7 and 21 and honors lead overrides',()=>{
+  for(const hour of [8,20,7,21]) {
     const {work}=cloudflareReserved(),command=work.commands[0];
     sql(`update public.leads set custom_fields_json=jsonb_build_object('timeZone','${zoneAtHour(hour)}') where id='${command.attempt.lead_id}'`);
     const result=authorize(command);
-    assert.equal(result.allowed,hour>=9&&hour<20,`local hour ${hour}`);
+    assert.equal(result.allowed,hour>=8&&hour<21,`local hour ${hour}`);
     if(!result.allowed) {
       assert.equal(result.reason,'outside_calling_window');
       assert.equal(sql(`select state from public.dial_commands where id='${command.id}'`),'canceled');
@@ -463,7 +463,7 @@ test('startup heartbeats cannot substitute for verified operator media, and medi
 });
 test('safety migration reruns without losing reservations or server-only grants',()=>{
   const {session}=cloudflareReserved();
-  sql(readFileSync('supabase/migrations/202611150001_parallel_dispatch_safety.sql','utf8'));
+  sql(readFileSync('supabase/migrations/202611160001_regular_parallel.sql','utf8'));
   assert.equal(sql(`select count(*) from public.dial_session_targets where session_id='${session}'`),'4');
   assert.throws(()=>sql('set role anon;select public.portive_orchestration_authorize(gen_random_uuid())'),/permission denied/);
   assert.equal(sql("select public.portive_orchestrator_ready(3)"),'t');
@@ -603,4 +603,61 @@ test('Chromium media -> real SQL -> Worker executor preserves startup, DNC denia
     await page.evaluate('window.rejectedMedia.dispose()');
     await page.evaluate('window.media.dispose();window.mediaFixture.oscillator.stop();window.mediaFixture.destination.stream.getTracks().forEach(t=>t.stop());window.mediaFixture.context.close()');
   } finally {await browser.close();}
+});
+
+test('regular Start creates a real ledger session without a report or grant',()=>{
+ setup();sql('delete from public.dialer_provider_verifications');
+ const s=start();assert.equal(attempts(s).length,4);
+ assert.equal(sql(`select verification_id is null and acceptance_grant_id is null from public.dial_sessions where id='${s}'`),'t');
+ assert.equal(sql('select count(*) from public.dialer_provider_verifications'),'0');
+});
+test('regular Start rejects missing actual provider configuration and an empty list before operator dialing',()=>{
+ setup();assert.throws(()=>invoke('start',null,{rateCeilingCents:null}),/cost ceiling/);
+ sql('delete from public.leads');assert.throws(()=>invoke('start'),/has no leads/);
+ assert.equal(sql('select count(*) from public.dial_commands'),'0');
+});
+test('federal hours use 08:00 inclusive and 21:00 exclusive across DST',()=>{
+ setup();
+ const hours=(at:string)=>sql(`select coalesce(public.portive_calling_hours('first','America/New_York','${at}'),'allowed')`);
+ assert.equal(hours('2026-11-16T12:59:00Z'),'outside_calling_window');
+ assert.equal(hours('2026-11-16T13:00:00Z'),'allowed');
+ assert.equal(hours('2026-11-17T01:59:00Z'),'allowed');
+ assert.equal(hours('2026-11-17T02:00:00Z'),'outside_calling_window');
+ assert.equal(hours('2026-07-15T12:00:00Z'),'allowed');
+ assert.equal(hours('2026-07-16T01:00:00Z'),'outside_calling_window');
+});
+test('stricter state and Sunday rules intersect recipient-local campaign policy',()=>{
+ setup();sql(`update public.leads set custom_fields_json='{"callingJurisdiction":"US-FL"}' where id='first'`);
+ assert.equal(sql(`select public.portive_calling_hours('first','America/New_York','2026-11-17T01:00:00Z')`),'outside_calling_window');
+ sql(`update public.leads set custom_fields_json='{"callingJurisdiction":"US-TX"}' where id='first'`);
+ assert.equal(sql(`select public.portive_calling_hours('first','America/Chicago','2026-11-22T17:59:00Z')`),'outside_calling_window');
+ assert.equal(sql(`select public.portive_calling_hours('first','America/Chicago','2026-11-22T18:00:00Z') is null`),'t');
+});
+test('B2B hours require an administratively classified exact business landline',()=>{
+ setup();sql(`delete from public.dialer_campaign_calling_policies;insert into public.dialer_campaign_calling_policies(list_id,classification,jurisdictions,start_minute,end_minute,legal_basis,business_numbers) values('list','business_landline',array['US'],0,1440,'Reviewed offline B2B legal scope',array['+12125550101'])`);
+ assert.equal(sql(`select public.portive_calling_hours('first','America/New_York','2026-11-16T05:00:00Z') is null`),'t');
+ assert.equal(sql(`select public.portive_calling_hours('second','America/New_York','2026-11-16T05:00:00Z')`),'outside_calling_window');
+ sql(`delete from public.dialer_campaign_calling_policies;insert into public.dialer_campaign_calling_policies(list_id,jurisdictions,legal_basis) values('list',array['US'],'Offline federal-only fixture jurisdiction');update public.leads set custom_fields_json='{"businessLandline":true,"consent":true}'`);
+ assert.equal(sql(`select public.portive_calling_hours('first','America/New_York','2026-11-16T05:00:00Z')`),'outside_calling_window');
+});
+test('documented hours consent is scoped to number/list/time, revocable, and cannot bypass DNC',()=>{
+ setup();sql(`insert into public.dialer_calling_consents values('first','list','+12125550101','2026-11-16T05:00:00Z','2026-11-16T06:00:00Z','actual offline consent record','offline legal exception scope',null)`);
+ assert.equal(sql(`select public.portive_calling_hours('first','America/New_York','2026-11-16T05:30:00Z') is null`),'t');
+ sql(`update public.dialer_calling_consents set revoked_at=now()`);
+ assert.equal(sql(`select public.portive_calling_hours('first','America/New_York','2026-11-16T05:30:00Z')`),'outside_calling_window');
+ sql('delete from public.dialer_calling_consents');
+ const {work}=cloudflareReserved(),c=work.commands[0];sql(`insert into public.dial_suppressions values('${c.parameters.to}','DNC',now())`);
+ assert.equal(authorize(c).reason,'destination_suppressed');
+});
+test('policy writes, private scheduler and eligibility reads remain unavailable to browser roles',()=>{
+ setup();for(const role of ['anon','authenticated']){
+ assert.throws(()=>sql(`set role ${role};insert into public.dialer_calling_rules values('ANY',0,1440,null,'fake browser override')`),/permission denied/);
+ assert.throws(()=>sql(`set role ${role};select public.portive_parallel_eligibility('list',null,'UTC')`),/permission denied/);
+ }
+});
+test('answered collision explains first, then speak-ended enqueues forced cleanup',()=>{
+ setup();const s=start(),a=attempts(s);answer(s,a[0].id);answer(s,a[1].id);
+ assert.equal(sql(`select count(*) from public.dial_commands where attempt_id='${a[1].id}' and action='failure_playback'`),'1');
+ event(s,a[1].id,'lead','call.speak.ended',{call_control_id:a[1].id});
+ assert.equal(sql(`select count(*) from public.dial_commands where attempt_id='${a[1].id}' and action='hangup' and parameters->>'force'='true'`),'1');
 });

@@ -42,11 +42,23 @@ export async function executeCommand(command: Command, env: Env, db: Database, a
       providerSent=true;
       return complete(true,await api.action(s.operator_call_control_id,'bridge',{call_control_id_to_bridge_with:a.telnyx_call_control_id,command_id:command.id,park_after_unbridge:'self',prevent_double_bridge:true}));
     }
+    if(command.action==='failure_playback') {
+      if(a?.ended_at) return complete(true,{alreadyEnded:true});
+      if(!a?.telnyx_call_control_id) return complete(false,{},0,true);
+      if(a.id===s.active_call_id) throw new Error('Collision explanation cannot target the winner');
+      if(!env.DIALER_CALLER_NAME?.trim()) throw new Error('Calling business name is required for collision explanation');
+      providerSent=true;
+      return complete(true,await api.action(a.telnyx_call_control_id,'speak',{
+        payload:`This is ${env.DIALER_CALLER_NAME}. This call was for telemarketing purposes. No operator is available. You can reach us at ${env.TELNYX_FROM_NUMBER.split('').join(' ')}. Goodbye.`,
+        payload_type:'text',voice:'female',language:'en-US',command_id:command.id,
+      }));
+    }
     if(command.action==='hangup'||command.action==='hangup_operator') {
       if(command.action==='hangup_operator' && s.operator_terminal_at)return complete(true,{alreadyEnded:true});
       if(a?.ended_at) return complete(true,{alreadyEnded:true});
       if(command.action==='hangup'&&a?.answered_at&&a.answer_classification!=='machine'&&a.termination_reason&&command.parameters.force!=='true'&&s.mode==='parallel') {
         await db.rpc('portive_answer_collision',{p_session:s.id,p_attempt:a.id});
+        return complete(true,{supersededByCollisionExplanation:true});
       }
       const targets=command.action==='hangup_operator'?[s.operator_call_control_id]:s.mode==='power'?[a?.telnyx_call_control_id,a?.telnyx_agent_call_control_id]:[a?.telnyx_call_control_id];
       const ids=[...new Set(targets.filter((id):id is string=>Boolean(id)))];

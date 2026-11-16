@@ -2,7 +2,6 @@ import { env } from "@/lib/env";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { getTelnyxClient } from "@/lib/telnyx/client";
 import { getVoiceWebhookUrl } from "@/lib/telnyx/helpers";
-import { evidenceBlockers } from "./parallel-policy";
 import { cloudflareRequest, orchestrationBackend } from "./orchestration";
 import { parallelFingerprint } from "./parallel-fingerprint";
 
@@ -17,36 +16,36 @@ export async function parallelReadiness(verifyProvider = false) {
   const blockers: string[] = [];
   const config = parallelConfiguration();
   const fingerprint = parallelFingerprint(config);
-  if (env.DIALER_PARALLEL_ENABLED !== "true") blockers.push("Set DIALER_PARALLEL_ENABLED=true after controlled verification.");
+  if (env.DIALER_PARALLEL_ENABLED !== "true") blockers.push("Parallel calling is disabled in this runtime.");
   if (!config.connection) blockers.push("Missing TELNYX_PARALLEL_CONNECTION_ID or TELNYX_CONNECTION_ID.");
   for (const key of ["TELNYX_API_KEY", "TELNYX_TELEPHONY_CREDENTIAL_ID", "TELNYX_FROM_NUMBER", "TELNYX_PUBLIC_KEY"] as const) {
     if (!env[key]) blockers.push(`Missing ${key}.`);
   }
   if (!config.webhook?.startsWith("https://")) blockers.push("A public HTTPS voice webhook URL is required.");
   if (env.TELNYX_SKIP_SIGNATURE_VERIFICATION === "true") blockers.push("Webhook signature bypass must be disabled.");
-  let verification: { id: string; account_channels: number; rate_ceiling_cents: number; profile_id: string; evidence: Record<string, unknown> } | null = null;
+  if (!env.DIALER_CALLER_NAME?.trim()) blockers.push("Configure DIALER_CALLER_NAME with the calling business name for answered-collision identification.");
+  const rateCeilingCents = env.DIALER_RATE_CEILING_CENTS;
+  if (!rateCeilingCents) blockers.push("Configure DIALER_RATE_CEILING_CENTS with an all-inclusive calling cost ceiling for spend reservations.");
   if (env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY) {
-    const { data, error } = await getSupabaseAdmin().from("dialer_provider_verifications").select("*")
-      .eq("config_fingerprint", fingerprint).gt("expires_at", new Date().toISOString()).order("verified_at", { ascending: false }).limit(1).maybeSingle();
-    if (error) blockers.push(`Apply parallel migrations through 202611140001: ${error.message}`);
-    else verification = data;
+    const schema = await getSupabaseAdmin().rpc("portive_regular_parallel_status");
+    if (schema.error || schema.data?.schemaVersion !== "202611160001" || schema.data?.reportRequired !== false) blockers.push("Apply database migration 202611160001_regular_parallel.sql before starting regular Parallel sessions.");
     const transport = await getSupabaseAdmin().rpc("portive_parallel_transport_ready");
     if (transport.error || transport.data !== true) blockers.push("Supabase Realtime publication for sessions and attempts is unavailable.");
   } else blockers.push("Supabase configuration is missing.");
-  blockers.push(...evidenceBlockers(verification?.evidence ?? null, orchestrationBackend()));
   let sipUri: string | undefined;
   let availableCreditCents = 0;
-  let channels = verification?.account_channels ?? 0;
+  let channels = 0;
   if (orchestrationBackend() === "cloudflare") {
     if (env.DIALER_CLOUDFLARE_ENABLED !== "true" || !env.DIALER_CLOUDFLARE_URL || !env.DIALER_CLOUDFLARE_SECRET) blockers.push("Configure and enable Cloudflare orchestration before starting sessions.");
     if (verifyProvider && !blockers.length) {
       try {
-        const worker = await cloudflareRequest("/internal/prepare", {});
-        if (!worker.parallelEnabled || worker.fingerprint !== fingerprint) blockers.push("Cloudflare dialing flag or configuration differs from the verified Vercel configuration.");
+        const worker = await cloudflareRequest("/internal/inspect", {});
+        if (!worker.parallelEnabled || worker.fingerprint !== fingerprint) blockers.push("Cloudflare dialing flag or configuration differs from the Vercel configuration.");
+        if (worker.callerName !== env.DIALER_CALLER_NAME) blockers.push("Configure the same DIALER_CALLER_NAME in Vercel and Cloudflare.");
       } catch { blockers.push("Cloudflare orchestration readiness check failed."); }
     }
   }
-  if (verifyProvider && !blockers.length && verification) {
+  if (verifyProvider && !blockers.length) {
     try {
       const client = getTelnyxClient();
       const [application, credential, balance] = await Promise.all([
@@ -58,18 +57,19 @@ export async function parallelReadiness(verifyProvider = false) {
       if (balance.data?.currency !== "USD" || !Number.isFinite(available) || available <= 0) blockers.push("Provider USD available credit cannot cover a calling session.");
       else availableCreditCents = Math.floor(available * 100);
       const profileId = application.data?.outbound?.outbound_voice_profile_id;
-      if (!profileId || profileId !== verification.profile_id) blockers.push("Call Control outbound profile does not match the verified configuration.");
+      if (!profileId) blockers.push("Call Control application has no outbound voice profile.");
       else {
         const profile = await client.outboundVoiceProfiles.retrieve(profileId);
         const profileLimit = profile.data?.concurrent_call_limit;
         const connectionLimit = application.data?.outbound?.channel_limit;
         if (profileLimit == null || profileLimit <= 0 || !connectionLimit || connectionLimit <= 0) blockers.push("Provider profile/connection channel limits are not explicitly verifiable.");
-        else channels = Math.min(channels, profileLimit, connectionLimit);
+        else channels = Math.min(profileLimit, connectionLimit);
+        if (!profile.data?.enabled || !application.data?.active) blockers.push("Provider application or outbound profile is disabled.");
       }
       if (application.data?.webhook_event_url !== config.webhook) blockers.push("The Call Control application's webhook URL differs from this deployment.");
-      if (!credential.data?.sip_username) blockers.push("WebRTC credential has no SIP username.");
+      if (!credential.data?.sip_username || credential.data.expired || (credential.data.expires_at && Date.parse(credential.data.expires_at) <= Date.now())) blockers.push("WebRTC credential has no SIP username.");
       else sipUri = `sip:${credential.data.sip_username}@sip.telnyx.com`;
     } catch (error) { blockers.push(`Provider readiness check failed: ${error instanceof Error ? error.message : "Unknown error"}`); }
   }
-  return { enabled: blockers.length === 0, blockers, fingerprint, verification, channels, sipUri, availableCreditCents };
+  return { enabled: blockers.length === 0, blockers, fingerprint, rateCeilingCents, channels, sipUri, availableCreditCents };
 }

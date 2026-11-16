@@ -13,6 +13,7 @@ export interface Env {
   VERCEL_VOICE_WEBHOOK_URL: string;
   DIALER_PARALLEL_ENABLED: string;
   DIALER_ACCEPTANCE_ENABLED?: string;
+  DIALER_CALLER_NAME?: string;
 }
 export type Session = {
   id: string; mode: 'parallel'|'power'; status: string; controller_id: string;
@@ -34,6 +35,7 @@ export function validateEnv(env: Env) {
     if (!env[name] || (name === 'DIALER_CLOUDFLARE_SECRET' && env[name].length < 32)) throw new Error(`Missing or invalid ${name}`);
   }
   if((env.DIALER_PARALLEL_ENABLED==='true'||env.DIALER_ACCEPTANCE_ENABLED==='true')&&(!env.TELNYX_PARALLEL_CONNECTION_ID||!env.TELNYX_TELEPHONY_CREDENTIAL_ID))throw new Error('Parallel application and WebRTC credential are required');
+  if(env.DIALER_PARALLEL_ENABLED==='true'&&!env.DIALER_CALLER_NAME?.trim())throw new Error('DIALER_CALLER_NAME is required for answered-collision identification');
   for (const name of ['SUPABASE_URL','VERCEL_VOICE_WEBHOOK_URL'] as const) if (new URL(env[name]).protocol !== 'https:') throw new Error(`${name} must use HTTPS`);
   if (!/^\+[1-9]\d{7,14}$/.test(env.TELNYX_FROM_NUMBER)) throw new Error('Invalid caller ID');
 }

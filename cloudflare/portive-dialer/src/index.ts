@@ -42,7 +42,7 @@ export class SessionCoordinator extends DurableObject<Env> {
       }
       if(path==='/internal/inspect') {
         // Read-only configuration comparison: no activation, tick or provider I/O.
-        return Response.json({backend:'cloudflare',fingerprint:await fingerprint(this.env),parallelEnabled:this.env.DIALER_PARALLEL_ENABLED==='true',acceptanceEnabled:this.env.DIALER_ACCEPTANCE_ENABLED==='true'});
+        return Response.json({backend:'cloudflare',fingerprint:await fingerprint(this.env),parallelEnabled:this.env.DIALER_PARALLEL_ENABLED==='true',acceptanceEnabled:this.env.DIALER_ACCEPTANCE_ENABLED==='true',callerName:this.env.DIALER_CALLER_NAME??null});
       }
       if(path==='/internal/prepare') {
         // Rescue an activation lost between Vercel creating a session and delivering its wake.

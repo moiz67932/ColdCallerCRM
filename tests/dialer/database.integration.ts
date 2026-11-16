@@ -44,6 +44,7 @@ test("migrations apply to the existing workstation schema", () => {
   sql(readFileSync("supabase/migrations/202611140002_cloudflare_orchestration.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611150001_parallel_dispatch_safety.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611150002_parallel_acceptance.sql", "utf8"));
+  sql(readFileSync("supabase/migrations/202611160001_regular_parallel.sql", "utf8"));
   assert.equal(sql("select count(*) from public.dial_sessions"), "0");
 });
 test("Power selects by existing priority and advances unanswered calls once", () => {
