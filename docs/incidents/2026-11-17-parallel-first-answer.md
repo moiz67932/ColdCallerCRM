@@ -53,6 +53,7 @@ Colorado recipient hours resolve to America/Denver even when session fallback wa
 ## Validation
 
 - 91 PostgreSQL integration tests passed against a disposable database, including migration reruns, first-answer selection, concurrent answers, exactly one bridge, duplicate/delayed events, Stop, disposition/next batch, operator recovery, final dispatch restrictions, hours/DST, billing and shared usage leases.
+- Two additional database regressions passed: first-answer automatic continuation and Continue-button continuation each create four fresh leads in batch two, with one persistent operator and no duplicate leads.
 - 71 focused application tests passed.
 - 52 Cloudflare Worker tests passed, including four concurrent requests, first-answer dials without AMD, bridge protection and failures, recovery, idempotency and funded hard caps.
 - Application and Worker typechecks passed.

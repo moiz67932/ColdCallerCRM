@@ -136,6 +136,24 @@ test("first-answer winner hangup waits for disposition then continues with the s
  assert.equal(sql(`select operator_call_control_id from public.dial_sessions where id='${s}'`),'operator');
  assert.equal(sql(`select count(*) from public.dial_commands where session_id='${s}' and action='dial_operator'`),'1');
 });
+for(const autoContinue of [true,false])test(`first-answer repeats a full four-line batch with ${autoContinue?'automatic':'button'} continuation`,()=>{
+ setup();const s=start({answerPolicy:'first_answer',autoContinue}),first=attempts(s);
+ sql(`insert into public.leads(id,lead_list_id,phone_number,business_name) values
+  ('next5','list','+12125550105','Next5'),('next6','list','+12125550106','Next6'),
+  ('next7','list','+12125550107','Next7'),('next8','list','+12125550108','Next8')`);
+ event(s,first[0].id,'lead','call.answered');event(s,first[0].id,'lead','call.bridged');
+ for(const item of first)event(s,item.id,'lead','call.hangup',{hangup_cause:'normal_clearing'});
+ invoke('tick',s);assert.equal(sql(`select phase from public.dial_sessions where id='${s}'`),'awaiting_disposition');
+ assert.equal(attempts(s).length,4);
+ sql(`select public.portive_save_disposition('${first[0].id}','${first[0].lead_id}','answered','Completed test conversation',null,null)`);
+ invoke('tick',s);
+ if(!autoContinue){assert.equal(attempts(s).length,4);invoke('continue',s);invoke('tick',s);}
+ const all=attempts(s);assert.equal(all.length,8);
+ assert.equal(sql(`select count(distinct lead_id) from public.call_attempts where dial_session_id='${s}'`),'8');
+ assert.equal(sql(`select count(*) from public.call_attempts where dial_session_id='${s}' and parallel_batch=2 and ended_at is null`),'4');
+ assert.equal(sql(`select count(*) from public.dial_commands where session_id='${s}' and action='dial_operator'`),'1');
+ assert.equal(sql(`select count(*) from public.dial_commands where session_id='${s}' and action='hangup_operator'`),'0');
+});
 test("Stop after browser lease expiry reaches terminal only with operator terminal evidence", () => {
   setup(); const s=invoke("start").id;
   event(s,null,"operator","call.answered",{call_control_id:"operator"});
