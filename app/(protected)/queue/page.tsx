@@ -1,4 +1,5 @@
 "use client";
+import { audioRtp, type AudioRtp } from "@/lib/dialer/rtp";
 /* eslint-disable react-hooks/set-state-in-effect */
 
 import { addDays, format } from "date-fns";
@@ -1836,15 +1837,41 @@ export default function QueuePage() {
     };
   }, [parallelMediaSessionId, parallelMediaDeadline, micPermission]);
 
-  const audioReportedAttempts = useRef(new Set<string>());
+  const audioWinner = parallelAttempts.find(a => a.id === dialSession?.active_call_id && a.was_bridged_to_operator && !a.ended_at)?.id;
+  const audioSessionId = dialSession?.mode === "parallel" ? dialSession.id : null;
+  const [parallelAudioMessage, setParallelAudioMessage] = useState("");
   useEffect(() => {
-    if (dialSession?.mode !== "parallel" || !dialSession.active_call_id) return;
-    const winner=parallelAttempts.find(a=>a.id===dialSession.active_call_id && a.was_bridged_to_operator && !a.ended_at);
-    const audio=remoteAudioRef.current;
-    if (!winner || !audio || audio.paused || audio.readyState<2 || audioReportedAttempts.current.has(winner.id)) return;
-    audioReportedAttempts.current.add(winner.id);
-    void fetch(`/api/dial-sessions/${dialSession.id}/telemetry`, {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({controllerId:sessionStorage.getItem("portive-controller"),attemptId:winner.id,clientAt:Date.now(),event:"operator_audio_available"})});
-  }, [dialSession?.id,dialSession?.mode,dialSession?.active_call_id,parallelAttempts]);
+    const winnerId = audioWinner;
+    if (!audioSessionId || !winnerId) { setParallelAudioMessage(""); return; }
+    let disposed = false, sampling = false, reported = false;
+    let previous: AudioRtp | null = null;
+    const started = Date.now();
+    async function sample() {
+      const peer = webRtcCallRef.current?.peer?.instance, audio = remoteAudioRef.current;
+      if (!peer || sampling || disposed) return;
+      sampling = true;
+      try {
+        const totals = audioRtp(await peer.getStats());
+        if (disposed) return;
+        const receiving = previous !== null && totals.receivedPackets > previous.receivedPackets;
+        const sending = previous !== null && totals.sentPackets > previous.sentPackets;
+        previous = totals;
+        const playing = Boolean(audio && !audio.paused && !audio.muted && audio.volume > 0 && !audio.error);
+        if (receiving && sending && playing) {
+          setParallelAudioMessage("Connected call: audio packets are flowing both ways. Confirm you can hear the other person.");
+          if (!reported) {
+            reported = true;
+            void fetch(`/api/dial-sessions/${audioSessionId}/telemetry`, {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({controllerId:sessionStorage.getItem("portive-controller"),attemptId:winnerId,clientAt:Date.now(),event:"operator_audio_available",rtp:totals,playing,connectionState:peer.connectionState})}).catch(() => {});
+          }
+        } else if (Date.now() - started > 5000) {
+          setParallelAudioMessage(`Connected call audio needs attention: receiving ${receiving ? "yes" : "no"}, sending ${sending ? "yes" : "no"}, speaker playback ${playing ? "active" : "blocked"}. Check your selected speaker/headset.`);
+        }
+      } catch { if (!disposed) setParallelAudioMessage("Unable to read call audio statistics. Check the speaker/headset and softphone connection."); }
+      finally { sampling = false; }
+    }
+    void sample(); const timer = setInterval(() => { void sample(); }, 2000);
+    return () => { disposed = true; clearInterval(timer); };
+  }, [audioSessionId, audioWinner]);
 
   useEffect(() => { notificationHandlerRef.current = handleWebRtcNotification; });
 
@@ -1928,6 +1955,7 @@ export default function QueuePage() {
         onEndCall={hangupOutboundCall}
       />
       <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={silentRingback} onChange={(event) => setSilentRingback(event.target.checked)} />Silent local ringback (carrier early media remains audible)</label>
+      {parallelAudioMessage ? <p role="status" className="text-sm">{parallelAudioMessage}</p> : null}
       {error ? <p className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
       {browserFirstFlow && !runtimeConfig?.telnyxWebrtcCredentialConfigured ? (
         <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">

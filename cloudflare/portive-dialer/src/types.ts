@@ -40,7 +40,7 @@ export function validateEnv(env: Env) {
   if (!/^\+[1-9]\d{7,14}$/.test(env.TELNYX_FROM_NUMBER)) throw new Error('Invalid caller ID');
 }
 export async function fingerprint(env: Env) {
-  const config={connection:env.TELNYX_PARALLEL_CONNECTION_ID,credential:env.TELNYX_TELEPHONY_CREDENTIAL_ID,callerId:env.TELNYX_FROM_NUMBER,webhook:env.VERCEL_VOICE_WEBHOOK_URL,amd:'premium',deadlineMs:1000,orchestrationBackend:'cloudflare'};
+  const config={connection:env.TELNYX_PARALLEL_CONNECTION_ID,credential:env.TELNYX_TELEPHONY_CREDENTIAL_ID,callerId:env.TELNYX_FROM_NUMBER,webhook:env.VERCEL_VOICE_WEBHOOK_URL,amd:'premium',deadlineMs:8000,orchestrationBackend:'cloudflare'};
   const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(Object.entries(config).sort(([a],[b])=>a.localeCompare(b)))));
   return Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('');
 }

@@ -83,6 +83,8 @@ test("parallel migrations apply on top of the Power schema and rerun without los
   sql(readFileSync("supabase/migrations/202611160002_default_calling_policy.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611160003_parallel_exposure_budget.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611170001_parallel_stop_lease.sql", "utf8"));
+  sql(readFileSync("supabase/migrations/202611170002_parallel_amd_delivery.sql", "utf8"));
+  sql(readFileSync("supabase/migrations/202611170003_preserve_amd_collision_cleanup.sql", "utf8"));
 });
 test("Stop after browser lease expiry reaches terminal only with operator terminal evidence", () => {
   setup(); const s=invoke("start").id;
@@ -152,6 +154,37 @@ test("duplicate human events do not duplicate bridge commands", () => {
   event(s,a[0].id,"lead","call.machine.premium.detection.ended",{result:"human_business"},key);
   event(s,a[0].id,"lead","call.machine.premium.detection.ended",{result:"human_business"},key);
   assert.equal(sql("select count(*) from public.dial_commands where action='bridge'"),"1");
+});
+test("delayed carrier answer survives the former 1s cutoff and human AMD bridges exactly once", () => {
+  setup(); const s=start(), a=attempts(s)[0], ev=crypto.randomUUID();
+  sql(`insert into public.workstation_telnyx_webhook_events(event_id,event_type,payload_json,signature_verified) values('${ev}','call.answered','{}',true);
+    select public.portive_parallel_event('${s}','${a.id}','lead','call.answered','{"call_control_id":"${a.id}"}',now()-interval '1.25 seconds','${ev}')`);
+  invoke('tick',s);
+  assert.equal(sql(`select ended_at is null and termination_reason is null from public.call_attempts where id='${a.id}'`),'t');
+  assert.equal(sql(`select classification_deadline_at>now()+interval '5 seconds' from public.call_attempts where id='${a.id}'`),'t');
+  assert.equal(sql(`select count(*) from public.dial_commands where action='bridge'`),'0');
+  event(s,a.id,'lead','call.machine.premium.detection.ended',{result:'human_business'});
+  event(s,a.id,'lead','call.machine.premium.detection.ended',{result:'human_business'});
+  assert.equal(sql(`select count(*) from public.dial_commands where action='bridge'`),'1');
+  assert.equal(sql(`select was_bridged_to_operator from public.call_attempts where id='${a.id}'`),'f');
+  event(s,a.id,'lead','call.bridged');
+  assert.equal(sql(`select was_bridged_to_operator from public.call_attempts where id='${a.id}'`),'t');
+});
+test("early Stop and late AMD cannot resurrect or bridge a canceled prospect", () => {
+  setup(); const s=start(), a=attempts(s)[0];
+  event(s,a.id,'lead','call.answered'); invoke('stop',s);
+  event(s,a.id,'lead','call.machine.premium.detection.ended',{result:'human_business'});
+  assert.equal(sql(`select count(*) from public.dial_commands where action='bridge'`),'0');
+  assert.equal(sql(`select details->>'action' from public.dial_audit_events where event_type='parallel_command_received'`),'stop');
+});
+test("Colorado recipient hours use Denver despite New York fallback and respect campaign boundaries", () => {
+  setup(); sql("update public.leads set state='Colorado'; delete from public.dialer_campaign_calling_policies");
+  assert.equal(sql("select public.portive_calling_hours('first','America/New_York','2026-11-17T14:59:00Z')"),'outside_calling_window');
+  assert.equal(sql("select public.portive_calling_hours('first','America/New_York','2026-11-17T15:14:00Z') is null"),'t');
+  sql("insert into public.dialer_campaign_calling_policies(list_id,jurisdictions,legal_basis,start_minute,end_minute) values('list',array['US-CO'],'Controlled campaign hours',540,1020)");
+  assert.equal(sql("select public.portive_calling_hours('first','America/New_York','2026-11-17T15:14:00Z')"),'outside_calling_window');
+  assert.equal(sql("select public.portive_calling_hours('first','America/New_York','2026-11-17T16:00:00Z') is null"),'t');
+  assert.equal(sql("select public.portive_calling_hours('first','America/New_York','2026-11-18T00:00:00Z')"),'outside_calling_window');
 });
 test("unknown AMD ends the answered call and pauses without inventing a disposition", () => {
   setup(); const s=start(), a=attempts(s); answer(s,a[0].id,"not_sure");

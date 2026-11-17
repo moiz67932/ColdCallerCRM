@@ -1,3 +1,4 @@
+import { premiumAmd } from "../../../lib/dialer/amd";
 import { Database, TelnyxApi } from './adapters';
 import { fingerprint, HttpError, type Command, type Env } from './types';
 import { safeDiagnostic } from '../../../lib/dialer/diagnostics';
@@ -39,7 +40,7 @@ export async function executeCommand(command: Command, env: Env, db: Database, a
         to:operator?s.parallel_options.operatorSipUri:command.parameters.to,
         webhook_url:env.VERCEL_VOICE_WEBHOOK_URL,client_state:state,command_id:command.id,
         timeout_secs:operator?20:s.parallel_options.ringTimeout,time_limit_secs:acceptance?(operator?120:s.parallel_options.maxCallSeconds):s.mode==='parallel'?fundedLimit:s.parallel_options.maxCallSeconds,
-        ...(operator?{}:{answering_machine_detection:'premium'})
+        ...(operator?{}:premiumAmd)
       });
       if(!response.data?.call_control_id) throw new Error('Provider omitted call identity');
       return complete(true,response);

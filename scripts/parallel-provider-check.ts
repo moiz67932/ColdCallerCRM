@@ -9,7 +9,7 @@ import { evidenceBlockers } from "../lib/dialer/parallel-policy";
 async function main() {
   const required = (name: string) => { const value=process.env[name]; if(!value) throw new Error(`Missing ${name}`); return value; };
   const connection=process.env.TELNYX_PARALLEL_CONNECTION_ID || required("TELNYX_CONNECTION_ID"), credential=required("TELNYX_TELEPHONY_CREDENTIAL_ID");
-  const config={connection,credential,callerId:required("TELNYX_FROM_NUMBER"),webhook:`${required("APP_BASE_URL").replace(/\/$/,"")}/api/webhooks/telnyx/voice`,amd:"premium",deadlineMs:1000,...(process.env.DIALER_ORCHESTRATION_BACKEND === "cloudflare" ? {orchestrationBackend:"cloudflare"} : {})};
+  const config={connection,credential,callerId:required("TELNYX_FROM_NUMBER"),webhook:`${required("APP_BASE_URL").replace(/\/$/,"")}/api/webhooks/telnyx/voice`,amd:"premium",deadlineMs:8000,...(process.env.DIALER_ORCHESTRATION_BACKEND === "cloudflare" ? {orchestrationBackend:"cloudflare"} : {})};
   const fingerprint=parallelFingerprint(config);
   const client=new Telnyx({apiKey:required("TELNYX_API_KEY"),maxRetries:0});
   const [application,browser]=await Promise.all([client.callControlApplications.retrieve(connection),client.telephonyCredentials.retrieve(credential)]);

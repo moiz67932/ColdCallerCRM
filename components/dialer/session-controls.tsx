@@ -65,6 +65,8 @@ export function SessionControls(props: Props) {
       setParallelBlockers(data.capabilities?.parallelBlockers ?? ["Provider readiness unavailable."]);
       if(data.session?.mode==='parallel'&&data.session.parallel_options?.budgetVersion==='exposure-v1')setOptions({...defaultParallelOptions,...data.session.parallel_options});
       setListId(data.session?.selected_list_id ?? data.lists?.[0]?.id ?? "");
+      if (data.session?.time_zone) setTimeZone(data.session.time_zone);
+      else if (data.lists?.[0]?.name?.endsWith("_Colorado")) setTimeZone("America/Denver");
       setParallelLocation(data.session?.mode === "parallel" ? data.session.location ?? "" : "");
       if (data.acceptanceAuthorization && !data.session) {
         const approved = data.acceptanceAuthorization;
@@ -182,11 +184,11 @@ export function SessionControls(props: Props) {
       {mode !== "manual" ? (
         <>
           <div className="flex flex-wrap items-center gap-3 text-sm">
-            <label>Lead list <select aria-label="Dial session lead list" className="rounded border bg-background p-2" disabled={Boolean(active) || restricted} value={listId} onChange={(e) => setListId(e.target.value)}>
+            <label>Lead list <select aria-label="Dial session lead list" className="rounded border bg-background p-2" disabled={Boolean(active) || restricted} value={listId} onChange={(e) => { setListId(e.target.value); if (mode === "parallel" && lists.find(l => l.id === e.target.value)?.name.endsWith("_Colorado")) setTimeZone("America/Denver"); }}>
               <option value="">Choose list</option>{lists.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}
             </select></label>
             {mode === "parallel" ? <label>Parallel location (optional) <input aria-label="Parallel location filter" className="rounded border bg-background p-2" placeholder="All locations in selected list" disabled={Boolean(active) || restricted} value={parallelLocation} onChange={(e) => setParallelLocation(e.target.value)} /></label> : null}
-            <label>List local timezone <select aria-label="List local timezone" className="rounded border bg-background p-2" value={timeZone} disabled={Boolean(active) || restricted} onChange={(e) => setTimeZone(e.target.value)}>
+            <label>List fallback timezone <select aria-label="List fallback timezone" className="rounded border bg-background p-2" value={timeZone} disabled={Boolean(active) || restricted} onChange={(e) => setTimeZone(e.target.value)}>
               {["America/New_York", "America/Chicago", "America/Denver", "America/Phoenix", "America/Los_Angeles", "America/Anchorage", "Pacific/Honolulu"].map((zone) => <option key={zone}>{zone}</option>)}
             </select></label>
             {mode === "parallel" ? <label>Maximum lines <select aria-label="Maximum lines" className="rounded border bg-background p-2" value={lines} disabled={Boolean(active) || restricted} onChange={(e) => setLines(Number(e.target.value))}>{[2, 3, 4].map((n) => <option key={n}>{n}</option>)}</select></label> : null}

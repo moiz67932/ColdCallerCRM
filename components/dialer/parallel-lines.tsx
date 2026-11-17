@@ -20,6 +20,7 @@ export function ParallelLines({ attempts, winner, metrics }: { attempts: Paralle
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 250); return () => clearInterval(timer); }, []);
   return <div className="space-y-2 rounded-lg border border-slate-300 p-3 dark:border-slate-700" aria-label="Parallel live calls">
     <p className="text-sm font-medium">Parallel call lines</p>
+    <p className="text-xs text-slate-500">Prospects ring on separate lines. Their ringing is not played through the operator connection; conversation audio starts after a human is classified and bridged.</p>
     <div className="grid gap-2 sm:grid-cols-2">
       {attempts.map((attempt, index) => {
         const connected = attempt.id === winner && attempt.was_bridged_to_operator && !attempt.ended_at;

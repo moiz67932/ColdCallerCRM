@@ -1,3 +1,4 @@
+import { premiumAmd } from "./amd";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { getTelnyxClient } from "@/lib/telnyx/client";
 import { env } from "@/lib/env";
@@ -74,7 +75,7 @@ async function execute(command: ParallelCommand) {
         webhook_url: getVoiceWebhookUrl(), client_state: clientState(operator ? "operator" : "lead"),
         command_id: command.id, timeout_secs: operator ? 20 : session.parallel_options.ringTimeout,
         time_limit_secs: operator ? remaining-28 : session.parallel_options.maxCallSeconds+15,
-        ...(operator ? {} : { answering_machine_detection: "premium" as const }),
+        ...(operator ? {} : premiumAmd),
       });
       const ids = result.data;
       if (!ids?.call_control_id) throw new Error("Provider returned no call-control identifier");

@@ -10,7 +10,7 @@ import { parallelFingerprint } from "./parallel-fingerprint";
 export function parallelConfiguration() {
   return {
     connection: env.TELNYX_PARALLEL_CONNECTION_ID || env.TELNYX_CONNECTION_ID, credential: env.TELNYX_TELEPHONY_CREDENTIAL_ID,
-    callerId: env.TELNYX_FROM_NUMBER, webhook: getVoiceWebhookUrl(), amd: "premium", deadlineMs: 1000, ...(orchestrationBackend() === "cloudflare" ? { orchestrationBackend: "cloudflare" } : {}),
+    callerId: env.TELNYX_FROM_NUMBER, webhook: getVoiceWebhookUrl(), amd: "premium", deadlineMs: 8000, ...(orchestrationBackend() === "cloudflare" ? { orchestrationBackend: "cloudflare" } : {}),
   };
 }
 

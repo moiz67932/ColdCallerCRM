@@ -143,3 +143,10 @@ it('collision TTS cannot exceed its reserved text length',async()=>{
  const a=attempt();work.session.active_call_id='other';await executeCommand(cmd('failure_playback',a),{...e,DIALER_CALLER_NAME:'Company'.repeat(200)},new Database(e),new TelnyxApi(e));
  expect(calls.find(c=>c.url.endsWith('/actions/speak'))?.body.payload.length).toBeLessThanOrEqual(400);
 });
+
+it('premium AMD dial explicitly bounds provider analysis to 5s',async()=>{
+ const c=cmd('dial_lead');await executeCommand(c,e,new Database(e),new TelnyxApi(e));
+ const dial=calls.find(c=>c.url.endsWith('/v2/calls'));
+ expect(dial?.body.answering_machine_detection).toBe('premium');
+ expect(dial?.body.answering_machine_detection_config).toEqual({total_analysis_time_millis:5000});
+});
