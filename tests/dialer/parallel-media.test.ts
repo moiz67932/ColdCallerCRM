@@ -89,3 +89,42 @@ test("a real playing event can recover media, but another stream or ended tracks
   f.speaker.srcObject = f.stream; f.stream.tracks[0].readyState = "ended";
   f.speaker.dispatchEvent(new Event("playing")); assert.equal(media.ready(), false); media.dispose();
 });
+
+class Peer extends EventTarget {
+  connectionState = 'connecting';
+  microphone = Object.assign(new Track(), { kind: 'audio' });
+  getSenders() { return [{ track: this.microphone }]; }
+  connect() { this.connectionState = 'connected'; this.dispatchEvent(new Event('connectionstatechange')); }
+}
+test('parked operator: playback before DTLS stays pending, connected mic permits a silent receiver', async () => {
+  const f = fixture(), peer = new Peer();
+  f.stream.tracks[0].muted = true; // No prospect has been bridged, so no inbound RTP.
+  const media = watchParallelOperatorMedia(f.speaker, f.stream, s => f.statuses.push(s), peer);
+  await settled();
+  assert.equal(media.status(), 'pending');
+  f.speaker.dispatchEvent(new Event('waiting'));
+  assert.equal(media.status(), 'pending');
+  peer.connect();
+  assert.equal(media.ready(), true);
+  assert.deepEqual(f.statuses, ['ready']);
+  f.stream.tracks[0].dispatchEvent(new Event('mute'));
+  assert.equal(media.ready(), true, 'parked silence cannot trigger a hangup');
+  f.speaker.readyState = 1;
+  f.speaker.dispatchEvent(new Event('waiting'));
+  assert.equal(media.ready(), true, 'quiet parked buffering preserves established transport');
+  peer.connectionState = 'disconnected'; peer.dispatchEvent(new Event('connectionstatechange'));
+  assert.equal(media.ready(), false);
+  assert.equal(media.status(), 'unavailable');
+  media.dispose();
+});
+test('connected transport cannot hide missing microphone, stopped remote track or blocked speaker', async () => {
+  for (const loss of ['microphone', 'remote', 'speaker']) {
+    const f = fixture(), peer = new Peer(); peer.connect();
+    const media = watchParallelOperatorMedia(f.speaker, f.stream, s => f.statuses.push(s), peer);
+    await settled(); assert.equal(media.ready(), true);
+    if (loss === 'microphone') peer.microphone.readyState = 'ended';
+    if (loss === 'remote') f.stream.tracks[0].readyState = 'ended';
+    if (loss === 'speaker') f.speaker.muted = true;
+    assert.equal(media.ready(), false, loss); assert.equal(media.status(), 'unavailable'); media.dispose();
+  }
+});

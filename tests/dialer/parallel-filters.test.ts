@@ -43,7 +43,7 @@ function fixture(legacy=false,wakeDown=false){
  };
  const service=load('lib/dialer/service.ts',modules);
  const route=load('app/api/dial-sessions/route.ts',{
-  'next/server':{NextResponse},zod:{z},
+  '@/lib/logger':{logInfo:()=>{}},'next/server':{NextResponse},zod:{z},
   '@/lib/api-auth':{requireApiAuth:async()=>null},
   '@/lib/dialer/service':service,
   '@/lib/http':{jsonError:(error:string,status:number)=>NextResponse.json({error},{status}),formatUnknownError:(e:Error)=>e.message},
@@ -54,7 +54,7 @@ function fixture(legacy=false,wakeDown=false){
   '@/lib/dialer/parallel-policy':{defaultParallelOptions},'@/lib/env':modules['@/lib/env'],
  });
  const quote=load('app/api/dial-sessions/quote/route.ts',{
-  'next/server':{NextResponse},zod:{z},
+  '@/lib/logger':{logInfo:()=>{}},'next/server':{NextResponse},zod:{z},
   '@/lib/api-auth':{requireApiAuth:async()=>null},
   '@/lib/supabase-admin':modules['@/lib/supabase-admin'],
   '@/lib/dialer/parallel-readiness':modules['./parallel-readiness'],

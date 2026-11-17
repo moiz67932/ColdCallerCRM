@@ -20,7 +20,15 @@ export async function handleParallelWebhook(event: TelnyxWebhookPayload, deliver
   }
   if (!state.sessionId) return false;
   // Reuse recording/transcript storage and history identifiers without issuing a second bridge.
-  if (event.data.event_type.startsWith("call.recording.")) return false;
+  if (event.data.event_type.startsWith("call.recording.")) {
+    // The parked operator is never a Manual lead. Only real prospect recordings
+    // may enter the existing recording/history processor.
+    if (state.role !== "operator") return false;
+    const { error } = await db.from("workstation_telnyx_webhook_events")
+      .update({ processed_at: new Date().toISOString(), processing_error: null }).eq("event_id", event.data.id);
+    if (error) throw new Error(error.message);
+    return true;
+  }
   const { data: owner, error: ownerError } = await db.from("dial_sessions").select("orchestration_backend,status").eq("id",state.sessionId).single();
   if (ownerError || !owner) throw new Error("Unable to resolve orchestration ownership");
   const terminal=["stopped","completed"].includes(owner.status);

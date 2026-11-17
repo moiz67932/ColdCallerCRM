@@ -16,6 +16,7 @@ type Props = {
   location?: string;
   onDispatch: (result: SessionCommandResult) => Promise<void>;
   onSession: (session: DialSession | null) => void;
+  onModeChange?: (mode: Mode) => void;
   beforeAdvance: () => Promise<void>;
   onEndCall: () => Promise<void>;
   onSnapshot?: (snapshot: { attempts: ParallelAttempt[]; metrics: Record<string, number | null> }) => void;
@@ -46,6 +47,7 @@ export function SessionControls(props: Props) {
 
   const acceptSession = useCallback((value: DialSession | null) => {
     setSession(value);
+    if (value) current.current.onModeChange?.(value.mode);
     current.current.onSession(value && !["stopped", "completed"].includes(value.status) ? value : null);
   }, []);
 
@@ -84,6 +86,8 @@ export function SessionControls(props: Props) {
     setBusy(true);
     try {
       if (["next", "continue", "skip", "start"].includes(action)) await current.current.beforeAdvance();
+      // The incoming operator INVITE can arrive before this HTTP request returns.
+      if (action === "start" && options?.mode) current.current.onModeChange?.(options.mode as Mode);
       const response = await fetch("/api/dial-sessions", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -131,20 +135,35 @@ export function SessionControls(props: Props) {
     return () => clearInterval(timer);
   }, [command, commandSessionId, commandStatus, commandController, commandMode, recoveryPending, acceptSession, session?.parallel_options?.deadlineAt]);
 
-  const streamSessionId = session?.mode === "parallel" ? session.id : null;
+  const streamSessionId = session?.mode === "parallel" && !["completed", "stopped"].includes(session.status) ? session.id : null;
   useEffect(() => {
     if (!streamSessionId) return;
-    const stream = new EventSource(`/api/dial-sessions/${streamSessionId}/events`);
-    stream.addEventListener("snapshot", (event) => {
-      const snapshot = JSON.parse((event as MessageEvent).data);
-      transportReady.current = true;
-      acceptSession(snapshot.session);
-      current.current.onSnapshot?.(snapshot);
-    });
-    const failed = () => { transportReady.current = false; setError("Realtime session transport disconnected; new dialing is suspended."); };
-    stream.addEventListener("transport_error", failed);
-    stream.onerror = failed;
-    return () => { transportReady.current = false; stream.close(); };
+    let stream: EventSource;
+    let renewal: ReturnType<typeof setTimeout> | undefined;
+    let disposed = false;
+    function connect() {
+      if (disposed) return;
+      stream = new EventSource(`/api/dial-sessions/${streamSessionId}/events`);
+      stream.addEventListener("snapshot", (event) => {
+        const snapshot = JSON.parse((event as MessageEvent).data);
+        clearTimeout(renewal);
+        transportReady.current = true;
+        acceptSession(snapshot.session);
+        current.current.onSnapshot?.(snapshot);
+      });
+      const failed = () => { transportReady.current = false; setError("Realtime session transport disconnected; new dialing is suspended."); };
+      stream.addEventListener("transport_error", failed);
+      stream.onerror = failed;
+      stream.addEventListener("renew", () => {
+        stream.close();
+        // Keep the last confirmed snapshot through a bounded planned reconnect.
+        // A failed reconnect still revokes transport before the 10s browser lease.
+        renewal = setTimeout(failed, 5000);
+        connect();
+      });
+    }
+    connect();
+    return () => { disposed = true; clearTimeout(renewal); transportReady.current = false; stream.close(); };
   }, [acceptSession, streamSessionId]);
 
   const active = session && !["completed", "stopped"].includes(session.status);
@@ -156,7 +175,7 @@ export function SessionControls(props: Props) {
         <span className="text-sm font-medium">Calling mode</span>
         {(["manual", "power", "parallel"] as const).map((item) => (
           <Button key={item} size="sm" variant={mode === item ? "default" : "outline"} disabled={Boolean(active) || !props.idle}
-            onClick={() => setMode(item)}>{item[0].toUpperCase() + item.slice(1)}</Button>
+            onClick={() => { current.current.onModeChange?.(item); setMode(item); }}>{item[0].toUpperCase() + item.slice(1)}</Button>
         ))}
         {session ? <span className="text-sm" role="status">{session.status.replaceAll("_", " ")} · {session.phase.replaceAll("_", " ")}{session.mode === "parallel" ? ` · operator ${session.operator_leg_state}` : ""}{session.reason ? ` · ${session.reason}` : ""}</span> : null}
       </div>
@@ -189,7 +208,7 @@ export function SessionControls(props: Props) {
             <Button size="sm" variant="outline" disabled={!active || !owned || busy || session.status !== "running"} onClick={() => void command("pause")}>Pause</Button>
             <Button size="sm" variant="outline" disabled={restricted || !active || !owned || busy || session.status !== "paused" || !props.ready || session.mode === "parallel" && props.operatorMediaReady !== true} onClick={() => void command("resume")}>Resume</Button>
             <Button size="sm" variant="destructive" disabled={!active || !owned || busy} onClick={() => void command("stop")}>Stop Session</Button>
-            {session?.mode === "parallel" && !restricted ? <Button size="sm" variant="outline" disabled={busy || !owned || !["awaiting_disposition", "ready"].includes(session.phase)} onClick={() => void command("continue")}>Continue next batch</Button> : null}
+            {session?.mode === "parallel" && !restricted ? <Button size="sm" variant="outline" disabled={busy || !owned || session.status !== "running" || !["awaiting_disposition", "ready"].includes(session.phase)} onClick={() => void command("continue")}>Continue next batch</Button> : null}
             <Button size="sm" variant="outline" disabled={!active || !owned || !session.active_call_id || busy || props.idle} onClick={() => void props.onEndCall()}>End Active Call</Button>
             <Button size="sm" variant="outline" disabled={!active || !owned || (session.mode === "parallel" ? session.phase !== "awaiting_disposition" : !props.idle) || busy} onClick={() => void command("skip")}>Skip Lead</Button>
           </div>

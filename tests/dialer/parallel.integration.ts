@@ -82,6 +82,19 @@ test("parallel migrations apply on top of the Power schema and rerun without los
   sql(readFileSync("supabase/migrations/202611160001_regular_parallel.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611160002_default_calling_policy.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611160003_parallel_exposure_budget.sql", "utf8"));
+  sql(readFileSync("supabase/migrations/202611170001_parallel_stop_lease.sql", "utf8"));
+});
+test("Stop after browser lease expiry reaches terminal only with operator terminal evidence", () => {
+  setup(); const s=invoke("start").id;
+  event(s,null,"operator","call.answered",{call_control_id:"operator"});
+  sql(`update public.dial_sessions set heartbeat_at=now()-interval '5 minutes' where id='${s}'`);
+  invoke("stop",s); invoke("tick",s);
+  assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),'stopping');
+  assert.equal(sql(`select ended_at is null from public.dial_sessions where id='${s}'`),'t');
+  event(s,null,"operator","call.hangup",{call_control_id:"operator"}); invoke("tick",s);
+  assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),'stopped');
+  assert.equal(sql(`select ended_at is not null from public.dial_sessions where id='${s}'`),'t');
+  assert.equal(sql(`select count(*) from public.call_attempts where dial_session_id='${s}'`),'0');
 });
 test("no prospects are reserved until both provider answer and browser media acknowledgement", () => {
   setup(); const s=invoke("start").id; invoke("tick",s); assert.equal(sql("select count(*) from public.call_attempts"),"0");

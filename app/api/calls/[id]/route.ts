@@ -139,6 +139,20 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       await startAttemptRecording(id);
       return NextResponse.json({ saved: true });
     }
+    // A late browser notification must never attach a new provider leg to a
+    // historical attempt, even if an older client still has that lead selected.
+    if (attempt.endedAt) {
+      if (payload.telnyxIds || payload.progressState || payload.status) {
+        return jsonError("This call attempt has ended; its provider identity cannot be changed", 409);
+      }
+      return NextResponse.json({ attempt });
+    }
+    if (payload.telnyxIds?.callControlId) {
+      const { data: operator, error } = await getSupabaseAdmin().from("dial_sessions")
+        .select("id").eq("operator_call_control_id", payload.telnyxIds.callControlId).maybeSingle();
+      if (error) throw new Error("Could not verify browser call ownership");
+      if (operator) return jsonError("Parallel operator media belongs to its session, not a lead call", 409);
+    }
     if (attempt.parallelBatch !== null && attempt.parallelBatch !== undefined) {
       if (payload.status === "canceled" && !attempt.endedAt) {
         const { error } = await getSupabaseAdmin().rpc("portive_enqueue", {

@@ -4,6 +4,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 export async function GET(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const auth = await requireApiAuth(request);
@@ -43,8 +44,13 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
           else if (["CHANNEL_ERROR", "TIMED_OUT", "CLOSED"].includes(status)) send("transport_error", { error: `Supabase Realtime ${status}` });
         });
       const ping = setInterval(() => { if (!closed) controller.enqueue(encoder.encode(": keepalive\n\n")); }, 15_000);
-      cleanup = () => { if (closed) return; closed = true; clearInterval(ping); void db.removeChannel(channel); try { controller.close(); } catch { /* Native cancellation already closed the stream. */ } };
+      // Renew before Vercel kills the function. The client treats planned renewal
+      // separately from a lost transport and reconnects without replaying Start.
+      const lifetime = setTimeout(() => { send("renew", {}); cleanup(); }, 240_000);
+      cleanup = () => { if (closed) return; closed = true; clearInterval(ping); clearTimeout(lifetime); request.signal.removeEventListener("abort", cleanup); void db.removeChannel(channel); try { controller.close(); } catch { /* Native cancellation already closed the stream. */ } };
       request.signal.addEventListener("abort", cleanup, { once: true });
+      void snapshot();
+      if (request.signal.aborted) cleanup();
     },
     cancel() { cleanup(); },
   });

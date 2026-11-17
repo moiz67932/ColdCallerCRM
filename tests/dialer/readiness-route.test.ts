@@ -8,7 +8,7 @@ import {z} from 'zod';
 function fixture(authenticated=true) {
  const diagnostics:boolean[]=[];
  const modules:Record<string,unknown>={
- 'next/server':{NextResponse},zod:{z},
+ 'next/server':{NextResponse},zod:{z}, '@/lib/logger':{logInfo:()=>{}},
  '@/lib/api-auth':{requireApiAuth:async()=>authenticated?null:NextResponse.json({error:'Unauthorized'},{status:401})},
  '@/lib/dialer/service':{getCurrentSession:async()=>null,dialerCapabilities:()=>({parallel:true,acceptance:false}),sessionCommand:()=>{throw Error('GET must never create a session');}},
  '@/lib/http':{jsonError:(error:string,status:number)=>NextResponse.json({error},{status}),formatUnknownError:String},

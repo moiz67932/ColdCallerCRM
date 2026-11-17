@@ -148,6 +148,7 @@ type WebRtcCall = {
     telnyxLegId?: string;
   };
   remoteStream?: MediaStream;
+  peer?: { instance?: RTCPeerConnection };
   answer: (params?: { video?: boolean }) => Promise<void> | void;
   hangup: () => Promise<void> | void;
   dtmf?: (digit: string) => Promise<void> | void;
@@ -309,6 +310,14 @@ export default function QueuePage() {
   const [parallelAttempts, setParallelAttempts] = useState<ParallelAttempt[]>([]);
   const [parallelMetrics, setParallelMetrics] = useState<Record<string, number | null>>({});
   const [dialSession, setDialSession] = useState<DialSession | null>(null);
+  const callingModeRef = useRef<"manual" | "power" | "parallel">("manual");
+  const [callingMode, setCallingMode] = useState<"manual" | "power" | "parallel">("manual");
+  const dialSessionRef = useRef<DialSession | null>(null);
+  function acceptDialSession(session: DialSession | null) {
+    dialSessionRef.current = session;
+    if (session) callingModeRef.current = session.mode;
+    setDialSession(session);
+  }
   const [parallelMediaStatus, setParallelMediaStatus] = useState<ParallelMediaStatus>("pending");
   const refreshParallelMediaRef = useRef<() => void>(() => {});
   const [silentRingback, setSilentRingback] = useState(false);
@@ -605,7 +614,7 @@ export default function QueuePage() {
   }
 
   async function logBrowserWebRtcEvent(event: string, data: Record<string, string | number | boolean | null> = {}) {
-    const attemptId = pendingAttemptIdRef.current ?? latestAttempt?.id;
+    const attemptId = callingModeRef.current === "parallel" ? null : pendingAttemptIdRef.current;
     const payload = {
       event,
       activeAttemptId: attemptId ?? null,
@@ -640,7 +649,7 @@ export default function QueuePage() {
       debug?: Record<string, string | number | boolean | null>;
     },
   ) {
-    const attemptId = pendingAttemptIdRef.current ?? latestAttempt?.id;
+    const attemptId = callingModeRef.current === "parallel" ? null : pendingAttemptIdRef.current;
 
     if (!attemptId) {
       return;
@@ -760,17 +769,19 @@ export default function QueuePage() {
       return;
     }
 
-    if (notification.type === "callUpdate" && notification.call && (dialSession?.mode === "parallel" || Boolean(parkedOperatorCallIdRef.current && parkedOperatorCallIdRef.current === getWebRtcCallControlId(notification.call)))) {
+    if (notification.type === "callUpdate" && notification.call && (callingModeRef.current === "parallel" || Boolean(parkedOperatorCallIdRef.current && parkedOperatorCallIdRef.current === getWebRtcCallControlId(notification.call)))) {
       const call = notification.call;
       const controlId = getWebRtcCallControlId(call);
-      if (dialSession?.operator_call_control_id && controlId && controlId !== dialSession.operator_call_control_id) return;
+      const session = dialSessionRef.current;
+      if (session?.operator_call_control_id && controlId && controlId !== session.operator_call_control_id) return;
       if (controlId) parkedOperatorCallIdRef.current = controlId;
       if (call.state === "ringing" && call.direction === "inbound") {
         const key = call.id ?? controlId ?? "operator";
         if (!answeredWebRtcCallIdsRef.current.has(key)) {
           answeredWebRtcCallIdsRef.current.add(key);
           webRtcCallRef.current = call;
-          await call.answer({ video: false });
+          try { await call.answer({ video: false }); }
+          catch { setError("Could not answer the operator connection. Stop the session and reconnect the softphone."); }
         }
       } else if (["active", "answered", "held"].includes(call.state ?? "")) {
         webRtcCallRef.current = call;
@@ -1017,7 +1028,7 @@ export default function QueuePage() {
       const { TelnyxRTC } = await import("@telnyx/webrtc");
       const client = new TelnyxRTC({
         login_token: tokenPayload.loginToken,
-        debug: true,
+        debug: false,
         mediaPermissionsRecovery: {
           enabled: true,
           timeout: 10_000,
@@ -1028,10 +1039,7 @@ export default function QueuePage() {
       telnyxClientRef.current = client;
 
       setWebrtcStatus("registering");
-      await logBrowserWebRtcEvent("webrtc_registration_started", {
-        credentialId: tokenPayload.credentialId ?? null,
-        sipUsername: tokenPayload.sipUsername ?? null,
-      });
+      await logBrowserWebRtcEvent("webrtc_registration_started");
 
       await new Promise<void>((resolve, reject) => {
         const timeout = window.setTimeout(() => {
@@ -1049,12 +1057,10 @@ export default function QueuePage() {
             setWebrtcStatus("ready");
             setUiCallState("browser_ready", "Browser softphone connected.");
             void logBrowserWebRtcEvent("telnyx_ready", {
-              credentialId: tokenPayload.credentialId ?? null,
-              sipUsername: tokenPayload.sipUsername ?? null,
+              credentialConfigured: Boolean(tokenPayload.credentialId),
             });
             void logBrowserWebRtcEvent("telnyx_ready_for_attempt", {
-              credentialId: tokenPayload.credentialId ?? null,
-              sipUsername: tokenPayload.sipUsername ?? null,
+              credentialConfigured: Boolean(tokenPayload.credentialId),
             });
             resolve();
           })
@@ -1137,6 +1143,7 @@ export default function QueuePage() {
   }, [selectedLead?.id]);
 
   useEffect(() => {
+    if (callingModeRef.current === "parallel") return;
     const progressState = latestAttempt?.rawSummaryJson?.progressState;
 
     if (!progressState) {
@@ -1150,6 +1157,7 @@ export default function QueuePage() {
   }, [latestAttempt?.id, latestAttempt?.rawSummaryJson?.progressState]);
 
   useEffect(() => {
+    if (callingModeRef.current === "parallel") return;
     if (!latestAttempt || !["voicemail_detected", "completed", "failed", "canceled"].includes(latestAttempt.status)) {
       return;
     }
@@ -1186,6 +1194,7 @@ export default function QueuePage() {
   }, [latestAttempt, selectedLead, dialSession]);
 
   useEffect(() => {
+    if (callingModeRef.current === "parallel") return;
     if (!latestAttempt?.rawSummaryJson?.browserLegFailed) {
       return;
     }
@@ -1771,15 +1780,21 @@ export default function QueuePage() {
           const connected = webRtcReadyRef.current && micPermission === "granted";
           const ready = connected && Boolean(call && controlId && ["active", "answered", "held"].includes(call.state ?? "") &&
             observed && observed.stream === call.remoteStream && observed.monitor.ready());
+          const persisted = dialSessionRef.current;
+          // Browser answer/DTLS may beat the signed answered webhook. Wait for
+          // provider identity confirmation; do not turn that race into a 409.
+          if (ready && (persisted?.operator_call_control_id !== controlId ||
+            !["answered", "ready", "bridged"].includes(persisted.operator_leg_state ?? ""))) break;
+          if (ready && persisted?.browser_media_ready) break;
           // While the operator is still ringing, the ordinary heartbeat keeps
           // the browser lease alive. It must not claim operator media readiness.
           if (!ready && status === "pending" && connected) break;
           const response = await fetch("/api/dial-sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
             action: ready ? "operator_ready" : "heartbeat", sessionId: parallelMediaSessionId,
-            controllerId: sessionStorage.getItem("portive-controller"), ready, callControlId: controlId,
+            controllerId: sessionStorage.getItem("portive-controller"), ready, callControlId: controlId, media: observed?.monitor.diagnostics(),
           }) });
           const result = await response.json();
-          if (result.session) setDialSession(result.session);
+          if (result.session) acceptDialSession(result.session);
           if (!response.ok || result.recoveryPending) {
             unavailable = true;
             setError(result.warning ?? result.error ?? "Session orchestration unavailable; recovery is pending.");
@@ -1802,13 +1817,13 @@ export default function QueuePage() {
       const controlId = getWebRtcCallControlId(call ?? undefined);
       const audio = remoteAudioRef.current;
       const stream = call?.remoteStream;
-      if (!call || !controlId || !["active", "answered", "held"].includes(call.state ?? "") || !audio || !stream) {
+      if (!call || !controlId || !["active", "answered", "held"].includes(call.state ?? "") || !audio || !stream || !call.peer?.instance) {
         if (observed) { observed.monitor.dispose(); observed = null; changed("unavailable"); }
         return;
       }
       if (observed?.audio !== audio || observed?.stream !== stream) {
         if (observed) { observed.monitor.dispose(); observed = null; changed("unavailable"); }
-        observed = { audio, stream, monitor: watchParallelOperatorMedia(audio, stream, changed) };
+        observed = { audio, stream, monitor: watchParallelOperatorMedia(audio, stream, changed, call.peer?.instance) };
       }
       observed.monitor.ready();
       void acknowledge();
@@ -1902,11 +1917,12 @@ export default function QueuePage() {
 
       <SessionControls
         location={selectedLocation}
+        onModeChange={(mode) => { callingModeRef.current = mode; setCallingMode(mode); setError(null); }}
         ready={webRtcReadyRef.current && micPermission === "granted" && webrtcStatus !== "error"}
         operatorMediaReady={parallelMediaStatus === "pending" ? undefined : parallelMediaStatus === "ready"}
         idle={!webRtcCallRef.current && !calling && !pendingAttemptId}
         onDispatch={startCall}
-        onSession={(session) => { setDialSession(session); if (session?.mode === "parallel") setSilentRingback(Boolean(session.parallel_options?.silentRingback)); }}
+        onSession={(session) => { acceptDialSession(session); if (session?.mode === "parallel") setSilentRingback(Boolean(session.parallel_options?.silentRingback)); }}
         onSnapshot={(snapshot) => { setParallelAttempts(snapshot.attempts); setParallelMetrics(snapshot.metrics); }}
         beforeAdvance={async () => { if (notes !== lastSavedNotes) await saveNote(); }}
         onEndCall={hangupOutboundCall}
@@ -1928,12 +1944,12 @@ export default function QueuePage() {
           Microphone blocked: browser softphone cannot answer or place calls until microphone access is granted.
         </p>
       ) : null}
-      {manualDialState === "failed" && latestAttempt?.answeredAt ? (
+      {callingMode !== "parallel" && manualDialState === "failed" && latestAttempt?.answeredAt ? (
         <p className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
           Lead answered but browser audio was not established cleanly.
         </p>
       ) : null}
-      {manualDialState === "lead_hung_up" ? (
+      {callingMode !== "parallel" && manualDialState === "lead_hung_up" ? (
         <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900">
           Lead hung up.
         </p>

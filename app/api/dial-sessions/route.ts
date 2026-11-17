@@ -8,6 +8,7 @@ import { checkVoiceWebhookReachability } from "@/lib/telnyx/helpers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { parallelReadiness } from "@/lib/dialer/parallel-readiness";
 import { defaultParallelOptions } from "@/lib/dialer/parallel-policy";
+import { logInfo } from "@/lib/logger";
 import { env } from "@/lib/env";
 
 export const runtime = "nodejs";
@@ -45,6 +46,11 @@ const schema = z.object({
   acceptanceGrantId: z.uuid().optional(),
   callControlId: z.string().optional(),
   transportReady: z.boolean().optional(),
+  media: z.object({
+    status: z.enum(["pending", "ready", "unavailable"]), connectionState: z.string().max(30),
+    playbackSucceeded: z.boolean(), paused: z.boolean(), speakerMuted: z.boolean(),
+    volume: z.number(), readyState: z.number(), remoteTracks: z.number(), remoteMuted: z.boolean(),
+  }).optional(),
   options: z.object({
     spendingApproved:z.boolean().optional(),
     sessionSeconds: z.number().int().min(60).max(3600).optional(),
@@ -67,6 +73,9 @@ export async function POST(request: NextRequest) {
       const reachable = await checkVoiceWebhookReachability();
       if (!reachable.reachable) return jsonError(`Voice webhook unreachable: ${reachable.reason}`, 409);
     }
+    if (input.media) logInfo("Parallel operator media check", {
+      sessionId: input.sessionId, action: input.action, ready: input.ready, ...input.media,
+    });
     const result = await sessionCommand(input);
     if (result.session.mode === "power" && !input.ready && result.session.active_call_id && result.session.status === "paused") {
       const { error } = await getSupabaseAdmin().from("dial_sessions").update({
