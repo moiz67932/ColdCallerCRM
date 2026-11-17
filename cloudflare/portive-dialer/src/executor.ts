@@ -1,4 +1,5 @@
-import { premiumAmd } from "../../../lib/dialer/amd";
+import { fundedProspectLimit } from "../../../lib/dialer/funded-call";
+import { prospectAnswerOptions } from "../../../lib/dialer/amd";
 import { Database, TelnyxApi } from './adapters';
 import { fingerprint, HttpError, type Command, type Env } from './types';
 import { safeDiagnostic } from '../../../lib/dialer/diagnostics';
@@ -26,9 +27,9 @@ export async function executeCommand(command: Command, env: Env, db: Database, a
       let fundedLimit: number|undefined;
       if(!acceptance && s.mode==='parallel') {
         const left=Math.floor((Date.parse(s.parallel_options.deadlineAt??'')-Date.now())/1000);
-        const required=command.action==='dial_operator'?28:s.parallel_options.maxCallSeconds+s.parallel_options.ringTimeout+23;
+        const required=command.action==='dial_operator'?28:30+s.parallel_options.ringTimeout+8;
         if(s.parallel_options.budgetVersion!=='exposure-v1'||!Number.isFinite(left)||left<required) throw new Error('Funded session deadline cannot cover another call');
-        fundedLimit=command.action==='dial_operator'?Math.max(1,left-28):s.parallel_options.maxCallSeconds+15;
+        fundedLimit=command.action==='dial_operator'?Math.max(1,left-28):fundedProspectLimit(s.parallel_options.deadlineAt!,s.parallel_options.maxCallSeconds,s.parallel_options.ringTimeout);
       }
       if(command.action==='dial_operator'&&s.status!=='running') throw new Error('Operator dialing suspended');
       if(command.action==='dial_lead'&&(s.status!=='running'||s.active_call_id||!s.browser_media_ready||a?.termination_reason)) return complete(true,{canceledBeforeDispatch:true});
@@ -40,7 +41,7 @@ export async function executeCommand(command: Command, env: Env, db: Database, a
         to:operator?s.parallel_options.operatorSipUri:command.parameters.to,
         webhook_url:env.VERCEL_VOICE_WEBHOOK_URL,client_state:state,command_id:command.id,
         timeout_secs:operator?20:s.parallel_options.ringTimeout,time_limit_secs:acceptance?(operator?120:s.parallel_options.maxCallSeconds):s.mode==='parallel'?fundedLimit:s.parallel_options.maxCallSeconds,
-        ...(operator?{}:premiumAmd)
+        ...(operator?{}:prospectAnswerOptions(s.parallel_options))
       });
       if(!response.data?.call_control_id) throw new Error('Provider omitted call identity');
       return complete(true,response);

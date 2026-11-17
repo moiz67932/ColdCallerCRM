@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { verifyInternal } from '../../../lib/dialer/internal-auth';
 import { Database, TelnyxApi, verifyProvider } from './adapters';
 import { executeCommand } from './executor';
-import { HttpError, fingerprint, validateEnv, type Env, type Work, type Delivery, type Attempt } from './types';
+import { HttpError, fingerprint, validateEnv, type Env, type Work, type Delivery } from './types';
 import { safeDiagnostic } from '../../../lib/dialer/diagnostics';
 
 export function earliestDeadline(deadlines: string[], now=Date.now()) {
@@ -83,7 +83,7 @@ export class SessionCoordinator extends DurableObject<Env> {
       if(body.kind==='event') {
         const event=JSON.parse((body.delivery as Delivery).rawBody);
         if(event.data.event_type==='call.bridged') console.log(JSON.stringify({event:'bridge_confirmed',sessionId,attemptId:body.delivery.attemptId,providerAt:event.data.occurred_at,at:Date.now()}));
-        if(work.session.active_call_id===body.delivery.attemptId && event.data.event_type.startsWith('call.machine.')) console.log(JSON.stringify({event:'winner_claimed',sessionId,attemptId:work.session.active_call_id,at:Date.now()}));
+        if(work.session.active_call_id===body.delivery.attemptId && (event.data.event_type==='call.answered'||event.data.event_type.startsWith('call.machine.'))) console.log(JSON.stringify({event:'winner_claimed',sessionId,attemptId:work.session.active_call_id,at:Date.now()}));
       }
       operation='execute_or_reconcile';
       await this.run(work);

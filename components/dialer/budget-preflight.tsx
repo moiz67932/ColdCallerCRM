@@ -11,16 +11,16 @@ export function BudgetPreflight(p:{listId:string;parallelLocation?:string;timeZo
  const {listId,parallelLocation,timeZone,lines,options,sessionId,onReady,onBlockers}=p;
  useEffect(()=>{
   if(!listId){onReady(false);return;}
-  let closed=false,next:ReturnType<typeof setTimeout>|undefined,poll:ReturnType<typeof setTimeout>|undefined,failures=0;const abort=new AbortController();
+  let closed=false,next:ReturnType<typeof setTimeout>|undefined,poll:ReturnType<typeof setTimeout>|undefined,failures=0,retryAfterMs=0;const abort=new AbortController();
   onReady(false);
   async function refresh(){try{
    const params=new URLSearchParams({listId,...(parallelLocation?{parallelLocation}:{}),timeZone,lines:String(lines),maxCallSeconds:String(options.maxCallSeconds),sessionSeconds:String(options.sessionSeconds??options.maxCallSeconds+options.ringTimeout+60),ringTimeout:String(options.ringTimeout),maxSpendCents:String(options.maxSpendCents),...(sessionId?{sessionId}:{}),...(nonce?{fresh:'true'}:{})});
-   const response=await fetch('/api/dial-sessions/quote?'+params,{cache:'no-store',signal:abort.signal});const d=await response.json();if(closed)return;if(!response.ok)throw Error(d.error);
-   failures=0;setData(d);setCapacityExpired(!d.capacity||Date.parse(d.capacity.expiresAt)<=Date.now());setError('');onBlockers(d.blockers);onReady(Boolean(d.quote)&&d.shortfallCents===0&&d.blockers.length===0&&d.eligibility?.eligible>0&&(d.pricingMode!=='owner-provisional'||options.spendingApproved===true));
+   const response=await fetch('/api/dial-sessions/quote?'+params,{cache:'no-store',signal:abort.signal});const d=await response.json();if(closed)return;if(!response.ok){retryAfterMs=Math.max(0,Number(response.headers.get('Retry-After')??d.retryAfterSeconds??0)*1000);throw Error(d.error);}
+   failures=0;retryAfterMs=0;setData(d);setCapacityExpired(!d.capacity||Date.parse(d.capacity.expiresAt)<=Date.now());setError('');onBlockers(d.blockers);onReady(Boolean(d.quote)&&d.shortfallCents===0&&d.blockers.length===0&&d.eligibility?.eligible>0&&(d.pricingMode!=='owner-provisional'||options.spendingApproved===true));
    if(next)clearTimeout(next);
    if(d.eligibility?.eligible===0&&d.nextWindow?.at){const delay=Date.parse(d.nextWindow.at)-Date.now()+300;if(delay>0&&delay<2147483647)next=setTimeout(refresh,delay);}
   }catch(e){if(!closed){failures++;setError(e instanceof Error?e.message:'Cost preflight unavailable');onReady(false);}}
-  finally{if(!closed){if(poll)clearTimeout(poll);poll=setTimeout(refresh,Math.min(120000,15000*2**Math.min(failures,3)));}}}
+  finally{if(!closed){if(poll)clearTimeout(poll);poll=setTimeout(refresh,Math.max(retryAfterMs,Math.min(120000,45000*2**Math.min(failures,2)))*(1+Math.random()*0.1));}}}
   const debounce=setTimeout(refresh,350);
   return()=>{closed=true;abort.abort();clearTimeout(debounce);if(poll)clearTimeout(poll);if(next)clearTimeout(next);};
  },[listId,parallelLocation,timeZone,lines,options,sessionId,nonce,onReady,onBlockers]);

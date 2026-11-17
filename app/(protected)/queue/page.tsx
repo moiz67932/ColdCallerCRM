@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { sendWebRtcDigit, silenceLocalRingback } from "@/lib/dialer/media";
 import { watchParallelOperatorMedia, type ParallelMediaStatus } from "@/lib/dialer/parallel-media";
+import { ParallelRingCue } from "@/components/dialer/parallel-ring-cue";
 import { ParallelLines } from "@/components/dialer/parallel-lines";
 import { SessionControls } from "@/components/dialer/session-controls";
 import type { DialSession, SessionCommandResult, ParallelAttempt } from "@/lib/dialer/types";
@@ -1759,7 +1760,7 @@ export default function QueuePage() {
     return () => { canceled = true; };
   }, [dialSession?.active_call_id]);
 
-  const parallelMediaSessionId = dialSession?.mode === "parallel" && dialSession.status === "running" ? dialSession.id : null;
+  const parallelMediaSessionId = dialSession?.mode === "parallel" && ["running", "paused"].includes(dialSession.status) ? dialSession.id : null;
   const parallelMediaDeadline = Date.parse(String(dialSession?.parallel_options?.deadlineAt ?? ""));
   useEffect(() => {
     if (!parallelMediaSessionId) { setParallelMediaStatus("pending"); return; }
@@ -1955,6 +1956,7 @@ export default function QueuePage() {
         onEndCall={hangupOutboundCall}
       />
       <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={silentRingback} onChange={(event) => setSilentRingback(event.target.checked)} />Silent local ringback (carrier early media remains audible)</label>
+      {callingMode === "parallel" ? <ParallelRingCue attempts={parallelAttempts} winner={dialSession?.active_call_id} /> : null}
       {parallelAudioMessage ? <p role="status" className="text-sm">{parallelAudioMessage}</p> : null}
       {error ? <p className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
       {browserFirstFlow && !runtimeConfig?.telnyxWebrtcCredentialConfigured ? (

@@ -22,7 +22,7 @@ export async function GET(request:NextRequest){
    db.rpc('portive_parallel_eligibility',{...parallelLeadFilters(q),p_timezone:q.timeZone}),
    db.rpc('portive_next_calling_window',{p_list:q.listId,p_timezone:q.timeZone}),
    db.rpc('portive_budget_status',{p_session:request.nextUrl.searchParams.get('sessionId')??null}),
-   r.availableCreditCents>0?dailyHeadroom(r.dailyLimitCents).catch(e=>{throw new Error(`Daily headroom: ${safeDiagnostic(e).message}`);}):Promise.resolve({cents:0,observedCents:0,scope:'unavailable'}),
+   r.availableCreditCents>0?dailyHeadroom(r.dailyLimitCents):Promise.resolve({cents:0,observedCents:0,scope:'unavailable'}),
   ]);
   const blockers=[...r.blockers];if(eligibility.error)blockers.push(eligibility.error.message);if(next.error)blockers.push('Apply exposure-budget migration for next-window predictions.');
   operation='budget_quote';
@@ -33,5 +33,5 @@ export async function GET(request:NextRequest){
    availableCreditCents:r.availableCreditCents,dailyHeadroomCents:funding.cents,dailyUsageScope:funding.scope,
    eligibility:eligibility.data,nextWindow:next.data,billing:billing.data,
    warnings:r.budget.warnings??[],pricingMode:r.budget.profile?.pricingMode??'verified',pricingSource:r.budget.profile?.source??null,capacity:r.budget.capacity,blockers});
- }catch(e){live=null;const diagnostic=safeDiagnostic(e,Object.values(process.env));console.error(JSON.stringify({event:'parallel_quote_failed',operation,...diagnostic}));return NextResponse.json({error:diagnostic.message,operation},{status:503});}
+ }catch(e){live=null;const diagnostic=safeDiagnostic(e,Object.values(process.env));console.error(JSON.stringify({event:'parallel_quote_failed',operation,...diagnostic}));const failure=e as {retryAfterSeconds?:number;status?:number};const delay=failure.retryAfterSeconds;return NextResponse.json({error:diagnostic.message,operation,...(delay?{retryAfterSeconds:delay}:{})},{status:failure.status===429?429:503,...(delay?{headers:{'Retry-After':String(delay)}}:{})});}
 }

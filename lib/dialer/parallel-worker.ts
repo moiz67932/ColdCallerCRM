@@ -1,4 +1,5 @@
-import { premiumAmd } from "./amd";
+import { fundedProspectLimit } from "./funded-call";
+import { prospectAnswerOptions } from "./amd";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { getTelnyxClient } from "@/lib/telnyx/client";
 import { env } from "@/lib/env";
@@ -68,14 +69,14 @@ async function execute(command: ParallelCommand) {
     if (command.action === "dial_operator" || command.action === "dial_lead") {
       const operator = command.action === "dial_operator";
       const remaining=Math.floor((Date.parse(session.parallel_options.deadlineAt??'')-Date.now())/1000);
-      if(session.parallel_options.budgetVersion!=='exposure-v1'||!Number.isFinite(remaining)||remaining<(operator?28:session.parallel_options.maxCallSeconds+session.parallel_options.ringTimeout+23))throw Error('Funded session deadline cannot cover another call');
+      if(session.parallel_options.budgetVersion!=='exposure-v1'||!Number.isFinite(remaining)||remaining<(operator?28:30+session.parallel_options.ringTimeout+8))throw Error('Funded session deadline cannot cover another call');
       const result = await client.calls.dial({
         connection_id: env.TELNYX_PARALLEL_CONNECTION_ID || env.TELNYX_CONNECTION_ID!, from: env.TELNYX_FROM_NUMBER!,
         to: operator ? session.parallel_options.operatorSipUri : command.parameters.to,
         webhook_url: getVoiceWebhookUrl(), client_state: clientState(operator ? "operator" : "lead"),
         command_id: command.id, timeout_secs: operator ? 20 : session.parallel_options.ringTimeout,
-        time_limit_secs: operator ? remaining-28 : session.parallel_options.maxCallSeconds+15,
-        ...(operator ? {} : premiumAmd),
+        time_limit_secs: operator ? remaining-28 : fundedProspectLimit(session.parallel_options.deadlineAt,session.parallel_options.maxCallSeconds,session.parallel_options.ringTimeout),
+        ...(operator ? {} : prospectAnswerOptions(session.parallel_options)),
       });
       const ids = result.data;
       if (!ids?.call_control_id) throw new Error("Provider returned no call-control identifier");

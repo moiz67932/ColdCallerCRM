@@ -121,7 +121,7 @@ export function SessionControls(props: Props) {
     if (!commandSessionId || ["completed", "stopped"].includes(commandStatus ?? "") || commandController !== controller.current) return;
     const timer = setInterval(() => {
       const deadline = Date.parse(String(session?.parallel_options?.deadlineAt ?? ""));
-      if (commandMode === "parallel" && (commandStatus !== "running" || recoveryPending || Number.isFinite(deadline) && Date.now() >= deadline)) {
+      if (commandMode === "parallel" && (!["running", "paused"].includes(commandStatus ?? "") || recoveryPending || Number.isFinite(deadline) && Date.now() >= deadline)) {
         // Observe durable recovery without extending a lease or waking the Worker.
         void fetch("/api/dial-sessions", { cache: "no-store" }).then(async r => {
           if (r.ok) {
@@ -133,7 +133,7 @@ export function SessionControls(props: Props) {
       }
       const action = commandMode === "parallel" ? "heartbeat" : commandStatus === "running" && current.current.idle ? "next" : "heartbeat";
       void command(action);
-    }, commandMode === "parallel" && (commandStatus !== "running" || recoveryPending) ? 15000 : 2500);
+    }, commandMode === "parallel" && (!["running", "paused"].includes(commandStatus ?? "") || recoveryPending) ? 15000 : 2500);
     return () => clearInterval(timer);
   }, [command, commandSessionId, commandStatus, commandController, commandMode, recoveryPending, acceptSession, session?.parallel_options?.deadlineAt]);
 
@@ -195,7 +195,7 @@ export function SessionControls(props: Props) {
             <label className="flex items-center gap-2"><input type="checkbox" checked={reviewed} disabled={Boolean(active)} onChange={(e) => setReviewed(e.target.checked)} />I reviewed this list’s eligibility, DNC screening and local calling restrictions.</label>
           </div>
           {mode === "parallel" ? <>
-            {restricted ? <p role="status" className="text-sm text-amber-700">Restricted acceptance: one batch, no retry or resume, 120-second operator limit. {acceptance ? `Only ${acceptance.destinations.map(d=>`${d.phone_number} (${d.time_zone})`).join(", ")}; budget $${(acceptance.max_spend_cents/100).toFixed(2)}; authorization expires ${acceptance.expires_at}.` : "Use Stop after the controlled conversation and reconcile all legs."}</p> : parallelBlockers.length ? <div role="status" className="text-sm text-amber-700 dark:text-amber-300"><p>Parallel technical blockers:</p><ul className="list-inside list-disc">{parallelBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div> : <p className="text-sm text-green-600">Provider capacity, operator connection and credit are checked at Start and Resume.</p>}
+            {restricted ? <p role="status" className="text-sm text-amber-700">Restricted acceptance: one batch, no retry or resume, 120-second operator limit. {acceptance ? `Only ${acceptance.destinations.map(d=>`${d.phone_number} (${d.time_zone})`).join(", ")}; budget $${(acceptance.max_spend_cents/100).toFixed(2)}; authorization expires ${acceptance.expires_at}.` : "Use Stop after the controlled conversation and reconcile all legs."}</p> : parallelBlockers.length ? <div role="status" className="text-sm text-amber-700 dark:text-amber-300"><p>Parallel technical blockers:</p><ul className="list-inside list-disc">{parallelBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div> : <p className="text-sm text-green-600">The first answer connects immediately, including IVR or voicemail. Other lines are canceled. Provider capacity, operator connection and credit are checked at Start and Resume.</p>}
             <div className="flex flex-wrap gap-3 text-sm">
               {([['ringTimeout','Ring timeout (seconds)',15,120],['maxCallSeconds','Maximum call seconds',30,1800],['batchDelaySeconds','Batch delay (seconds)',0,60],['attemptLimit','Attempt limit',1,500],['maxSpendCents','Maximum spend (cents)',1,100000]] as const).map(([key,label,min,max]) => <label key={key}>{label}<input className="ml-2 w-20 rounded border bg-background p-1" type="number" min={min} max={max} value={options[key]} disabled={Boolean(active) || restricted} onChange={(event) => setOptions((current) => ({ ...current, ...(key==="maxSpendCents"?{spendingApproved:false}:{}), [key]: Number(event.target.value), ...(["maxCallSeconds","ringTimeout"].includes(key)?{sessionSeconds:Math.max(current.sessionSeconds??0,(key==="maxCallSeconds"?Number(event.target.value):current.maxCallSeconds)+(key==="ringTimeout"?Number(event.target.value):current.ringTimeout)+60)}:{}) }))} /></label>)}
               <label><input type="checkbox" checked={options.autoContinue} disabled={Boolean(active) || restricted} onChange={(event) => setOptions((current) => ({ ...current, autoContinue: event.target.checked }))} /> Automatically continue after saved disposition</label>

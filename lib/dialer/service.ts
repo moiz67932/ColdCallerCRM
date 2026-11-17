@@ -63,7 +63,7 @@ export async function sessionCommand(input: {
     if (input.action === "resume" && existing?.parallel_options?.fingerprint !== readiness?.fingerprint) throw new Error("Provider configuration changed; stop and reconcile this session before starting a new one");
     if (starting && readiness!.channels < (input.maxLines ?? existing?.max_lines ?? 4) + 1) throw new Error("Provider channels must cover each prospect line and the operator leg");
     if(input.action==='start'&&readiness!.budget.profile?.pricingMode==='owner-provisional'&&input.options?.spendingApproved!==true)throw Error('Accept the bounded session spending limit before Start');
-    const funding=input.action==='start'?await dailyHeadroom(readiness!.dailyLimitCents):null;
+    const funding=input.action==='start'?await dailyHeadroom(readiness!.dailyLimitCents,{fresh:true}):null;
     const pricedOptions=input.options??existing?.parallel_options;
     const quote=input.action==='start'&&readiness!.budget.profile?budgetQuote(readiness!.budget.profile,pricedOptions as unknown as Parameters<typeof budgetQuote>[1],input.maxLines??existing?.max_lines??4):null;
     if(quote&&quote.shortfallCents)throw Error(`Session requires ${quote.requiredCents} cents; increase maximum spend by ${quote.shortfallCents} cents or reduce duration/lines`);

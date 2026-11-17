@@ -6,7 +6,8 @@ export function parallelStatusLabel(state: string, connected: boolean) {
   if (connected) return "Connected to Operator";
   if (state === "ringing" || state === "initiating" || state === "reserved") return "Ringing";
   if (state === "carrier_answered") return "Classifying Answer";
-  if (state === "human_detected" || state === "bridging") return "Human Answered";
+  if (state === "human_detected") return "Human Answered";
+  if (state === "bridging") return "Answer received · connecting";
   if (state === "machine_detected") return "Voicemail";
   if (state === "no_answer") return "No Answer";
   if (state === "canceled_after_winner") return "Canceled After Winner";
@@ -20,7 +21,7 @@ export function ParallelLines({ attempts, winner, metrics }: { attempts: Paralle
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 250); return () => clearInterval(timer); }, []);
   return <div className="space-y-2 rounded-lg border border-slate-300 p-3 dark:border-slate-700" aria-label="Parallel live calls">
     <p className="text-sm font-medium">Parallel call lines</p>
-    <p className="text-xs text-slate-500">Prospects ring on separate lines. Their ringing is not played through the operator connection; conversation audio starts after a human is classified and bridged.</p>
+    <p className="text-xs text-slate-500">Prospects ring on separate lines. Their ringing is not played through the operator connection; the first answered line connects to you, including an automated greeting or voicemail.</p>
     <div className="grid gap-2 sm:grid-cols-2">
       {attempts.map((attempt, index) => {
         const connected = attempt.id === winner && attempt.was_bridged_to_operator && !attempt.ended_at;

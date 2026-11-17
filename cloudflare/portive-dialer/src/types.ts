@@ -20,7 +20,7 @@ export type Session = {
   active_call_id: string|null; operator_terminal_at?: string|null; operator_call_control_id: string|null;
   browser_media_ready: boolean; orchestration_backend: string;
   acceptance_grant_id?: string|null;
-  parallel_options: { fingerprint: string; operatorSipUri: string; ringTimeout: number; maxCallSeconds: number; budgetVersion?:string; sessionSeconds?:number; deadlineAt?:string };
+  parallel_options: { answerPolicy?: "first_answer"|"confirmed_human"; fingerprint: string; operatorSipUri: string; ringTimeout: number; maxCallSeconds: number; budgetVersion?:string; sessionSeconds?:number; deadlineAt?:string };
 };
 export type Attempt = {
   id: string; ended_at: string|null; answered_at: string|null; termination_reason: string|null;

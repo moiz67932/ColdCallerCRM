@@ -53,12 +53,13 @@ const schema = z.object({
   }).optional(),
   options: z.object({
     spendingApproved:z.boolean().optional(),
+    answerPolicy:z.enum(["first_answer","confirmed_human"]).default("first_answer"),
     sessionSeconds: z.number().int().min(60).max(3600).optional(),
     ringTimeout: z.number().int().min(15).max(120), maxCallSeconds: z.number().int().min(30).max(1800),
     batchDelaySeconds: z.number().int().min(0).max(60), attemptLimit: z.number().int().min(1).max(500),
     maxSpendCents: z.number().int().min(1).max(100000), autoContinue: z.boolean(),
     autoRefill: z.literal(false), silentRingback: z.boolean(),
-  }).default(defaultParallelOptions),
+  }).default({...defaultParallelOptions,answerPolicy:"first_answer"}),
 });
 
 export async function POST(request: NextRequest) {
@@ -86,5 +87,9 @@ export async function POST(request: NextRequest) {
     }
     if (input.action === "stop" || result.session.status === "stopping") result.session = await stopSession(result.session);
     return NextResponse.json(result);
-  } catch (error) { return jsonError(formatUnknownError(error), 409); }
+  } catch (error) {
+    const failure=error as {status?:number;retryAfterSeconds?:number};
+    if(failure.status===429&&failure.retryAfterSeconds)return NextResponse.json({error:formatUnknownError(error),retryAfterSeconds:failure.retryAfterSeconds},{status:429,headers:{"Retry-After":String(failure.retryAfterSeconds)}});
+    return jsonError(formatUnknownError(error),409);
+  }
 }

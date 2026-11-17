@@ -7,11 +7,11 @@ import {Database,TelnyxApi,verifyProvider} from '../src/adapters';
 import {executeCommand} from '../src/executor';
 import {signInternal,verifyInternal} from '../../../lib/dialer/internal-auth';
 const e=env as unknown as Env;
-let calls:Array<{url:string,body:any}>,work:Work,commands:Command[],spy:ReturnType<typeof vi.spyOn>;
+let calls:Array<{url:string,body:Record<string,unknown>}>,work:Work,commands:Command[],spy:ReturnType<typeof vi.spyOn>;
 const id=()=>crypto.randomUUID();
 function attempt(){return {id:id(),ended_at:null as string|null,answered_at:null as string|null,termination_reason:null as string|null,answer_classification:'unknown',telnyx_call_control_id:'prospect' as string|null,telnyx_agent_call_control_id:null as string|null};}
 function cmd(action:string,a=attempt()):Command{return {id:id(),session_id:work.session.id,attempt_id:a.id,action,parameters:{to:'+12125550101'},session:work.session,attempt:a};}
-async function request(body:any,headers?:Record<string,string>){const path=`/internal/session/${work.session.id}`,raw=JSON.stringify(body);return worker.fetch(new Request('https://worker.example'+path,{method:'POST',body:raw,headers:headers??await signInternal(e.DIALER_CLOUDFLARE_SECRET,path,raw)}),e) as Promise<Response>;}
+async function request(body:unknown,headers?:Record<string,string>){const path=`/internal/session/${work.session.id}`,raw=JSON.stringify(body);return worker.fetch(new Request('https://worker.example'+path,{method:'POST',body:raw,headers:headers??await signInternal(e.DIALER_CLOUDFLARE_SECRET,path,raw)}),e) as Promise<Response>;}
 async function delivery(){
  const rawBody=JSON.stringify({data:{id:id(),event_type:'call.machine.premium.detection.ended',occurred_at:new Date().toISOString(),payload:{result:'human_business'}}});
  const pkcs=Uint8Array.from(('302e020100300506032b657004220420'+'9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60').match(/../g)!,b=>parseInt(b,16));
@@ -21,7 +21,7 @@ async function delivery(){
 }
 beforeEach(async()=>{
  calls=[];commands=[];work={session:{id:id(),mode:'parallel',status:'running',controller_id:id(),active_call_id:null,operator_call_control_id:'operator',browser_media_ready:true,orchestration_backend:'cloudflare',parallel_options:{fingerprint:await fingerprint(e),operatorSipUri:'sip:operator@sip.telnyx.com',ringTimeout:30,maxCallSeconds:300,budgetVersion:"exposure-v1",sessionSeconds:600,deadlineAt:new Date(Date.now()+600000).toISOString()}},commands:[],deadlines:[new Date(Date.now()+10000).toISOString()]};
- spy=vi.spyOn(globalThis,'fetch').mockImplementation(async(input:any,init:any)=>{const url=String(input),body=init?.body?JSON.parse(init.body):{};calls.push({url,body});if(url.endsWith('portive_orchestration_work')||url.endsWith('portive_cloudflare_event')){const r={...work,commands};commands=[];return Response.json(r);}if(url.endsWith('portive_orchestration_authorize'))return Response.json({allowed:true});if(url.includes('/rest/v1/'))return Response.json(null);if(url.includes('/v2/'))return Response.json({data:{call_control_id:id(),is_alive:true}});throw Error('Unexpected network');});
+ spy=vi.spyOn(globalThis,'fetch').mockImplementation(async(input,init)=>{const url=String(input),body=init?.body?JSON.parse(String(init.body)):{};calls.push({url,body});if(url.endsWith('portive_orchestration_work')||url.endsWith('portive_cloudflare_event')){const r={...work,commands};commands=[];return Response.json(r);}if(url.endsWith('portive_orchestration_authorize'))return Response.json({allowed:true});if(url.includes('/rest/v1/'))return Response.json(null);if(url.includes('/v2/'))return Response.json({data:{call_control_id:id(),is_alive:true}});throw Error('Unexpected network');});
 });
 afterEach(()=>vi.restoreAllMocks());
 it('logs the failing RPC and sanitized SQLSTATE when terminal hold permissions fail',async()=>{
@@ -39,14 +39,14 @@ it('verifies original provider signature and preserves exact raw body',async()=>
 it('rejects tampered provider payload despite valid internal HMAC',async()=>{const b=await delivery();b.delivery.rawBody+=' ';expect((await request(b)).status).toBe(401);expect(calls).toHaveLength(0);});
 it('rejects expired provider signatures',async()=>{expect(await verifyProvider('{}','invalid','1',e.TELNYX_PUBLIC_KEY)).toBe(false);});
 it('keeps secrets out of public responses',async()=>{const r=await worker.fetch(new Request('https://worker.example/health'),e);const b=await r.text();expect(b).not.toContain(e.DIALER_CLOUDFLARE_SECRET);expect(b).not.toContain(e.TELNYX_API_KEY);});
-it('launches four prospect requests concurrently',async()=>{let active=0,peak=0;const releases:Array<()=>void>=[];spy.mockImplementation(async(input:any)=>{if(String(input).endsWith('/v2/calls')){active++;peak=Math.max(peak,active);await new Promise<void>(r=>releases.push(r));active--;return Response.json({data:{call_control_id:id()}});}return Response.json({allowed:true});});const result=Promise.all([1,2,3,4].map(()=>executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e))));await vi.waitFor(()=>expect(peak).toBe(4));releases.forEach(r=>r());await result;});
+it('launches four prospect requests concurrently',async()=>{let active=0,peak=0;const releases:Array<()=>void>=[];spy.mockImplementation(async(input)=>{if(String(input).endsWith('/v2/calls')){active++;peak=Math.max(peak,active);await new Promise<void>(r=>releases.push(r));active--;return Response.json({data:{call_control_id:id()}});}return Response.json({allowed:true});});const result=Promise.all([1,2,3,4].map(()=>executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e))));await vi.waitFor(()=>expect(peak).toBe(4));releases.forEach(r=>r());await result;});
 it('bridges the claimed live winner with provider duplicate-bridge protection',async()=>{const a=attempt();work.session.active_call_id=a.id;commands=[cmd('bridge',a)];expect((await request(await delivery())).status).toBe(200);const b=calls.find(c=>c.url.endsWith('/actions/bridge'))!;expect(b.body.prevent_double_bridge).toBe(true);expect(b.body.park_after_unbridge).toBe('self');expect(b.body.call_control_id_to_bridge_with).toBe('prospect');});
 it('rejects a bridge for a losing attempt',async()=>{await executeCommand(cmd('bridge'),e,new Database(e),new TelnyxApi(e));expect(calls.some(c=>c.url.endsWith('/actions/bridge'))).toBe(false);expect(calls.some(c=>c.body.p_ok===false)).toBe(true);});
 it('routes collision to explanation without disconnecting operator',async()=>{const a=attempt();a.answered_at=new Date().toISOString();a.termination_reason='answer_collision';a.answer_classification='human';work.session.active_call_id='winner';await executeCommand(cmd('hangup',a),e,new Database(e),new TelnyxApi(e));expect(calls.some(c=>c.url.endsWith('portive_answer_collision'))).toBe(true);expect(calls.some(c=>c.url.endsWith('/prospect/actions/hangup'))).toBe(false);expect(calls.some(c=>c.url.endsWith('/operator/actions/hangup'))).toBe(false);});
 it('hangs up voicemail independently without claiming the operator',async()=>{const a=attempt();a.answer_classification='machine';a.answered_at=new Date().toISOString();a.termination_reason='machine_detected';await executeCommand(cmd('hangup',a),e,new Database(e),new TelnyxApi(e));expect(calls.some(c=>c.url.endsWith('portive_answer_collision'))).toBe(false);expect(calls.some(c=>c.url.endsWith('/actions/hangup'))).toBe(true);});
 it('defers unresolved identity without replacement dial',async()=>{const a=attempt();a.telnyx_call_control_id=null;await executeCommand(cmd('hangup',a),e,new Database(e),new TelnyxApi(e));expect(calls.some(c=>c.body.p_defer===true)).toBe(true);expect(calls.some(c=>c.url.includes('/v2/'))).toBe(false);});
-it('marks provider timeouts uncertain without retrying dial',async()=>{spy.mockImplementation(async(input:any,init:any)=>{calls.push({url:String(input),body:init?.body?JSON.parse(init.body):{}});if(String(input).includes('/v2/'))throw new DOMException('timeout','TimeoutError');return Response.json({allowed:true});});await executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e));expect(calls.filter(c=>c.url.endsWith('/v2/calls'))).toHaveLength(1);expect(calls.some(c=>c.body.p_ok===false&&c.body.p_status===0)).toBe(true);});
-it('reports bridge failure to SQL cleanup without replacement call',async()=>{const a=attempt();work.session.active_call_id=a.id;spy.mockImplementation(async(input:any,init:any)=>{calls.push({url:String(input),body:init?.body?JSON.parse(init.body):{}});return String(input).includes('/v2/')?new Response('',{status:422}):Response.json({allowed:true});});await executeCommand(cmd('bridge',a),e,new Database(e),new TelnyxApi(e));expect(calls.some(c=>c.body.p_ok===false&&c.body.p_status===422)).toBe(true);});
+it('marks provider timeouts uncertain without retrying dial',async()=>{spy.mockImplementation(async(input,init)=>{calls.push({url:String(input),body:init?.body?JSON.parse(String(init.body)):{}});if(String(input).includes('/v2/'))throw new DOMException('timeout','TimeoutError');return Response.json({allowed:true});});await executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e));expect(calls.filter(c=>c.url.endsWith('/v2/calls'))).toHaveLength(1);expect(calls.some(c=>c.body.p_ok===false&&c.body.p_status===0)).toBe(true);});
+it('reports bridge failure to SQL cleanup without replacement call',async()=>{const a=attempt();work.session.active_call_id=a.id;spy.mockImplementation(async(input,init)=>{calls.push({url:String(input),body:init?.body?JSON.parse(String(init.body)):{}});return String(input).includes('/v2/')?new Response('',{status:422}):Response.json({allowed:true});});await executeCommand(cmd('bridge',a),e,new Database(e),new TelnyxApi(e));expect(calls.some(c=>c.body.p_ok===false&&c.body.p_status===422)).toBe(true);});
 it('blocks stale configuration before provider request',async()=>{work.session.parallel_options.fingerprint='stale';await executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e));expect(calls.some(c=>c.url.includes('/v2/'))).toBe(false);});
 it('preserves Power cleanup of both original legs',async()=>{work.session.mode='power';const a=attempt();a.telnyx_agent_call_control_id='browser';await executeCommand(cmd('hangup',a),e,new Database(e),new TelnyxApi(e));expect(calls.filter(c=>c.url.endsWith('/actions/hangup'))).toHaveLength(2);});
 it('uses one earliest deadline without repeating expired timers',()=>{const n=Date.now();expect(earliestDeadline([new Date(n-1).toISOString(),new Date(n+200).toISOString(),new Date(n+100).toISOString()],n)).toBe(n+100);expect(earliestDeadline([],n)).toBe(null);});
@@ -63,14 +63,14 @@ it('retains control-request replay protection across object eviction',async()=>{
  const second=await send();expect(second.status).toBe(409);await second.text();
 },30000);
 it('does not send a dial if final PostgreSQL authorization cancels it',async()=>{
- spy.mockImplementation(async(input:any)=>Response.json(String(input).endsWith('portive_orchestration_authorize')?{allowed:false}:null));
+ spy.mockImplementation(async(input)=>Response.json(String(input).endsWith('portive_orchestration_authorize')?{allowed:false}:null));
  await executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e));
  expect(spy.mock.calls.some(([url])=>String(url).includes('/v2/'))).toBe(false);
 });
 it('inspects configuration without preparing SQL work or calling a provider',async()=>{
  const path='/internal/inspect',body='{}';
  const r=await worker.fetch(new Request('https://worker.example'+path,{method:'POST',body,headers:await signInternal(e.DIALER_CLOUDFLARE_SECRET,path,body)}),e);
- expect(r.status).toBe(200);expect((await r.json() as any).fingerprint).toBe(await fingerprint(e));
+ expect(r.status).toBe(200);expect((await r.json() as {fingerprint:string}).fingerprint).toBe(await fingerprint(e));
  expect(calls).toHaveLength(0);
 });
 it.each(['disabled','expired','wrong-grant','unapproved-destination','missing-proof','unrestricted-enabled'])('restricted acceptance fails closed for %s',async(failure)=>{
@@ -82,7 +82,7 @@ it.each(['disabled','expired','wrong-grant','unapproved-destination','missing-pr
  if(failure==='wrong-grant')proof.id=id();
  if(failure==='unapproved-destination')proof.destinations[0].phone_number='+12125550102';
  if(failure==='unrestricted-enabled')config.DIALER_PARALLEL_ENABLED='true';
- spy.mockImplementation(async(input:any,init:any)=>{const url=String(input);calls.push({url,body:init?.body?JSON.parse(init.body):{}});return Response.json(url.endsWith('portive_orchestration_authorize')?{allowed:true,session:work.session,acceptance:failure==='missing-proof'?null:proof}:null);});
+ spy.mockImplementation(async(input,init)=>{const url=String(input);calls.push({url,body:init?.body?JSON.parse(String(init.body)):{}});return Response.json(url.endsWith('portive_orchestration_authorize')?{allowed:true,session:work.session,acceptance:failure==='missing-proof'?null:proof}:null);});
  await executeCommand(cmd('dial_lead'),config,new Database(config),new TelnyxApi(config));
  expect(calls.some(c=>c.url.includes('/v2/'))).toBe(false);
 });
@@ -92,8 +92,8 @@ it('acceptance flag alone cannot release an ordinary Parallel session',async()=>
  expect(calls.some(c=>c.url.includes('/v2/'))).toBe(false);
 });
 it.each(['destination_suppressed','outside_calling_window','invalid_timezone','session_not_dispatchable'])('denied %s dispatch never reaches Telnyx or overwrites the SQL cancellation',async(reason)=>{
- spy.mockImplementation(async(input:any,init:any)=>{
-  const url=String(input);calls.push({url,body:init?.body?JSON.parse(init.body):{}});
+ spy.mockImplementation(async(input,init)=>{
+  const url=String(input);calls.push({url,body:init?.body?JSON.parse(String(init.body)):{}});
   if(url.endsWith('portive_orchestration_authorize'))return Response.json({allowed:false,reason});
   throw Error('Unexpected request after denied authorization');
  });
@@ -133,7 +133,7 @@ it('caps the operator from the immutable remaining session deadline',async()=>{
  expect(limit).toBeGreaterThanOrEqual(570);expect(limit).toBeLessThanOrEqual(572);
 });
 it('does not start an unfunded call near the deadline even after SQL authorization',async()=>{
- work.session.parallel_options.deadlineAt=new Date(Date.now()+100000).toISOString();
+ work.session.parallel_options.deadlineAt=new Date(Date.now()+60000).toISOString();
  await executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e));expect(calls.some(c=>c.url.includes('/v2/'))).toBe(false);
 });
 it('does not reinterpret legacy sessions as funded under the new tariff',async()=>{
@@ -141,7 +141,7 @@ it('does not reinterpret legacy sessions as funded under the new tariff',async()
 });
 it('collision TTS cannot exceed its reserved text length',async()=>{
  const a=attempt();work.session.active_call_id='other';await executeCommand(cmd('failure_playback',a),{...e,DIALER_CALLER_NAME:'Company'.repeat(200)},new Database(e),new TelnyxApi(e));
- expect(calls.find(c=>c.url.endsWith('/actions/speak'))?.body.payload.length).toBeLessThanOrEqual(400);
+ expect(String(calls.find(c=>c.url.endsWith('/actions/speak'))?.body.payload).length).toBeLessThanOrEqual(400);
 });
 
 it('premium AMD dial explicitly bounds provider analysis to 5s',async()=>{
@@ -149,4 +149,18 @@ it('premium AMD dial explicitly bounds provider analysis to 5s',async()=>{
  const dial=calls.find(c=>c.url.endsWith('/v2/calls'));
  expect(dial?.body.answering_machine_detection).toBe('premium');
  expect(dial?.body.answering_machine_detection_config).toEqual({total_analysis_time_millis:5000});
+});
+
+it('near-deadline call receives a shorter hard cap without extending the session',async()=>{
+ work.session.parallel_options.deadlineAt=new Date(Date.now()+100000).toISOString();
+ await executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e));
+ const dial=calls.find(c=>c.url.endsWith('/v2/calls'));expect(dial).toBeTruthy();
+ expect(dial?.body.time_limit_secs).toBeGreaterThanOrEqual(60);expect(dial?.body.time_limit_secs).toBeLessThanOrEqual(62);
+});
+
+it('first-answer prospect dial omits AMD without changing the retained premium policy',async()=>{
+ work.session.parallel_options.answerPolicy='first_answer';
+ await executeCommand(cmd('dial_lead'),e,new Database(e),new TelnyxApi(e));
+ const dial=calls.find(c=>c.url.endsWith('/v2/calls'));expect(dial).toBeTruthy();
+ expect(dial?.body.answering_machine_detection).toBeUndefined();expect(dial?.body.answering_machine_detection_config).toBeUndefined();
 });

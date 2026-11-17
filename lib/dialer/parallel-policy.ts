@@ -8,11 +8,11 @@ export const controlledScenarios = [
 
 export type ParallelOptions = {
   ringTimeout: number; maxCallSeconds: number; batchDelaySeconds: number; attemptLimit: number;
-  sessionSeconds?: number; spendingApproved?: boolean;
+  sessionSeconds?: number; spendingApproved?: boolean; answerPolicy?: "first_answer" | "confirmed_human";
   maxSpendCents: number; autoContinue: boolean; autoRefill: false; silentRingback: boolean;
 };
 export const defaultParallelOptions: ParallelOptions = {
-  ringTimeout: 15, maxCallSeconds: 60, sessionSeconds:180, batchDelaySeconds: 2, attemptLimit: 100,
+  answerPolicy: "first_answer", ringTimeout: 15, maxCallSeconds: 60, sessionSeconds:180, batchDelaySeconds: 2, attemptLimit: 100,
   maxSpendCents: 100, autoContinue: true, autoRefill: false, silentRingback: false,
 };
 

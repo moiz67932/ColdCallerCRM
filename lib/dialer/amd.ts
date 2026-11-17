@@ -6,3 +6,8 @@ export const premiumAmd = {
   answering_machine_detection: 'premium' as const,
   answering_machine_detection_config: { total_analysis_time_millis: AMD_ANALYSIS_MS },
 };
+
+// Existing sessions without an explicit policy retain their AMD behavior.
+export function prospectAnswerOptions(options: { answerPolicy?: unknown }) {
+  return options.answerPolicy === "first_answer" ? {} : premiumAmd;
+}
