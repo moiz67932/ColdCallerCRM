@@ -23,5 +23,6 @@ export async function getBudgetConfiguration(){
  const availableChannels=confirmedCapacity(capacity);
  if(!availableChannels)blockers.push('Confirm available account-wide channels from Mission Control → Voice → Outbound Voice Profiles → Account Level Outbound Concurrent Call Limit (manual confirmation lasts four hours).');
  if(status.error)blockers.push('Apply migration 202611160003_parallel_exposure_budget.sql before funded sessions.');
- return {warnings:profile?pricingWarnings(profile):[],profile,capacity,availableChannels,heldCents:Number(status.data?.heldCents??0),blockers};
+ if(!status.error&&status.data?.queueVersion!=='202611180002')blockers.push('Apply migration 202611180002_parallel_queue_and_daily_exposure.sql before starting Parallel sessions.');
+ return {warnings:profile?pricingWarnings(profile):[],profile,capacity,availableChannels,heldCents:Number(status.data?.heldCents??0),dailyHeldCents:Number(status.data?.dailyHeldCents??status.data?.heldCents??0),blockers};
 }

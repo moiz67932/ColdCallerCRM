@@ -12,7 +12,7 @@ export type ParallelOptions = {
   maxSpendCents: number; autoContinue: boolean; autoRefill: false; silentRingback: boolean;
 };
 export const defaultParallelOptions: ParallelOptions = {
-  answerPolicy: "first_answer", ringTimeout: 15, maxCallSeconds: 60, sessionSeconds:180, batchDelaySeconds: 2, attemptLimit: 100,
+  answerPolicy: "first_answer", ringTimeout: 15, maxCallSeconds: 60, sessionSeconds:900, batchDelaySeconds: 2, attemptLimit: 100,
   maxSpendCents: 100, autoContinue: true, autoRefill: false, silentRingback: false,
 };
 

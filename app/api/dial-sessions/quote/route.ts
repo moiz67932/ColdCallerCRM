@@ -8,7 +8,7 @@ import {dailyHeadroom} from '@/lib/dialer/funding';
 import {parallelLeadFilters} from '@/lib/dialer/parallel-filters';
 import {safeDiagnostic} from '@/lib/dialer/diagnostics';
 
-const schema=z.object({listId:z.string().min(1),parallelLocation:z.string().optional(),timeZone:z.string().min(1),lines:z.coerce.number().int().min(2).max(4),maxCallSeconds:z.coerce.number().int().min(30).max(1800),sessionSeconds:z.coerce.number().int().min(60).max(3600),ringTimeout:z.coerce.number().int().min(15).max(120),maxSpendCents:z.coerce.number().int().min(1).max(100000)});
+const schema=z.object({listId:z.string().min(1),parallelLocation:z.string().optional(),timeZone:z.string().min(1),lines:z.coerce.number().int().min(2).max(4),maxCallSeconds:z.coerce.number().int().min(30).max(1800),sessionSeconds:z.coerce.number().int().min(60).max(3600),ringTimeout:z.coerce.number().int().min(15).max(120),maxSpendCents:z.coerce.number().int().min(1).max(100000),answerPolicy:z.enum(['first_answer','confirmed_human']).default('first_answer')});
 let live:{at:number;promise:ReturnType<typeof parallelReadiness>}|null=null;
 export async function GET(request:NextRequest){
  const auth=await requireApiAuth(request);if(auth)return auth;
@@ -26,11 +26,12 @@ export async function GET(request:NextRequest){
   ]);
   const blockers=[...r.blockers];if(eligibility.error)blockers.push(eligibility.error.message);if(next.error)blockers.push('Apply exposure-budget migration for next-window predictions.');
   operation='budget_quote';
-  const quote=r.budget.profile?budgetQuote(r.budget.profile,q,q.lines):null;
-  const authorizedCents=Math.max(0,Math.min(q.maxSpendCents,r.availableCreditCents-r.budget.heldCents,funding.cents-r.budget.heldCents));
-  const presets=r.budget.profile?[60,120,300].map(maxCallSeconds=>({maxCallSeconds,...budgetQuote(r.budget.profile!,{...q,maxCallSeconds,sessionSeconds:maxCallSeconds+q.ringTimeout+60},q.lines)})):[];
+  const priced=q;
+  const quote=r.budget.profile?budgetQuote(r.budget.profile,priced,q.lines):null;
+  const authorizedCents=Math.max(0,Math.min(q.maxSpendCents,r.availableCreditCents-r.budget.heldCents,funding.cents-(r.budget.dailyHeldCents??r.budget.heldCents)));
+  const presets=r.budget.profile?[60,120,300].map(maxCallSeconds=>({maxCallSeconds,...budgetQuote(r.budget.profile!,{...priced,maxCallSeconds,sessionSeconds:Math.max(q.sessionSeconds,maxCallSeconds+q.ringTimeout+60)},q.lines)})):[];
   return NextResponse.json({quote,presets,authorizedCents,shortfallCents:quote?Math.max(0,quote.requiredCents-authorizedCents):null,
-   availableCreditCents:r.availableCreditCents,dailyHeadroomCents:funding.cents,dailyUsageScope:funding.scope,
+   availableCreditCents:r.availableCreditCents,dailyHeadroomCents:funding.cents,dailyUsageScope:funding.scope,heldCreditCents:r.budget.heldCents,dailyHeldCents:r.budget.dailyHeldCents??r.budget.heldCents,
    eligibility:eligibility.data,nextWindow:next.data,billing:billing.data,
    warnings:r.budget.warnings??[],pricingMode:r.budget.profile?.pricingMode??'verified',pricingSource:r.budget.profile?.source??null,capacity:r.budget.capacity,blockers});
  }catch(e){live=null;const diagnostic=safeDiagnostic(e,Object.values(process.env));console.error(JSON.stringify({event:'parallel_quote_failed',operation,...diagnostic}));const failure=e as {retryAfterSeconds?:number;status?:number};const delay=failure.retryAfterSeconds;return NextResponse.json({error:diagnostic.message,operation,...(delay?{retryAfterSeconds:delay}:{})},{status:failure.status===429?429:503,...(delay?{headers:{'Retry-After':String(delay)}}:{})});}

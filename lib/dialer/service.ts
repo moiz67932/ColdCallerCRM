@@ -46,7 +46,16 @@ export async function sessionCommand(input: {
 }) {
   await assertOrchestrationBackend(input.sessionId);
   if (["start", "resume", "next", "continue", "skip"].includes(input.action)) await prepareOrchestration();
-  const existing = input.sessionId ? await getCurrentSession() : null;
+  // A final heartbeat/Stop can arrive after terminal reconciliation. Resolve its
+  // actual session, rather than falling through to the Power command handler.
+  const lookup = input.sessionId ? await getSupabaseAdmin().from('dial_sessions').select('*').eq('id',input.sessionId).maybeSingle() : null;
+  if(lookup?.error)throw Error(lookup.error.message);
+  const existing = lookup?.data as DialSession|null;
+  if(existing&&['stopped','completed'].includes(existing.status)){
+    if(existing.controller_id!==input.controllerId)throw Error('Session controlled by another browser');
+    if(['heartbeat','stop','operator_ready'].includes(input.action))return {session:existing,dispatch:false} as SessionCommandResult;
+    if(input.action!=='start')throw Error('This session has ended. Start a new session to continue calling.');
+  }
   if (input.mode === "parallel" || existing?.mode === "parallel") {
     if (input.action === "start" && input.acceptanceGrantId) {
       const options = await acceptanceStartOptions(input.acceptanceGrantId, input.controllerId);
@@ -68,8 +77,9 @@ export async function sessionCommand(input: {
     const quote=input.action==='start'&&readiness!.budget.profile?budgetQuote(readiness!.budget.profile,pricedOptions as unknown as Parameters<typeof budgetQuote>[1],input.maxLines??existing?.max_lines??4):null;
     if(quote&&quote.shortfallCents)throw Error(`Session requires ${quote.requiredCents} cents; increase maximum spend by ${quote.shortfallCents} cents or reduce duration/lines`);
     if(quote&&quote.requiredCents+readiness!.budget.heldCents>readiness!.availableCreditCents)throw Error(`Funded exposure requires ${quote.requiredCents} cents plus ${readiness!.budget.heldCents} cents of unsettled prior calls; available ${readiness!.availableCreditCents} cents`);
-    if(quote&&quote.requiredCents+readiness!.budget.heldCents>funding!.cents)throw Error(`Remaining provider daily headroom is ${funding!.cents} cents; funded exposure needs ${quote.requiredCents+readiness!.budget.heldCents} cents`);
-    const fundedBudget=quote?Math.min(input.options!.maxSpendCents,readiness!.availableCreditCents-readiness!.budget.heldCents,funding!.cents-readiness!.budget.heldCents):undefined;
+    const dailyHeld=readiness?.budget.dailyHeldCents??readiness?.budget.heldCents??0;
+    if(quote&&quote.requiredCents+dailyHeld>funding!.cents)throw Error(`Remaining provider daily headroom is ${funding!.cents} cents; today's funded exposure needs ${quote.requiredCents+dailyHeld} cents`);
+    const fundedBudget=quote?Math.min(input.options!.maxSpendCents,readiness!.availableCreditCents-readiness!.budget.heldCents,funding!.cents-dailyHeld):undefined;
     if(input.action==='resume'&&parallelFingerprint(existing?.parallel_options?.costProfile as Record<string,unknown>??{})!==parallelFingerprint(readiness?.budget.profile??{}))throw Error('Tariff changed; stop and reconcile before funding a new session');
     const { data, error } = await getSupabaseAdmin().rpc("portive_parallel_command", {
       p_session: input.sessionId ?? null, p_controller: input.controllerId, p_action: input.action,

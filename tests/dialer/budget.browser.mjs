@@ -17,9 +17,9 @@ try{
   else if(url.pathname==='/api/dial-sessions')result={session:null,lists:[{id:'list',name:'Colorado fixture'}],capabilities:{parallel:true,parallelBlockers:[]}};
   else if(url.pathname==='/api/dial-sessions/quote'){
    requests++;if(!opensAt)opensAt=Date.now()+1000;
-   const o=Object.fromEntries([...url.searchParams].map(([k,v])=>[k,Number(v)]));
+   const o={...Object.fromEntries([...url.searchParams].map(([k,v])=>[k,Number(v)])),answerPolicy:url.searchParams.get('answerPolicy')};
    const q=budgetQuote(profile,o,o.lines),eligible=Date.now()>=opensAt?4:0;
-   result={quote:q,presets:[],authorizedCents:100,shortfallCents:0,availableCreditCents:402,dailyHeadroomCents:200,pricingSource:'Synthetic browser fixture only',capacity:{totalChannels:10,availableChannels:10,verification:'manual',confirmedAt:new Date().toISOString(),expiresAt:new Date(Date.now()+3600000).toISOString()},blockers:[],eligibility:{eligible,reasons:eligible?{}:{outside_calling_window:4}},nextWindow:{at:new Date(opensAt).toISOString(),timeZone:'America/Denver'},billing:null};
+   result={quote:q,presets:[],authorizedCents:100,shortfallCents:0,availableCreditCents:402,dailyHeadroomCents:200,heldCreditCents:190,dailyHeldCents:66,pricingSource:'Synthetic browser fixture only',capacity:{totalChannels:10,availableChannels:10,verification:'manual',confirmedAt:new Date().toISOString(),expiresAt:new Date(Date.now()+3600000).toISOString()},blockers:[],eligibility:{eligible,reasons:eligible?{}:{outside_calling_window:4}},nextWindow:{at:new Date(opensAt).toISOString(),timeZone:'America/Denver'},billing:null};
   }else throw Error('Unexpected fixture request '+url.pathname);
   await route.fulfill({contentType:'application/json',body:JSON.stringify(result)});
  });
@@ -28,7 +28,9 @@ try{
  await panel.getByText(/Next recipient-local policy window/).waitFor();
  await panel.getByText(/Currently eligible: 4/).waitFor();assert(requests>=2,'Opening the actual allowed window must refresh eligibility automatically');
  await page.getByRole('button',{name:'5-minute conversation',exact:true}).click();
- await panel.getByText(/Maximum initial exposure:.*\$0.34/).waitFor();
+ await panel.getByText(/Maximum initial exposure:.*\$0.36/).waitFor();
+ assert.equal(await page.getByLabel('Session hard limit',{exact:true}).inputValue(),'900','Conversation presets must preserve the list session duration');
+ await panel.getByText(/Unsettled reserves: \$1.90 against credit; \$0.66 against today/).waitFor();
  assert.equal(await page.getByRole('button',{name:'Start Session',exact:true}).isDisabled(),true,'A quote never substitutes for operator readiness and list review');
  assert.deepEqual(errors,[]);assert.deepEqual(writes,[]);
  console.log('PASS: component-priced exposure, five-minute preset, recipient-local next window, automatic eligibility refresh, operator/review gates and zero mutations.');

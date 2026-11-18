@@ -18,7 +18,7 @@ export const costProfileSchema=z.object({
 export type CostProfile=z.infer<typeof costProfileSchema>;
 export const SESSION_GRACE_SECONDS=15;
 export const MAX_COLLISION_CHARACTERS=400;
-export type BudgetOptions={maxCallSeconds:number;sessionSeconds?:number;ringTimeout:number;maxSpendCents:number};
+export type BudgetOptions={maxCallSeconds:number;sessionSeconds?:number;ringTimeout:number;maxSpendCents:number;answerPolicy?:'first_answer'|'confirmed_human'};
 const cents=(micros:number)=>Math.ceil(micros/10_000);
 export function chargeMicros(seconds:number,perMinute:number,fixed:number,p:CostProfile){
   const billable=Math.max(p.minimumSeconds,Math.ceil(seconds/p.incrementSeconds)*p.incrementSeconds);
@@ -30,7 +30,7 @@ export function budgetQuote(p:CostProfile,o:BudgetOptions,lines:number){
   if(!Number.isInteger(sessionSeconds)||sessionSeconds<o.maxCallSeconds+o.ringTimeout+60||sessionSeconds>3600)throw Error('Session duration must cover ringing, conversation and 60 seconds for setup/cleanup (maximum one hour)');
   const operatorRate=p.callControlPerMinuteMicros+p.webrtcPerMinuteMicros+p.operatorSipPerMinuteMicros+p.recordingPerMinuteMicros+p.otherPerMinuteMicros;
   const prospectRate=p.sipPerMinuteMicros+p.callControlPerMinuteMicros+p.bridgePerMinuteMicros+p.recordingPerMinuteMicros+p.otherPerMinuteMicros;
-  const fixed=p.amdPerCallMicros+p.prospectFixedMicros+MAX_COLLISION_CHARACTERS*p.ttsPerCharacterMicros;
+  const fixed=(o.answerPolicy==='first_answer'?0:p.amdPerCallMicros)+p.prospectFixedMicros+MAX_COLLISION_CHARACTERS*p.ttsPerCharacterMicros;
   const operatorCents=cents(chargeMicros(sessionSeconds,operatorRate,p.operatorFixedMicros,p));
   const prospectCents=cents(chargeMicros(o.maxCallSeconds+SESSION_GRACE_SECONDS,prospectRate,fixed,p));
   const loserCents=cents(chargeMicros(Math.min(o.maxCallSeconds+SESSION_GRACE_SECONDS,30),prospectRate,fixed,p));

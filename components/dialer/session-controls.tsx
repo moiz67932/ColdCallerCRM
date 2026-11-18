@@ -214,7 +214,7 @@ export function SessionControls(props: Props) {
             <Button size="sm" variant="outline" disabled={!active || !owned || !session.active_call_id || busy || props.idle} onClick={() => void props.onEndCall()}>End Active Call</Button>
             <Button size="sm" variant="outline" disabled={!active || !owned || (session.mode === "parallel" ? session.phase !== "awaiting_disposition" : !props.idle) || busy} onClick={() => void command("skip")}>Skip Lead</Button>
           </div>
-          <p className="text-xs text-slate-500 dark:text-slate-400">One attempt per number per session · Configured attempt limit · Recipient-local calling policy applies. Use a list grouped by timezone; per-lead timeZone overrides are respected. Answered calls wait for a saved disposition or explicit skip. Pause preserves the live call.</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">Untouched leads first · A line canceled by a winner may retry once after 60 seconds · No automatic retry of answered or no-answer calls · Spending, duration and attempt limits apply. Recipient-local calling hours and per-lead timezone overrides are enforced. Answered calls wait for a saved disposition or explicit skip. Pause preserves the live call.</p>
           {mode === "parallel" && !props.ready ? <p className="text-sm text-amber-600">Connect the operator softphone and allow microphone access before starting.</p> : null}
           {!owned && active ? <p className="text-sm text-amber-600">This session is controlled by another browser. Close it there or wait for recovery.</p> : null}
         </>

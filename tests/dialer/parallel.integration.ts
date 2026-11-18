@@ -52,9 +52,9 @@ function start(extra: Record<string,unknown> = {}) {
   invoke("tick",s.id); return s.id as string;
 }
 function attempts(s: string) { return JSON.parse(sql(`select json_agg(a order by created_at,lead_id) from public.call_attempts a where dial_session_id='${s}'`) || "null"); }
-function event(s: string, id: string | null, role: string, type: string, payload: Record<string,unknown> = {}, eventId = crypto.randomUUID()) {
+function event(s: string, id: string | null, role: string, type: string, payload: Record<string,unknown> = {}, eventId = crypto.randomUUID(), at = 'now()') {
   sql(`insert into public.workstation_telnyx_webhook_events(event_id,event_type,payload_json,signature_verified) values('${eventId}','${type}','{}',true) on conflict(event_id) do nothing;
-    select public.portive_parallel_event('${s}',${id ? `'${id}'` : "null"},'${role}','${type}','${JSON.stringify(payload)}',now(),'${eventId}')`);
+    select public.portive_parallel_event('${s}',${id ? `'${id}'` : "null"},'${role}','${type}','${JSON.stringify(payload)}',${at},'${eventId}')`);
 }
 function answer(s: string, id: string, result = "human_business") {
   event(s,id,"lead","call.answered",{call_control_id:id});
@@ -88,6 +88,8 @@ test("parallel migrations apply on top of the Power schema and rerun without los
   sql(readFileSync("supabase/migrations/202611170004_usage_cache_and_operator_recovery.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611170005_parallel_first_answer.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611180001_rejected_provider_commands.sql", "utf8"));
+  sql(readFileSync("supabase/migrations/202611180002_parallel_queue_and_daily_exposure.sql", "utf8"));
+  sql(readFileSync("supabase/migrations/202611180002_parallel_queue_and_daily_exposure.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611170005_parallel_first_answer.sql", "utf8"));
 });
 test("first-answer policy selects and bridges without AMD while retaining unknown classification", () => {
@@ -183,6 +185,87 @@ test("shared usage cache grants one lease and preserves unavailable evidence on 
  assert.equal(call(other).claimed,true);sql(`select public.portive_usage_finish('${key}','${other}',7)`);
  assert.equal(call(controller).observedCents,7);
  assert.throws(()=>sql(`set role anon;select public.portive_usage_claim('${key}','${controller}',60)`),/permission denied/);
+});
+test('yesterday terminal holds reserve credit without exhausting today; open and today holds remain daily exposure',()=>{
+ setup();const old=start({answerPolicy:'first_answer'});
+ sql(`update public.call_attempts set ended_at=now()-interval '1 day',status='completed' where dial_session_id='${old}';
+ update public.dial_sessions set status='stopped',ended_at=now()-interval '1 day',operator_terminal_at=now()-interval '1 day' where id='${old}';
+ update public.dialer_cost_holds set terminal_at=date_trunc('day',now() at time zone 'UTC') at time zone 'UTC'-interval '1 second' where session_id='${old}'`);
+ const before=JSON.parse(sql(`select public.portive_budget_status()`));assert(before.heldCents>0);assert.equal(before.dailyHeldCents,0);
+ const required=Number(sql(`select public.portive_leg_cap('${JSON.stringify({...options,answerPolicy:'first_answer'})}','operator')+4*public.portive_leg_cap('${JSON.stringify({...options,answerPolicy:'first_answer'})}','prospect')`));
+ assert.throws(()=>invoke('start',null,{answerPolicy:'first_answer',dailyHeadroomCents:required+1,availableCreditCents:required}),/Available credit/);
+ const current=invoke('start',null,{answerPolicy:'first_answer',dailyHeadroomCents:required+1}).id;
+ assert(current);const now=JSON.parse(sql('select public.portive_budget_status()'));assert(now.dailyHeldCents>0);assert(now.heldCents>now.dailyHeldCents);
+ sql(`update public.dialer_cost_holds set terminal_at=null where id='${old}:operator'`);
+ assert(JSON.parse(sql('select public.portive_budget_status()')).dailyHeldCents>now.dailyHeldCents);
+});
+test('first-answer canceled retry waits, respects terminal evidence, and never retries a third time',async()=>{
+ setup();const s=start({answerPolicy:'first_answer',autoContinue:false}),a=attempts(s);
+ for(const item of a)event(s,item.id,'lead','call.initiated',{call_control_id:item.id});
+ event(s,a[0].id,'lead','call.answered');event(s,a[0].id,'lead','call.bridged');
+ for(const item of a)event(s,item.id,'lead','call.hangup',{call_control_id:item.id});
+ sql(`select public.portive_save_disposition('${a[0].id}','${a[0].lead_id}','voicemail','Test greeting',null,null);
+ update public.dial_commands set state='confirmed',completed_at=now() where session_id='${s}';`);
+ // No verified terminal event identity: the answered call and uncertain siblings cannot recycle.
+ assert.equal(sql(`select public.portive_canceled_retry_at('${s}','${a[1].lead_id}','${sql(`select phone_number from public.dial_session_targets where attempt_id='${a[1].id}'`)}') is null`),'t');
+ for(const item of a.slice(1))sql(`insert into public.workstation_telnyx_webhook_events(event_id,event_type,call_control_id,payload_json,signature_verified,processed_at) values('${crypto.randomUUID()}','call.hangup','${item.id}','{}',true,now())`);
+ invoke('continue',s);invoke('tick',s);assert.equal(attempts(s).length,4);
+ assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),'running');assert.match(sql(`select reason from public.dial_sessions where id='${s}'`),/cooldown/);
+ assert.equal(sql(`select parallel_batch from public.dial_sessions where id='${s}'`),'1');
+ assert.equal(sql(`select parallel_options->>'continueRequested' from public.dial_sessions where id='${s}'`),'true');
+ // Let the real cooldown elapse. Terminal timestamps are deliberately immutable.
+ await new Promise(resolve=>setTimeout(resolve,61000));
+ sql(`update public.dial_sessions set next_batch_at=now(),heartbeat_at=now() where id='${s}'`);
+ invoke('tick',s);const retried=attempts(s).filter((x:{id:string})=>!a.some((y:{id:string})=>y.id===x.id));assert.equal(retried.length,3);
+ assert.equal(sql(`select parallel_options->>'continueRequested' from public.dial_sessions where id='${s}'`),'false');
+ assert(!retried.some((x:{lead_id:string})=>x.lead_id===a[0].lead_id));
+ assert.equal(sql(`select count(*) from public.dial_audit_events where session_id='${s}' and event_type='canceled_line_retried'`),'3');
+ for(const item of retried)event(s,item.id,'lead','call.hangup',{call_control_id:item.id});
+ invoke('continue',s);invoke('tick',s);assert.equal(attempts(s).length,7);assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),'stopping');
+});
+test('eighteen-lead first-answer session exhausts untouched leads before bounded canceled retries',()=>{
+ setup();sql(`insert into public.leads(id,lead_list_id,phone_number,business_name,created_at)
+  select 'lead-'||n,'list','+1212555'||lpad((100+n)::text,4,'0'),'Lead '||n,now()-make_interval(secs=>n) from generate_series(5,18) n`);
+ const s=start({answerPolicy:'first_answer',sessionSeconds:1800}),seen=new Set<string>();let rounds=0;
+ while(rounds++<20){
+  const batch=attempts(s).filter((a:{ended_at:string|null})=>!a.ended_at);if(!batch.length)break;
+  for(const item of batch){
+   if(seen.size<18)assert(!seen.has(item.lead_id),'untouched leads must precede retries');
+   seen.add(item.lead_id);event(s,item.id,'lead','call.initiated',{call_control_id:item.id});
+  }
+  const winner=batch[0];event(s,winner.id,'lead','call.answered');event(s,winner.id,'lead','call.bridged');
+  for(const item of batch){event(s,item.id,'lead','call.hangup',{call_control_id:item.id},crypto.randomUUID(),item.id===winner.id?'now()':"now()-interval '61 seconds'");
+   sql(`insert into public.workstation_telnyx_webhook_events(event_id,event_type,call_control_id,payload_json,signature_verified,processed_at)
+    values('${crypto.randomUUID()}','call.hangup','${item.id}','{}',true,now())`);}
+  sql(`select public.portive_save_disposition('${winner.id}','${winner.lead_id}','voicemail','Test greeting',null,null);
+   update public.dial_commands set state='confirmed',completed_at=now() where session_id='${s}';
+   update public.dial_sessions set next_batch_at=now(),heartbeat_at=now() where id='${s}'`);
+  invoke('tick',s);
+ }
+ assert.equal(seen.size,18);assert(rounds<20);assert.match(sql(`select reason from public.dial_sessions where id='${s}'`),/queue complete/);
+ assert.equal(sql(`select max(n) from(select count(*) n from public.call_attempts where dial_session_id='${s}' group by lead_id) counts`),'2');
+ assert.equal(sql(`select count(*) from public.call_attempts a where dial_session_id='${s}' and answered_at is not null and exists(select 1 from public.call_attempts newer where newer.dial_session_id='${s}' and newer.lead_id=a.lead_id and newer.created_at>a.created_at)`),'0');
+ assert.equal(sql(`select count(*) from public.dial_commands where session_id='${s}' and action='dial_operator'`),'1');
+});
+test('eighteen-lead pass fits the approved dollar with padded rates and evidence-bounded completed calls',()=>{
+ setup();sql(`insert into public.leads(id,lead_list_id,phone_number,business_name,created_at)
+  select 'lead-'||n,'list','+1212555'||lpad((100+n)::text,4,'0'),'Lead '||n,now()-make_interval(secs=>n) from generate_series(5,18) n`);
+ const padded={...costProfile,sipPerMinuteMicros:10000,operatorSipPerMinuteMicros:3000,callControlPerMinuteMicros:3000,webrtcPerMinuteMicros:3000,recordingPerMinuteMicros:3000,bridgePerMinuteMicros:2000,otherPerMinuteMicros:3000,amdPerCallMicros:10000,ttsPerCharacterMicros:48,operatorFixedMicros:10000,prospectFixedMicros:10000};
+ sql(`update public.app_settings set value_json='${JSON.stringify(padded)}' where key='dialer_cost_profile'`);
+ const s=start({answerPolicy:'first_answer',costProfile:padded,maxSpendCents:100,sessionSeconds:900,maxCallSeconds:60,ringTimeout:15});let rounds=0;
+ while(rounds++<20){
+  const batch=attempts(s).filter((a:{ended_at:string|null})=>!a.ended_at);if(!batch.length)break;
+  assert(Number(sql(`select reserved_cost_cents from public.dial_sessions where id='${s}'`))<=100);
+  for(const item of batch){event(s,item.id,'lead','call.initiated',{call_control_id:item.id});event(s,item.id,'lead','call.hangup',{call_control_id:item.id,hangup_cause:'timeout'});
+   sql(`insert into public.workstation_telnyx_webhook_events(event_id,event_type,call_control_id,payload_json,signature_verified,processed_at)
+    values('${crypto.randomUUID()}','call.hangup','${item.id}',jsonb_build_object('data',jsonb_build_object('payload',jsonb_build_object('start_time',now()-interval '15 seconds','end_time',now()))),true,now())`);}
+  sql(`update public.dial_commands set state='confirmed',completed_at=now() where session_id='${s}';update public.dial_sessions set next_batch_at=now(),heartbeat_at=now() where id='${s}'`);
+  invoke('tick',s);
+ }
+ assert.equal(attempts(s).length,18);assert.equal(new Set(attempts(s).map((a:{lead_id:string})=>a.lead_id)).size,18);
+ assert(Number(sql(`select reserved_cost_cents from public.dial_sessions where id='${s}'`))<=100);
+ assert.equal(sql(`select bool_and(state='held') from public.dialer_cost_holds where session_id='${s}'`),'t');
+ assert.equal(sql(`select count(*) from public.dial_commands where session_id='${s}' and action='dial_operator'`),'1');
 });
 test("terminal duration reduces only excess exposure and retains an uncertain billing hold", () => {
  setup();const s=start(),a=attempts(s)[0];event(s,a.id,'lead','call.hangup',{call_control_id:a.id});

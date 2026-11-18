@@ -51,3 +51,12 @@ test('owner padded allowances fund four full failure caps within the default dol
  const p={...profile,sipPerMinuteMicros:10000,operatorSipPerMinuteMicros:3000,callControlPerMinuteMicros:3000,webrtcPerMinuteMicros:3000,recordingPerMinuteMicros:3000,bridgePerMinuteMicros:2000,otherPerMinuteMicros:3000,amdPerCallMicros:10000,ttsPerCharacterMicros:48,operatorFixedMicros:10000,prospectFixedMicros:10000};
  for(const [duration,cents]of [[60,42],[120,51],[300,80]])assert.equal(budgetQuote(p,{maxCallSeconds:duration,ringTimeout:15,maxSpendCents:100},4).requiredCents,cents);
 });
+test('first-answer funding excludes unused AMD but retains possible collision speech',()=>{
+ const options={maxCallSeconds:60,sessionSeconds:900,ringTimeout:15,maxSpendCents:100};
+ const expensiveAmd={...profile,amdPerCallMicros:100000};
+ assert.equal(budgetQuote(expensiveAmd,{...options,answerPolicy:'first_answer'},4).prospectCents,
+  budgetQuote({...expensiveAmd,amdPerCallMicros:0},options,4).prospectCents);
+ assert(budgetQuote(expensiveAmd,options,4).prospectCents>budgetQuote(expensiveAmd,{...options,answerPolicy:'first_answer'},4).prospectCents);
+ assert(budgetQuote({...expensiveAmd,ttsPerCharacterMicros:1000},{...options,answerPolicy:'first_answer'},4).prospectCents>
+  budgetQuote(expensiveAmd,{...options,answerPolicy:'first_answer'},4).prospectCents);
+});

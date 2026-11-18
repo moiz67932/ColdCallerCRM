@@ -12,24 +12,24 @@ const listId='e0a75bf6-654c-4918-a46c-c7b0b33d3acb';
 const controllerId='9fb31be0-6677-4490-b9f0-1471129f585d';
 const lead={lead_list_id:listId,location:'Greenwood_Village_Colorado'};
 
-function load(path:string,modules:Record<string,unknown>):Record<string,any>{
+function load<T>(path:string,modules:Record<string,unknown>):T{
  const code=ts.transpileModule(readFileSync(path,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
  const result={};
  new Function('require','exports',code)((name:string)=>{assert(name in modules,`Unexpected import ${name}`);return modules[name];},result);
- return result;
+ return result as T;
 }
 
-function fixture(legacy=false,wakeDown=false){
- const calls:Array<{name:string;args:Record<string,any>}>=[];
- const db={rpc:async(name:string,args:Record<string,any>)=>{
+function fixture(legacy=false,wakeDown=false,terminal=false){
+ const calls:Array<{name:string;args:Record<string,unknown>}>=[];
+ const db={rpc:async(name:string,args:Record<string,unknown>)=>{
   calls.push({name,args});
   const matches=args.p_list===lead.lead_list_id&&(args.p_location===null||args.p_location===lead.location);
   if(name==='portive_parallel_eligibility')return {data:{eligible:matches?18:0,reasons:{}}};
   if(name==='portive_parallel_command')return args.p_action==='stop'?{data:{id:'fixture-session',mode:'parallel',status:'stopping'}}:matches?{data:{id:'fixture-session',mode:'parallel',status:'running'}}:{error:{message:'Selected list/location has no leads'}};
   if(name==='portive_session_command')return {data:{session:{id:'power-session',mode:'power'},dispatch:false}};
   return {data:null};
- },from:()=>{const query:any={};for(const name of ['select','eq','in','order','limit'])query[name]=()=>query;query.maybeSingle=async()=>({data:{id:'fixture-session',mode:'parallel',status:'stopping'}});return query;}};
- const readiness={enabled:true,channels:5,blockers:[],availableCreditCents:500,dailyLimitCents:500,budget:{profile:null,heldCents:0}};
+ },from:()=>{const query:Record<string,unknown>={};for(const name of ['select','eq','in','order','limit'])query[name]=()=>query;query.maybeSingle=async()=>({data:{id:'fixture-session',mode:'parallel',status:terminal?'stopped':'stopping',controller_id:controllerId}});return query;}};
+ const readiness={enabled:true,channels:5,blockers:[],availableCreditCents:500,dailyLimitCents:500,budget:{profile:null,heldCents:0,dailyHeldCents:0}};
  const modules:Record<string,unknown>={
   '@/lib/env':{env:{DIALER_PARALLEL_ENABLED:'true',TELNYX_PUBLIC_KEY:'fixture',TELNYX_SKIP_SIGNATURE_VERIFICATION:'false'}},
   '@/lib/supabase-admin':{getSupabaseAdmin:()=>db},
@@ -41,8 +41,8 @@ function fixture(legacy=false,wakeDown=false){
   './funding':{dailyHeadroom:async()=>({cents:500})},'./acceptance':{},
   './parallel-filters':{parallelLeadFilters:legacy?(input:{listId:string;location:string})=>({p_list:input.listId,p_location:input.location??null}):parallelLeadFilters},
  };
- const service=load('lib/dialer/service.ts',modules);
- const route=load('app/api/dial-sessions/route.ts',{
+ const service=load<typeof import('../../lib/dialer/service')>('lib/dialer/service.ts',modules);
+ const route=load<typeof import('../../app/api/dial-sessions/route')>('app/api/dial-sessions/route.ts',{
   '@/lib/logger':{logInfo:()=>{}},'next/server':{NextResponse},zod:{z},
   '@/lib/api-auth':{requireApiAuth:async()=>null},
   '@/lib/dialer/service':service,
@@ -53,7 +53,7 @@ function fixture(legacy=false,wakeDown=false){
   '@/lib/dialer/parallel-readiness':modules['./parallel-readiness'],
   '@/lib/dialer/parallel-policy':{defaultParallelOptions},'@/lib/env':modules['@/lib/env'],
  });
- const quote=load('app/api/dial-sessions/quote/route.ts',{
+ const quote=load<typeof import('../../app/api/dial-sessions/quote/route')>('app/api/dial-sessions/quote/route.ts',{
   '@/lib/logger':{logInfo:()=>{}},'next/server':{NextResponse},zod:{z},
   '@/lib/api-auth':{requireApiAuth:async()=>null},
   '@/lib/supabase-admin':modules['@/lib/supabase-admin'],
@@ -62,7 +62,7 @@ function fixture(legacy=false,wakeDown=false){
   '@/lib/dialer/parallel-filters':{parallelLeadFilters},
   '@/lib/dialer/diagnostics':{safeDiagnostic},
  });
- return {calls,service,post:(location:string,parallelLocation?:string,mode='parallel')=>route.POST(new NextRequest('https://fixture.invalid/api/dial-sessions',{
+ return {calls,service,readiness,post:(location:string,parallelLocation?:string,mode='parallel')=>route.POST(new NextRequest('https://fixture.invalid/api/dial-sessions',{
   method:'POST',body:JSON.stringify({action:'start',controllerId,listId,location,parallelLocation,mode,ready:true,reviewed:true,timeZone:'America/New_York',maxLines:4,options:defaultParallelOptions}),
  })),quote:(parallelLocation?:string)=>quote.GET(new NextRequest('https://fixture.invalid/api/dial-sessions/quote?'+new URLSearchParams({listId,timeZone:'America/New_York',lines:'4',maxCallSeconds:'60',sessionSeconds:'180',ringTimeout:'15',maxSpendCents:'500',...(parallelLocation?{parallelLocation}:{})})))};
 }
@@ -107,6 +107,21 @@ test('committed Stop returns durable stopping state and recovery warning when Wo
  const f=fixture(false,true);
  const result=await f.service.sessionCommand({action:'stop',sessionId:'fixture-session',controllerId,ready:false});
  assert.equal(result.session.status,'stopping');assert.equal(result.dispatch,false);
- assert.equal(result.recoveryPending,true);assert.match(result.warning,/command saved/);
+ assert.equal(result.recoveryPending,true);assert.match(result.warning??'',/command saved/);
  assert.equal(f.calls.filter(c=>c.name==='portive_parallel_command').length,1);
+});
+test('late Stop and heartbeat after Parallel termination return terminal state without a Power fallback',async()=>{
+ const f=fixture(false,false,true);
+ for(const action of ['stop','heartbeat','operator_ready']){
+  const result=await f.service.sessionCommand({action,sessionId:'fixture-session',controllerId,ready:false});
+  assert.equal(result.session.status,'stopped');assert.equal(result.dispatch,false);
+ }
+ assert(!f.calls.some(c=>['portive_session_command','portive_parallel_command'].includes(c.name)));
+ await assert.rejects(f.service.sessionCommand({action:'continue',sessionId:'fixture-session',controllerId,ready:true}),/session has ended/);
+ await assert.rejects(f.service.sessionCommand({action:'stop',sessionId:'fixture-session',controllerId:'other',ready:false}),/another browser/);
+});
+test('quote separates prior credit holds from exposure that can consume today daily headroom',async()=>{
+ const f=fixture();f.readiness.availableCreditCents=1000;f.readiness.budget.heldCents=400;f.readiness.budget.dailyHeldCents=50;
+ const response=await f.quote();assert.equal(response.status,200);const body=await response.json();
+ assert.equal(body.authorizedCents,450);assert.equal(body.heldCreditCents,400);assert.equal(body.dailyHeldCents,50);
 });
