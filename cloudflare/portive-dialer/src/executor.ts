@@ -50,7 +50,7 @@ export async function executeCommand(command: Command, env: Env, db: Database, a
       if(!a?.telnyx_call_control_id||!s.operator_call_control_id||s.active_call_id!==a.id||a.ended_at) throw new Error('Bridge does not target the live winner');
       console.log(JSON.stringify({event:'bridge_command_sent',sessionId:s.id,attemptId:a.id,at:Date.now(),commandId:command.id}));
       providerSent=true;
-      return complete(true,await api.action(s.operator_call_control_id,'bridge',{call_control_id_to_bridge_with:a.telnyx_call_control_id,command_id:command.id,park_after_unbridge:'self',prevent_double_bridge:true}));
+      return complete(true,await api.action(s.operator_call_control_id,'bridge',{call_control_id:a.telnyx_call_control_id,command_id:command.id,park_after_unbridge:'self',prevent_double_bridge:true}));
     }
     if(command.action==='failure_playback') {
       if(a?.ended_at) return complete(true,{alreadyEnded:true});
@@ -82,6 +82,6 @@ export async function executeCommand(command: Command, env: Env, db: Database, a
   } catch(error) {
     const status=error instanceof HttpError?error.status:0;
     console.log(JSON.stringify({event:'command_failed',sessionId:s.id,commandId:command.id,action:command.action,providerSent,...safeDiagnostic(error,Object.values(env).filter((v):v is string=>typeof v==='string')),status}));
-    await complete(false,{},status);
+    await complete(false,{error:safeDiagnostic(error,Object.values(env).filter((v):v is string=>typeof v==='string'))},status);
   }
 }

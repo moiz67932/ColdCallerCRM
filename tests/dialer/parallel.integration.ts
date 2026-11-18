@@ -87,6 +87,7 @@ test("parallel migrations apply on top of the Power schema and rerun without los
   sql(readFileSync("supabase/migrations/202611170003_preserve_amd_collision_cleanup.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611170004_usage_cache_and_operator_recovery.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611170005_parallel_first_answer.sql", "utf8"));
+  sql(readFileSync("supabase/migrations/202611180001_rejected_provider_commands.sql", "utf8"));
   sql(readFileSync("supabase/migrations/202611170005_parallel_first_answer.sql", "utf8"));
 });
 test("first-answer policy selects and bridges without AMD while retaining unknown classification", () => {
@@ -476,6 +477,15 @@ test('Cloudflare bridge rejection pauses and queues provider cleanup without a r
   cloudflareComplete(bridge,false,422);assert.equal(sql(`select status from public.dial_sessions where id='${s}'`),'unsafe');
   assert.equal(sql(`select count(*) from public.dial_commands where command_key='${a[0].id}:bridge-failure' and action='hangup'`),'1');
 });
+test('rejected bridge stores provider diagnostics and settles only the request, retaining billing until terminal proof',()=>{
+ const s=cloudflareStart(),a=attempts(s);sql(`update public.dial_sessions set parallel_options=parallel_options||'{"answerPolicy":"first_answer"}' where id='${s}'`);
+ const work=cloudflareEvent(s,a[0].id,'call.answered',{call_control_id:a[0].id}),bridge=work.commands.find((c:{action:string})=>c.action==='bridge');
+ sql(`select public.portive_orchestration_complete('${bridge.id}',false,'{"error":{"code":"10004","message":"Missing call_control_id"}}',422)`);
+ assert.equal(sql(`select state from public.dial_commands where id='${bridge.id}'`),'canceled');
+ assert.equal(sql(`select response_json#>>'{error,code}' from public.dial_commands where id='${bridge.id}'`),'10004');
+ assert.equal(sql(`select ended_at is null from public.call_attempts where id='${a[0].id}'`),'t');
+ assert.equal(sql(`select state from public.dialer_cost_holds where id='${a[0].id}'`),'held');
+});
 test('Cloudflare missed terminal webhook reconciliation retains reservations and disposition safety',()=>{
   const s=cloudflareStart(),a=attempts(s);answer(s,a[0].id);event(s,a[0].id,'lead','call.bridged');
   sql(`select public.portive_orchestration_reconcile('${s}','${a[0].id}',false,'${a[0].id}')`);
@@ -683,7 +693,7 @@ test('Chromium media -> real SQL -> Worker executor preserves startup, DNC denia
     requests.push({path,body});
     if(path==='calls')return {data:{call_control_id:JSON.parse(Buffer.from(String(body.client_state),'base64').toString()).attemptId}};
     return {data:{}};
-  },async action(id:string,action:string,body:Record<string,unknown>) {return this.request(`calls/${id}/actions/${action}`,body);}};
+  },async action(id:string,action:string,body:Record<string,unknown>) {if(action==='bridge'){assert(body.call_control_id);assert(!('call_control_id_to_bridge_with' in body));}return this.request(`calls/${id}/actions/${action}`,body);}};
   const run=async(commands:unknown[])=>{for(const c of commands)await executeCommand(c,env,db,provider);};
   const browser=await chromium.launch({headless:true,args:['--autoplay-policy=no-user-gesture-required']});
   try {
