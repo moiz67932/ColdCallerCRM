@@ -23,8 +23,11 @@ Migration `202611180001_rejected_provider_commands.sql`, applied by the user, re
 - 94 PostgreSQL integration tests passed against the disposable database, including first answer, collision, rejected bridge, Stop/recovery, same-operator continuation, four fresh leads in the next automatic/manual batch, billing, shared usage cache, suppression and recipient hours.
 - 72 focused application tests and 52 Worker tests passed.
 - Application and Worker TypeScript checks, changed-file lint and production build passed.
+- Chromium UI fixtures passed actual Continue, Skip Lead and Stop clicks, the owning session/controller payload, no direct prospect hangup from Stop during a connected conversation, and disabled terminal-session controls. This is simulated provider coverage, not a live telephone call.
 - Local build used a valid Square webhook URL override for an unrelated malformed local environment value; no Square code/configuration changed.
 - Cloudflare production Worker deployed as version `0df7661a-a51e-4f7f-9250-c212ec72dabf`.
 - Vercel and Worker health checks passed. Signed Worker inspection returned the expected configuration fingerprint `9bb97e982889c2e092c2a86a34961c19171b7581bd100fdeb2b9aa013bedfe51`.
+- GitHub's Vercel status for `7c96956` reports deployment completed successfully. Direct Vercel API inspection with the local CLI credential returned HTTP 403; deployment success is attributed to the GitHub check and public health response.
+- A final production read found no nonterminal sessions. The manual capacity confirmation expired at 2026-11-17 19:14:12.586 UTC. Refresh it through the existing capacity form using actual current account headroom before a new controlled test. No unverified capacity was installed.
 
 No prospect calls were initiated. Real Telnyx bridge acceptance, browser two-way audibility, opening-word latency and a repeated live batch still require an owned/consenting controlled destination. After the first conversation, save its disposition or explicitly Skip; automatic continuation or Continue then starts the next eligible funded batch with the same operator. Start also rechecks current funding, capacity and recipient-local hours. Expired capacity confirmation must be refreshed from actual account evidence, never assumed. These checks passing must not be described as 100% live audio validation.

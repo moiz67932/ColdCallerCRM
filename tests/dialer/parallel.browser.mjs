@@ -25,7 +25,7 @@ try {
     const request=route.request(),path=new URL(request.url()).pathname;let result;
     if(path==="/api/settings") result={settings:{locations:[]},runtimeConfig:{telnyxManualDialFlow:"browser_first",telnyxWebrtcCredentialConfigured:true}};
     else if(path==="/api/dial-sessions") {
-      if(request.method()==="POST") { const data=request.postDataJSON();writes.push({path,...data}); if(data.action==="stop") session={...session,status:"stopping"};result={session,dispatch:false}; }
+      if(request.method()==="POST") { const data=request.postDataJSON();writes.push({path,...data}); if(data.action==="stop") session={...session,status:"stopping"};if(["continue","skip"].includes(data.action))session={...session,phase:"calling",active_call_id:null,parallel_batch:(session.parallel_batch??1)+1};result={session,dispatch:false}; }
       else result={session,lists:[{id:"list",name:"Controlled list"}],capabilities:{parallel:true,parallelBlockers:[]}};
     } else if(path==="/api/dial-sessions/quote") result={quote:null,presets:[],blockers:[],eligibility:{eligible:4,reasons:{}},nextWindow:null,billing:null,capacity:{availableChannels:10,totalChannels:10,confirmedAt:new Date().toISOString(),expiresAt:new Date(Date.now()+3600000).toISOString()},authorizedCents:100};
     else if(path==="/api/leads") result={leads};
@@ -53,9 +53,27 @@ try {
   await page.getByRole("button",{name:"Tomorrow morning",exact:true}).click();
   await page.getByText(/Callback reminder saved/).waitFor();
   assert(writes.some(item=>item.path==="/api/leads/lead-2/followups"&&item.callAttemptId==="attempt-2"));
+  session={...session,phase:"awaiting_disposition",operator_leg_state:"ready"};
+  attempts=attempts.map(item=>item.id==="attempt-2"?{...item,status:"completed",ended_at:new Date().toISOString()}:item);
+  await emit();
+  await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent==='Continue next batch'&&!b.disabled));
+  await page.getByRole("button",{name:"Continue next batch",exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('[role="status"]')?.textContent?.includes('calling'));
+  assert(writes.some(item=>item.action==="continue"&&item.sessionId==="parallel"&&item.controllerId===controller));
+  assert.equal(await page.getByRole("button",{name:"Continue next batch",exact:true}).isDisabled(),true);
+  session={...session,phase:"awaiting_disposition",active_call_id:"attempt-2"};await emit();
+  await page.getByRole("button",{name:"Skip Lead",exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('[role="status"]')?.textContent?.includes('calling'));
+  assert(writes.some(item=>item.action==="skip"&&item.sessionId==="parallel"));
+  session={...session,active_call_id:"attempt-2",operator_leg_state:"bridged"};
+  attempts=attempts.map(item=>item.id==="attempt-2"?{...item,status:"connected",ended_at:null}:item);await emit();
   await page.getByRole("button",{name:"Stop Session",exact:true}).click();
   assert(writes.some(item=>item.action==="stop"));
   assert(!writes.some(item=>item.path==="/api/calls/attempt-2"));
+  session={...session,status:"stopped",phase:"ready",ended_at:new Date().toISOString(),operator_leg_state:"disconnected"};await emit();
+  await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent==='Stop Session'&&b.disabled));
+  assert.equal(await page.getByRole("button",{name:"Continue next batch",exact:true}).isDisabled(),true);
+  assert.equal(await page.getByRole("button",{name:"Skip Lead",exact:true}).isDisabled(),true);
   await page.goto("/history");
   await page.getByRole("combobox").nth(0).click();
   await page.getByRole("option",{name:"Canceled After Winner"}).click();
@@ -64,5 +82,5 @@ try {
   assert.equal(await page.getByRole("link",{name:"Sunset Aesthetics"}).getAttribute("href"),"/queue?leadId=lead-0");
   assert.deepEqual(errors,[]);
   await page.screenshot({path:"/tmp/portive-parallel-cards.png",fullPage:true});
-  console.log("PASS: four SSE-fed cards; only winner connected; winner focus, notes and callback use its lead ID; Stop preserves the prospect; Canceled After Winner filter links back to its lead; zero page errors. No real telephony tested.");
+  console.log("PASS: four SSE-fed cards; winner focus, notes and callback use its lead ID; Continue and Skip send the owned session commands; continuation disables during calling; Stop requests session cleanup without directly hanging up the prospect; terminal Stop/Continue/Skip are disabled; history links to the lead; zero page errors. No real telephony tested.");
 } finally {await context.close();await browser.close();}
